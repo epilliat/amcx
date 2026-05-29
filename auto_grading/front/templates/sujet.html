@@ -663,10 +663,17 @@
           <label class="bank-radio"><input type="radio" name="bank-kind" value="text"> Texte</label>
         </div>
         <div class="bank-filter-field">
-          <label>Tags</label>
+          <label>Tags publics</label>
           <div id="bank-tags-list" class="bank-tags-list">
             <span class="bank-empty-tags">Aucun tag pour le moment.</span>
           </div>
+        </div>
+        <div class="bank-filter-field bank-filter-online-only" id="bank-filter-online" style="display:none">
+          <label class="bank-radio"><input type="checkbox" id="bank-filter-fav"> ❤ Mes favoris</label>
+          <label>Mes tags persos
+            <input type="text" id="bank-filter-mon-tag"
+                   placeholder="ex. cours-L3" autocomplete="off"></label>
+          <label class="bank-radio"><input type="checkbox" id="bank-filter-drafts"> 📝 Mes brouillons seulement</label>
         </div>
       </aside>
       <section class="bank-list-pane">
@@ -2281,24 +2288,30 @@ updateSaveBtn();
     const warn  = document.getElementById('bank-auth-warning');
     const help  = document.getElementById('bank-modal-help');
     const root  = document.getElementById('bank-root-hint');
+    const filt  = document.getElementById('bank-filter-online');
     try {
       const r = await fetch('/api/bank/auth-status');
       const s = await r.json();
+      bankMode = s.mode || 'local';
+      bankUserId = s.user_id || '';
       if (s.mode === 'online') {
         if (s.logged_in) {
           badge.textContent = '🌍 en ligne · ' + (s.email || '');
           badge.className = 'bank-mode-badge online';
           warn.style.display = 'none';
           if (root) root.textContent = 'Supabase (' + (s.email || '') + ')';
+          if (filt) filt.style.display = '';
         } else {
           badge.textContent = '🌍 en ligne · non connecté';
           badge.className = 'bank-mode-badge offline';
           warn.style.display = '';
+          if (filt) filt.style.display = 'none';
         }
       } else {
         badge.textContent = '💾 local';
         badge.className = 'bank-mode-badge local';
         warn.style.display = 'none';
+        if (filt) filt.style.display = 'none';
       }
     } catch (e) {
       badge.textContent = '';
@@ -2330,11 +2343,19 @@ updateSaveBtn();
   bankModal.querySelectorAll('input[name="bank-kind"]').forEach(el => {
     el.addEventListener('change', reloadBankList);
   });
+  // Phase B (visibles seulement en online — bank-filter-online-only)
+  document.getElementById('bank-filter-fav')?.addEventListener('change', reloadBankList);
+  document.getElementById('bank-filter-drafts')?.addEventListener('change', reloadBankList);
+  document.getElementById('bank-filter-mon-tag')?.addEventListener('input', _debounce(reloadBankList, 300));
 
   function _debounce(fn, ms) {
     let t;
     return function (...a) { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
   }
+
+  // État Phase B (online seulement)
+  let bankUserId = '';        // mon UUID Supabase (si online + connecté)
+  let bankMode   = 'local';   // 'local' ou 'online'
 
   async function reloadBankList() {
     const q = document.getElementById('bank-search').value.trim();
@@ -2344,6 +2365,13 @@ updateSaveBtn();
     if (q) params.set('q', q);
     if (kind) params.set('kind', kind);
     if (tags.length) params.set('tags', tags.join(','));
+    // Phase B filtres (online seulement, sinon ignorés côté serveur)
+    if (bankMode === 'online') {
+      if (document.getElementById('bank-filter-fav')?.checked) params.set('mes_favoris', '1');
+      const tagPerso = document.getElementById('bank-filter-mon-tag')?.value.trim() || '';
+      if (tagPerso) params.set('mon_tag', tagPerso);
+      if (document.getElementById('bank-filter-drafts')?.checked) params.set('status', 'draft');
+    }
     let r;
     try { r = await fetch('/api/bank?' + params.toString()); }
     catch (e) { renderBankList([], 'Erreur réseau : ' + e); return; }
@@ -2529,7 +2557,7 @@ updateSaveBtn();
     const tags = (q.tags || []).map(t => '<span class="bank-tag-badge">' + escapeHtml(t) + '</span>').join('');
     if (tags) host.insertAdjacentHTML('beforeend', '<div class="bank-prev-tags">' + tags + '</div>');
 
-    // Stats par projet + agrégat
+    // Stats par projet + agrégat (MES propres évals)
     const stats = (q.stats || {}).by_project || {};
     const projs = Object.keys(stats);
     if (projs.length) {
@@ -2548,14 +2576,198 @@ updateSaveBtn();
       });
       const meanAll = agg_n > 0 ? (agg_sum / agg_n) : null;
       const pctAll = meanAll != null ? (meanAll * 100).toFixed(1) + '%' : '—';
+      const label = bankMode === 'online' ? 'Mes stats' : 'Stats';
       host.insertAdjacentHTML('beforeend',
         '<details class="bank-prev-stats" open>' +
-        '<summary>📊 Stats · ' + agg_n + ' éval · taux moyen ' + pctAll +
+        '<summary>📊 ' + label + ' · ' + agg_n + ' éval · taux moyen ' + pctAll +
         ' · ' + agg_p + ' max sur ' + agg_n + '</summary>' +
         '<table class="bank-stats-table">' +
         '<thead><tr><th>Projet</th><th>n_eval</th><th>n_perfect</th><th>taux moyen</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></details>');
     }
+
+    // === Phase B (online seulement) ===========================================
+    if (bankMode !== 'online' || !bankUserId) return;
+
+    // Conteneurs : rendus en async (un fetch par section pour ne pas bloquer)
+    host.insertAdjacentHTML('beforeend',
+      '<div class="bank-prev-phaseb">' +
+        '<div class="bank-prev-rating" id="bp-rating">⏳ chargement rating…</div>' +
+        '<div class="bank-prev-perso-tags" id="bp-ptags">⏳ chargement tags persos…</div>' +
+        '<div class="bank-prev-global-stats" id="bp-global">⏳ chargement stats globales…</div>' +
+        (q.author_id === bankUserId ?
+          '<div class="bank-prev-publish" id="bp-publish"></div>' : '') +
+      '</div>');
+
+    renderRatingWidget(q.bank_id);
+    renderPersonalTagsWidget(q.bank_id);
+    renderGlobalStatsWidget(q.bank_id);
+    if (q.author_id === bankUserId) renderPublishWidget(q);
+  }
+
+  // --- Phase B widgets ----------------------------------------------------
+
+  async function renderRatingWidget(bank_id) {
+    const host = document.getElementById('bp-rating');
+    if (!host) return;
+    try {
+      const r = await fetch('/api/bank/' + encodeURIComponent(bank_id) + '/rating');
+      const j = await r.json();
+      const rt = (j && j.ok) ? j.rating : {stars: null, favorite: false, comment: ''};
+      host.innerHTML = '<div class="bp-rating-line">' +
+        '<span class="bp-rating-label">Ma note :</span>' +
+        '<span class="bp-stars" data-bank-id="' + bank_id + '">' +
+          [1,2,3,4,5].map(n =>
+            '<span class="bp-star ' + (rt.stars && n <= rt.stars ? 'on' : '') + '"' +
+            ' data-n="' + n + '" title="' + n + ' / 5">★</span>'
+          ).join('') +
+          (rt.stars ? '<button type="button" class="bp-star-clear" title="Effacer">✕</button>' : '') +
+        '</span>' +
+        '<label class="bp-fav-label">' +
+          '<input type="checkbox" class="bp-fav-cb" data-bank-id="' + bank_id + '"' +
+          (rt.favorite ? ' checked' : '') + '> ❤ Favori' +
+        '</label>' +
+        '</div>' +
+        '<textarea class="bp-comment" data-bank-id="' + bank_id + '"' +
+          ' rows="2" placeholder="Commentaire perso (visible uniquement par toi)">' +
+          escapeHtml(rt.comment || '') + '</textarea>' +
+        '<button type="button" class="btn btn-tiny bp-comment-save" data-bank-id="' + bank_id + '">' +
+          '💾 Sauver commentaire</button>' +
+        '<span class="bp-rating-status" id="bp-rating-status"></span>';
+      // Listeners
+      host.querySelectorAll('.bp-star').forEach(el => {
+        el.addEventListener('click', async () => {
+          const n = parseInt(el.dataset.n, 10);
+          await postRating(bank_id, {stars: n});
+          renderRatingWidget(bank_id);
+        });
+      });
+      const clearBtn = host.querySelector('.bp-star-clear');
+      if (clearBtn) clearBtn.addEventListener('click', async () => {
+        await fetch('/api/bank/' + encodeURIComponent(bank_id) + '/rating', {method: 'DELETE'});
+        renderRatingWidget(bank_id);
+        renderGlobalStatsWidget(bank_id);
+      });
+      host.querySelector('.bp-fav-cb').addEventListener('change', async (e) => {
+        await postRating(bank_id, {favorite: e.target.checked});
+        renderGlobalStatsWidget(bank_id);
+      });
+      host.querySelector('.bp-comment-save').addEventListener('click', async () => {
+        const txt = host.querySelector('.bp-comment').value;
+        await postRating(bank_id, {comment: txt});
+        host.querySelector('#bp-rating-status').textContent = '✓ enregistré';
+        setTimeout(() => { const s = host.querySelector('#bp-rating-status'); if (s) s.textContent = ''; }, 1500);
+      });
+    } catch (e) { host.textContent = '✘ rating indisponible'; }
+  }
+
+  async function postRating(bank_id, body) {
+    return fetch('/api/bank/' + encodeURIComponent(bank_id) + '/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function renderPersonalTagsWidget(bank_id) {
+    const host = document.getElementById('bp-ptags');
+    if (!host) return;
+    try {
+      const r = await fetch('/api/bank/' + encodeURIComponent(bank_id) + '/personal-tags');
+      const j = await r.json();
+      const tags = (j && j.ok) ? (j.tags || []) : [];
+      host.innerHTML = '<div class="bp-ptags-line">' +
+        '<span class="bp-ptags-label">Mes tags persos :</span>' +
+        tags.map(t =>
+          '<span class="bank-tag-badge bank-tag-perso" data-tag="' + escapeHtml(t) + '">' +
+            escapeHtml(t) + ' <button type="button" class="bp-ptag-x" data-tag="' +
+            escapeHtml(t) + '" title="Retirer">×</button></span>'
+        ).join('') +
+        '<input type="text" class="bp-ptag-input" placeholder="+ tag perso… (Entrée)">' +
+        '</div>';
+      host.querySelectorAll('.bp-ptag-x').forEach(b => {
+        b.addEventListener('click', async () => {
+          const t = b.dataset.tag;
+          const newTags = tags.filter(x => x !== t);
+          await postPersonalTags(bank_id, newTags);
+          renderPersonalTagsWidget(bank_id);
+        });
+      });
+      const input = host.querySelector('.bp-ptag-input');
+      input.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const v = input.value.trim();
+        if (!v || tags.includes(v)) { input.value = ''; return; }
+        const newTags = [...tags, v];
+        await postPersonalTags(bank_id, newTags);
+        renderPersonalTagsWidget(bank_id);
+      });
+    } catch (e) { host.textContent = '✘ tags persos indisponibles'; }
+  }
+
+  async function postPersonalTags(bank_id, tags) {
+    return fetch('/api/bank/' + encodeURIComponent(bank_id) + '/personal-tags', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tags})
+    });
+  }
+
+  async function renderGlobalStatsWidget(bank_id) {
+    const host = document.getElementById('bp-global');
+    if (!host) return;
+    try {
+      const r = await fetch('/api/bank/' + encodeURIComponent(bank_id) + '/global-stats');
+      const j = await r.json();
+      const s = (j && j.ok) ? j.stats : {};
+      const stars = s.avg_stars != null ? s.avg_stars.toFixed(1) : '—';
+      const pct   = s.avg_normalized != null ? (s.avg_normalized * 100).toFixed(1) + '%' : '—';
+      host.innerHTML =
+        '<div class="bp-global-card">' +
+        '<span title="Note moyenne communauté">⭐ ' + stars +
+          ' <small>(' + (s.n_ratings || 0) + ')</small></span>' +
+        '<span title="Mise en favori par">❤ ' + (s.n_favorites || 0) + '</span>' +
+        '<span title="Utilisée par">👥 ' + (s.n_users || 0) + ' prof(s)</span>' +
+        '<span title="Total évaluations communauté">📊 ' + (s.total_n_eval || 0) +
+          ' éval (taux moyen ' + pct + ')</span>' +
+        '</div>';
+    } catch (e) { host.textContent = ''; }
+  }
+
+  function renderPublishWidget(q) {
+    const host = document.getElementById('bp-publish');
+    if (!host) return;
+    const status = q.status || 'draft';
+    const next   = status === 'public' ? 'draft' : 'public';
+    const label  = status === 'public'
+      ? '🔒 Dépublier (repasser en draft)'
+      : '🌍 Publier (rendre visible par tous)';
+    host.innerHTML =
+      '<div class="bp-publish-line">' +
+      '<span class="bp-publish-badge bp-status-' + status + '">' + status + '</span>' +
+      '<span class="bp-version">v' + (q.version || 1) + '</span>' +
+      '<button type="button" class="btn btn-small bp-toggle-publish">' + label + '</button>' +
+      '<button type="button" class="btn btn-small bp-delete-question" title="Supprimer définitivement">🗑 Supprimer</button>' +
+      '</div>';
+    host.querySelector('.bp-toggle-publish').addEventListener('click', async () => {
+      const r = await fetch('/api/bank/' + encodeURIComponent(q.bank_id) + '/status', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: next})
+      });
+      if (r.ok) {
+        q.status = next;
+        delete previewCache[q.bank_id];
+        const fresh = await (await fetch('/api/bank/' + encodeURIComponent(q.bank_id))).json();
+        previewCache[q.bank_id] = fresh.question;
+        renderBankPreview(fresh.question);
+        reloadBankList();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        alert('Échec : ' + (j.error || 'erreur'));
+      }
+    });
+    host.querySelector('.bp-delete-question').addEventListener('click', () => {
+      deleteFromBank(q.bank_id, q.title);
+    });
   }
 
   function mdToHtmlSafe(md) {

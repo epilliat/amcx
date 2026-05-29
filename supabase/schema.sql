@@ -157,46 +157,78 @@ create policy "question_evals user own" on question_evals for all
   with check (user_id = auth.uid());
 
 -- ============================================================================
--- Phase B (à activer plus tard) — ratings, favoris, tags persos, vue agrégée
+-- Phase B — ratings, favoris, commentaires, tags persos, stats agrégées
 -- ============================================================================
---
--- create table if not exists question_ratings (
---   question_id  uuid references bank_questions(id) on delete cascade,
---   user_id      uuid references profiles(user_id)  on delete cascade,
---   stars        int check (stars between 1 and 5),
---   favorite     bool default false,
---   comment      text,
---   created_at   timestamptz default now(),
---   modified_at  timestamptz default now(),
---   primary key (question_id, user_id)
--- );
--- alter table question_ratings enable row level security;
--- create policy "ratings lecture publique" on question_ratings for select using (true);
--- create policy "ratings user own insert"  on question_ratings for insert with check (user_id = auth.uid());
--- create policy "ratings user own update"  on question_ratings for update using (user_id = auth.uid());
--- create policy "ratings user own delete"  on question_ratings for delete using (user_id = auth.uid());
---
--- create table if not exists question_personal_tags (
---   question_id uuid references bank_questions(id) on delete cascade,
---   user_id     uuid references profiles(user_id)  on delete cascade,
---   tags        text[] not null default '{}',
---   primary key (question_id, user_id)
--- );
--- alter table question_personal_tags enable row level security;
--- create policy "perso tags user own" on question_personal_tags for all
---   using (user_id = auth.uid()) with check (user_id = auth.uid());
---
--- create materialized view question_stats_global as
--- select q.id as question_id,
---        count(distinct e.user_id) as n_users,
---        count(distinct e.project_name) as n_projects,
---        coalesce(sum(e.n_eval), 0) as total_n_eval,
---        coalesce(sum(e.n_perfect), 0) as total_n_perfect,
---        case when sum(e.n_eval) > 0 then sum(e.sum_normalized)/sum(e.n_eval) else null end as avg_normalized,
---        avg(r.stars) as avg_stars,
---        count(distinct r.user_id) filter (where r.favorite) as n_favorites
--- from bank_questions q
--- left join question_evals e   on e.question_id = q.id
--- left join question_ratings r on r.question_id = q.id
--- group by q.id;
--- create unique index on question_stats_global (question_id);
+
+-- 5) Ratings : 1 ligne par (question, user). Stars + favori + commentaire.
+create table if not exists question_ratings (
+  question_id  uuid references bank_questions(id) on delete cascade,
+  user_id      uuid references profiles(user_id)  on delete cascade,
+  stars        int check (stars between 1 and 5),
+  favorite     bool not null default false,
+  comment      text,
+  created_at   timestamptz default now(),
+  modified_at  timestamptz default now(),
+  primary key (question_id, user_id)
+);
+create index if not exists question_ratings_question_idx on question_ratings (question_id);
+create index if not exists question_ratings_user_idx     on question_ratings (user_id);
+create index if not exists question_ratings_favorite_idx on question_ratings (user_id) where favorite;
+
+drop trigger if exists question_ratings_touch on question_ratings;
+create trigger question_ratings_touch
+  before update on question_ratings
+  for each row execute function touch_modified_at();
+
+alter table question_ratings enable row level security;
+-- TOUT le monde lit les ratings (pour aggréger avg_stars + n_favorites côté client)
+drop policy if exists "ratings lecture publique" on question_ratings;
+create policy "ratings lecture publique" on question_ratings for select using (true);
+drop policy if exists "ratings user own insert" on question_ratings;
+create policy "ratings user own insert" on question_ratings for insert with check (user_id = auth.uid());
+drop policy if exists "ratings user own update" on question_ratings;
+create policy "ratings user own update" on question_ratings for update using (user_id = auth.uid());
+drop policy if exists "ratings user own delete" on question_ratings;
+create policy "ratings user own delete" on question_ratings for delete using (user_id = auth.uid());
+
+-- 6) Tags personnels : 1 ligne par (question, user). En plus des tags publics.
+create table if not exists question_personal_tags (
+  question_id uuid references bank_questions(id) on delete cascade,
+  user_id     uuid references profiles(user_id)  on delete cascade,
+  tags        text[] not null default '{}',
+  primary key (question_id, user_id)
+);
+create index if not exists question_personal_tags_user_idx on question_personal_tags (user_id);
+create index if not exists question_personal_tags_tags_idx on question_personal_tags using gin (tags);
+
+alter table question_personal_tags enable row level security;
+drop policy if exists "perso tags user own" on question_personal_tags;
+create policy "perso tags user own" on question_personal_tags for all
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- 7) Fonction RPC SECURITY DEFINER : retourne les stats globales d'une question.
+-- Nécessaire car question_evals est RLS-isolé per-user → un user normal ne peut
+-- pas voir les évals des autres pour aggréger n_users/n_projects/total_n_eval.
+-- La fonction tourne avec les privilèges du créateur (rôle owner du schéma) →
+-- bypass RLS. Ne retourne que des agrégats anonymes (pas de fuite d'identité).
+create or replace function get_question_eval_stats(qid uuid)
+returns table (
+  n_users         int,
+  n_projects      int,
+  total_n_eval    int,
+  total_n_perfect int,
+  avg_normalized  float
+)
+language sql security definer set search_path = public as $$
+  select
+    count(distinct user_id)::int                                            as n_users,
+    count(distinct (user_id::text || '|' || project_name))::int             as n_projects,
+    coalesce(sum(n_eval), 0)::int                                            as total_n_eval,
+    coalesce(sum(n_perfect), 0)::int                                         as total_n_perfect,
+    case when sum(n_eval) > 0 then sum(sum_normalized)/sum(n_eval) else null end as avg_normalized
+  from question_evals
+  where question_id = qid;
+$$;
+
+-- Permettre l'appel depuis PostgREST par tout user authentifié.
+grant execute on function get_question_eval_stats(uuid) to authenticated, anon;

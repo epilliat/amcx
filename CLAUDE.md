@@ -677,6 +677,63 @@ et patche `data._bank_id` des blocs concernés. Idempotent.
 **Free tier Supabase** : 500 Mo DB + 2 Go egress/mois + 50k MAU. Couvre
 largement <1000 profs. Self-hostable plus tard (`supabase start` local).
 
+### Phase B — ratings, favoris, tags persos, stats agrégées (livré)
+
+3 nouvelles tables activées dans [supabase/schema.sql](supabase/schema.sql) :
+- **`question_ratings`** : `(question_id, user_id)` PK, `stars 1-5`, `favorite
+  bool`, `comment text`. RLS : tous lisent (pour agréger), seul l'auteur du
+  rating écrit.
+- **`question_personal_tags`** : `(question_id, user_id)` PK, `tags text[]`.
+  RLS : strictement perso (lecture + écriture par soi seul).
+- **`get_question_eval_stats(qid)`** : fonction RPC `SECURITY DEFINER` qui
+  bypass RLS sur `question_evals` pour retourner des agrégats anonymes
+  (n_users, n_projects, total_n_eval, avg_normalized). Sans elle, un user
+  normal ne pourrait pas compter combien de profs ont utilisé une question.
+
+**Nouvelles fonctions** dans [bank_online.py](auto_grading/bank_online.py) :
+- `get_my_rating(bank_id)` / `rate(bank_id, stars?, favorite?, comment?)` /
+  `delete_my_rating(bank_id)` — upsert via `Prefer: resolution=merge-duplicates`.
+- `get_my_personal_tags(bank_id)` / `set_personal_tags(bank_id, tags)`.
+- `get_global_stats(bank_id)` — combine RPC + agrégation client-side des
+  `question_ratings` (avg_stars + n_favorites + n_ratings).
+- `set_status(bank_id, status)` — toggle draft ↔ public (auteur seul via RLS).
+- `update_question_content(bank_id, data, title?, tags?, bump_version=True)`
+  — PATCH d'une question existante (incrémente `version`).
+
+**Nouveaux filtres** dans `list_questions(filters)` :
+- `mes_favoris=True` → pré-fetch mes question_ids favoris puis restrict
+- `mon_tag='cours-L3'` → pré-fetch mes question_ids avec ce tag perso
+- `status='draft'` → ne voir que mes brouillons (via RLS naturel)
+
+**Nouvelles routes serveur** (online only, retournent 400 en local) :
+- `GET/POST/DELETE /api/bank/<id>/rating`
+- `GET/POST /api/bank/<id>/personal-tags`
+- `GET /api/bank/<id>/global-stats`
+- `POST /api/bank/<id>/status` (toggle draft/public/archived)
+- `POST /api/bank/<id>/update-from-block` `{bid, title?, tags?}` — push les
+  modifs d'un bloc local vers la version banque (bump version)
+
+**UI — modale Banque enrichie** :
+- Sidebar filtres : ❤ Mes favoris, "Mes tags persos" (input), 📝 Mes brouillons
+  (visibles seulement en online + logged)
+- Panneau preview :
+  - Widget rating (5 étoiles cliquables + clear)
+  - Toggle ❤ Favori
+  - Textarea commentaire perso + bouton Sauver
+  - Chips tags persos (ajout/suppression inline)
+  - Card stats globales : ⭐ moyenne + N notes · ❤ K favoris · 👥 X profs · 📊 N évals
+  - Si je suis l'auteur : badge status + version + bouton Publier/Dépublier
+    + bouton Supprimer
+
+**Limitations connues** :
+- Pas de page profil publique (cliquer sur un nom d'auteur n'affiche pas ses
+  autres questions)
+- Pas de bouton "Mettre à jour cette question dans la banque" depuis le
+  toolbar des blocs du sujet (l'API `/api/bank/<id>/update-from-block` existe
+  mais l'UI n'est pas câblée)
+- Filtre "stars ≥ N" : on filtre uniquement sur la moyenne globale (pas
+  implémenté ; demande RPC additionnelle)
+
 ## Édition IA assistée (Sonnet/Opus, 1 appel par modif)
 
 Bouton **🤖** dans la toolbar de chaque bloc QCM (canonique seul) → modale

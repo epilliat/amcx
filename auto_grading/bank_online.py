@@ -218,8 +218,14 @@ def delete(bank_id: str) -> None:
 def list_questions(filters: dict | None = None) -> list[dict]:
     """Liste les questions visibles (status='public' + les miennes).
 
-    Filtres : `q`, `kind`, `tags` (list), `author` (substring sur display_name
-    via une jointure profiles — pour MVP on filtre côté client).
+    Filtres :
+    - `q`           : substring case-insensitive sur title
+    - `kind`        : type exact
+    - `tags`        : list[str] - tags publics, overlap (au moins 1 commun)
+    - `mes_favoris` : True → restreint à mes favoris (question_ratings)
+    - `mon_tag`     : str → restreint à mes tags persos (question_personal_tags)
+    - `status`      : ex 'draft' pour ne voir que mes brouillons (sinon défaut
+                     = public + mes draft, géré par RLS)
     """
     filters = filters or {}
     params = {
@@ -230,13 +236,37 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     if filters.get("kind"):
         params["kind"] = f"eq.{filters['kind']}"
     if filters.get("tags"):
-        # PostgREST array overlap : tags=ov.{t1,t2,...}
         tags_quoted = ",".join(f'"{t}"' for t in filters["tags"] if t)
         params["tags"] = f"ov.{{{tags_quoted}}}"
     if filters.get("q"):
-        q = filters["q"].strip()
-        # ilike (case-insensitive substring) sur title
-        params["title"] = f"ilike.*{q}*"
+        params["title"] = f"ilike.*{filters['q'].strip()}*"
+    if filters.get("status"):
+        params["status"] = f"eq.{filters['status']}"
+
+    # Filtres user-spécifiques : pré-fetch IDs via question_ratings/personal_tags
+    restrict_ids: set[str] | None = None
+    if filters.get("mes_favoris"):
+        favs = _request("GET", "/rest/v1/question_ratings", params={
+            "select":   "question_id",
+            "user_id":  f"eq.{current_user_id()}",
+            "favorite": "eq.true",
+        }) or []
+        restrict_ids = {f["question_id"] for f in favs}
+    if filters.get("mon_tag"):
+        tag = filters["mon_tag"].strip()
+        ptags = _request("GET", "/rest/v1/question_personal_tags", params={
+            "select":  "question_id",
+            "user_id": f"eq.{current_user_id()}",
+            "tags":    f'cs.{{"{tag}"}}',  # contains
+        }) or []
+        ids = {p["question_id"] for p in ptags}
+        restrict_ids = ids if restrict_ids is None else (restrict_ids & ids)
+
+    if restrict_ids is not None:
+        if not restrict_ids:
+            return []  # filtre exclusif sans match
+        ids_quoted = ",".join(f'"{i}"' for i in restrict_ids)
+        params["id"] = f"in.({ids_quoted})"
 
     rows = _request("GET", "/rest/v1/bank_questions", params=params) or []
 
@@ -386,3 +416,183 @@ def update_my_profile(updates: dict) -> dict:
                     body=payload,
                     extra_headers={"Prefer": "return=representation"})
     return (rows or [{}])[0]
+
+
+# --------------------------------------------------------------------------
+# Phase B — Ratings, favoris, commentaires, tags persos, stats agrégées
+# --------------------------------------------------------------------------
+
+def get_my_rating(bank_id: str) -> dict:
+    """Retourne mon rating sur 1 question : `{stars, favorite, comment}`,
+    ou `{stars: None, favorite: False, comment: None}` si absent."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    rows = _request("GET", "/rest/v1/question_ratings", params={
+        "select":      "*",
+        "question_id": f"eq.{bank_id}",
+        "user_id":     f"eq.{uid}",
+    }) or []
+    if rows:
+        r = rows[0]
+        return {
+            "stars":    r.get("stars"),
+            "favorite": bool(r.get("favorite", False)),
+            "comment":  r.get("comment") or "",
+        }
+    return {"stars": None, "favorite": False, "comment": ""}
+
+
+def rate(bank_id: str, *, stars: int | None = None,
+         favorite: bool | None = None, comment: str | None = None) -> dict:
+    """Upsert mon rating. Tous les params sont optionnels — seuls ceux fournis
+    sont mis à jour (mais le upsert PostgREST nécessite tous les champs requis
+    de la PK : on récupère donc d'abord l'existant, on fusionne, on upsert).
+    """
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    if stars is not None and not (1 <= int(stars) <= 5):
+        raise ValueError("stars doit être entre 1 et 5")
+
+    existing = get_my_rating(bank_id)
+    payload = {
+        "question_id": bank_id,
+        "user_id":     uid,
+        "stars":       int(stars) if stars is not None else existing["stars"],
+        "favorite":    bool(favorite) if favorite is not None else existing["favorite"],
+        "comment":     comment if comment is not None else existing["comment"],
+    }
+    _request("POST", "/rest/v1/question_ratings", body=payload,
+             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
+    return {
+        "stars":    payload["stars"],
+        "favorite": payload["favorite"],
+        "comment":  payload["comment"] or "",
+    }
+
+
+def delete_my_rating(bank_id: str) -> None:
+    """Supprime mon rating (rare ; sert si l'user veut effacer son commentaire)."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    _request("DELETE", "/rest/v1/question_ratings", params={
+        "question_id": f"eq.{bank_id}",
+        "user_id":     f"eq.{uid}",
+    })
+
+
+def get_my_personal_tags(bank_id: str) -> list[str]:
+    """Mes tags persos sur 1 question (en plus des tags publics)."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    rows = _request("GET", "/rest/v1/question_personal_tags", params={
+        "select":      "tags",
+        "question_id": f"eq.{bank_id}",
+        "user_id":     f"eq.{uid}",
+    }) or []
+    return list((rows[0] or {}).get("tags") or []) if rows else []
+
+
+def set_personal_tags(bank_id: str, tags: list[str]) -> list[str]:
+    """Remplace mes tags persos. Vide la ligne si tags == []."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    clean = [t.strip() for t in (tags or []) if t and t.strip()]
+    if not clean:
+        # Supprime carrément la ligne pour ne pas garder des '{}' inutiles
+        _request("DELETE", "/rest/v1/question_personal_tags", params={
+            "question_id": f"eq.{bank_id}",
+            "user_id":     f"eq.{uid}",
+        })
+        return []
+    payload = {"question_id": bank_id, "user_id": uid, "tags": clean}
+    _request("POST", "/rest/v1/question_personal_tags", body=payload,
+             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"})
+    return clean
+
+
+def get_global_stats(bank_id: str) -> dict:
+    """Stats agrégées d'une question à travers tous les users.
+
+    - n_users / n_projects / total_n_eval / total_n_perfect / avg_normalized
+      via la fonction RPC `get_question_eval_stats` (SECURITY DEFINER, bypass
+      RLS sur question_evals pour ne retourner que des agrégats anonymes).
+    - avg_stars + n_favorites + n_ratings : agrégation côté client depuis
+      question_ratings (lecture publique).
+    """
+    # Eval stats via RPC
+    try:
+        rpc = _request("POST", "/rest/v1/rpc/get_question_eval_stats",
+                       body={"qid": bank_id}) or []
+        eval_stats = rpc[0] if rpc else {}
+    except BankNetworkError:
+        eval_stats = {}
+
+    # Ratings stats : agrège côté client
+    rt = _request("GET", "/rest/v1/question_ratings", params={
+        "select":      "stars,favorite",
+        "question_id": f"eq.{bank_id}",
+    }) or []
+    stars_vals = [int(r["stars"]) for r in rt if r.get("stars") is not None]
+    n_favorites = sum(1 for r in rt if r.get("favorite"))
+
+    return {
+        "n_users":         int(eval_stats.get("n_users") or 0),
+        "n_projects":      int(eval_stats.get("n_projects") or 0),
+        "total_n_eval":    int(eval_stats.get("total_n_eval") or 0),
+        "total_n_perfect": int(eval_stats.get("total_n_perfect") or 0),
+        "avg_normalized":  eval_stats.get("avg_normalized"),
+        "avg_stars":       (sum(stars_vals) / len(stars_vals)) if stars_vals else None,
+        "n_ratings":       len(stars_vals),
+        "n_favorites":     n_favorites,
+    }
+
+
+# --------------------------------------------------------------------------
+# Publication (draft ↔ public) + édition d'une question existante
+# --------------------------------------------------------------------------
+
+def set_status(bank_id: str, status: str) -> dict:
+    """Change le `status` d'une question (RLS : auteur seul peut)."""
+    if status not in ("draft", "public", "archived"):
+        raise ValueError(f"status invalide : {status}")
+    rows = _request("PATCH", f"/rest/v1/bank_questions?id=eq.{bank_id}",
+                    body={"status": status},
+                    extra_headers={"Prefer": "return=representation"})
+    if not rows:
+        raise BankNotFoundError(bank_id)
+    return _normalize_question(rows[0])
+
+
+def update_question_content(bank_id: str, data: dict, *,
+                             title: str | None = None,
+                             tags: list[str] | None = None,
+                             bump_version: bool = True) -> dict:
+    """Met à jour le contenu d'une question existante (data + title + tags).
+
+    Utilisé par l'UI "↻ Mettre à jour dans la banque" : l'auteur édite la
+    question dans un sujet, puis pousse les changements vers la version
+    publiée. `bump_version` incrémente le compteur (audit léger).
+    """
+    payload: dict = {"data": data}
+    if title is not None:
+        payload["title"] = title.strip()
+    if tags is not None:
+        payload["tags"] = [t.strip() for t in tags if t and t.strip()]
+    if bump_version:
+        # PATCH avec arithmétique : pas supporté par PostgREST direct. On
+        # lit l'actuelle puis +1.
+        cur = _request("GET", "/rest/v1/bank_questions", params={
+            "select": "version", "id": f"eq.{bank_id}"}) or []
+        if cur:
+            payload["version"] = int(cur[0].get("version", 1)) + 1
+    rows = _request("PATCH", f"/rest/v1/bank_questions?id=eq.{bank_id}",
+                    body=payload,
+                    extra_headers={"Prefer": "return=representation"})
+    if not rows:
+        raise BankNotFoundError(bank_id)
+    return _normalize_question(rows[0])

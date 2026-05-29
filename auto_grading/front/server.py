@@ -2316,6 +2316,10 @@ def api_bank_list():
         "q":      args.get("q", ""),
         "tags":   tags,
         "author": args.get("author", ""),
+        # Phase B (online only — ignored by bank.py local)
+        "mes_favoris": args.get("mes_favoris") in ("1", "true", "yes"),
+        "mon_tag":     args.get("mon_tag", ""),
+        "status":      args.get("status", ""),
     }
     try:
         b = _bank()
@@ -2570,6 +2574,130 @@ def api_bank_profile():
     except bank_online.BankAuthError as e:
         return jsonify({"error": str(e), "auth_required": True}), 401
     except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# --------------------------------------------------------------------------
+# Phase B — ratings, favoris, tags persos, stats agrégées, publication
+# Toutes ces routes ne sont utilisables qu'en mode online. En local, retournent
+# 400 avec un message clair (la banque locale n'a pas de ratings).
+# --------------------------------------------------------------------------
+
+def _require_online() -> None:
+    if load_config().get("bank_mode") != "online":
+        raise RuntimeError("Cette fonctionnalité nécessite le mode 'En ligne' "
+                           "(Réglages → Banque).")
+
+
+@app.route("/api/bank/<bank_id>/rating", methods=["GET", "POST", "DELETE"])
+def api_bank_rating(bank_id):
+    """GET → mon rating ; POST {stars?, favorite?, comment?} → upsert ;
+    DELETE → supprime mon rating."""
+    try:
+        _require_online()
+        if request.method == "POST":
+            body = _json_body()
+            r = bank_online.rate(bank_id,
+                                  stars=body.get("stars"),
+                                  favorite=body.get("favorite"),
+                                  comment=body.get("comment"))
+        elif request.method == "DELETE":
+            bank_online.delete_my_rating(bank_id)
+            r = {"stars": None, "favorite": False, "comment": ""}
+        else:
+            r = bank_online.get_my_rating(bank_id)
+        return jsonify({"ok": True, "rating": r})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bank/<bank_id>/personal-tags", methods=["GET", "POST"])
+def api_bank_personal_tags(bank_id):
+    """GET → mes tags persos ; POST {tags: [str]} → remplace."""
+    try:
+        _require_online()
+        if request.method == "POST":
+            body = _json_body()
+            t = bank_online.set_personal_tags(bank_id, body.get("tags") or [])
+        else:
+            t = bank_online.get_my_personal_tags(bank_id)
+        return jsonify({"ok": True, "tags": t})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bank/<bank_id>/global-stats")
+def api_bank_global_stats(bank_id):
+    """Stats agrégées d'une question à travers tous les users (RPC + ratings)."""
+    try:
+        _require_online()
+        return jsonify({"ok": True, "stats": bank_online.get_global_stats(bank_id)})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bank/<bank_id>/status", methods=["POST"])
+def api_bank_set_status(bank_id):
+    """Toggle status (auteur seul, RLS). Body: {status: 'draft'|'public'|'archived'}."""
+    try:
+        _require_online()
+        body = _json_body()
+        q = bank_online.set_status(bank_id, body.get("status", ""))
+        return jsonify({"ok": True, "question": q})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except (ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bank/<bank_id>/update-from-block", methods=["POST"])
+def api_bank_update_from_block(bank_id):
+    """Met à jour une question existante depuis un bloc du sujet courant
+    (typiquement après une édition locale). Body : {bid, title?, tags?}.
+    L'UI propose ce bouton sur les blocs dont data._bank_id == bank_id."""
+    try:
+        _require_online()
+        body = _json_body()
+        target_bid = (body.get("bid") or "").strip()
+        if not target_bid:
+            return jsonify({"error": "bid manquant"}), 400
+        sub = parse_subject()
+        block = next((b for b in sub["blocks"] if b.bid == target_bid), None)
+        if block is None:
+            return jsonify({"error": f"bloc introuvable : {target_bid}"}), 404
+        # Strip _bank_id du data avant de pousser (sinon on ré-écrirait l'origine).
+        clean_data = {k: v for k, v in (block.data or {}).items() if k != "_bank_id"}
+        q = bank_online.update_question_content(
+            bank_id, clean_data,
+            title=body.get("title"),
+            tags=body.get("tags"),
+        )
+        return jsonify({"ok": True, "bank_id": q["bank_id"], "version": q.get("version")})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except KeyError as e:
+        return jsonify({"error": f"question inconnue : {bank_id}"}), 404
+    except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
