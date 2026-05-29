@@ -2693,6 +2693,29 @@ img.case.correct + .case-label { font-weight: bold; }
   display: flex; align-items: center;
   gap: 10px;
 }
+
+/* Banque (réutilise le style ai-settings) */
+.bank-settings { border-top: 1px solid #ecedef; margin: 6px 16px 8px; padding: 4px 0; font-size: 12px; }
+.bank-settings > summary { cursor: pointer; color: #555; padding: 4px 0; user-select: none; }
+.bank-settings[open] > summary { color: #2769d8; }
+.bank-settings-body { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; padding-left: 8px; }
+.bank-mode-row { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.bank-mode-row .small { color: #888; font-size: 11px; }
+.bank-online-cfg { display: flex; flex-direction: column; gap: 8px; margin-left: 18px; padding: 8px 10px; background: #f7f8fa; border-left: 3px solid #69b97a; border-radius: 3px; }
+.bank-online-cfg label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #555; }
+.bank-online-cfg input[type=text],
+.bank-online-cfg input[type=password],
+.bank-online-cfg input[type=email] { padding: 4px 6px; border: 1px solid #c8c8cf; border-radius: 4px; font: inherit; min-width: 280px; }
+.bank-auth-block { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.bank-auth-block #bank-login-form,
+.bank-auth-block #bank-verify-form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+
+/* Badge mode banque dans la modale */
+.bank-mode-badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; vertical-align: middle; }
+.bank-mode-badge.local   { background: #f0f0f0; color: #555; }
+.bank-mode-badge.online  { background: #e7f6ec; color: #1e6b3a; }
+.bank-mode-badge.offline { background: #fff4e6; color: #aa4f00; }
+.bank-auth-warning { background: #fff4e6; color: #aa4f00; padding: 8px 12px; border-radius: 4px; margin: 8px 0; font-size: 12px; }
 .ai-usage-title {
   font-weight: 600;
   color: #1a4480;

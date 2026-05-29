@@ -73,6 +73,26 @@ Claude. Deux modes d'auth :
 L'IA est aussi utilisée par le bouton 🪄 d'auto-détection des identités
 (onglet *Identités*).
 
+## Banque de questions partagée (optionnelle)
+
+Par défaut, la banque (📚 Banque dans l'onglet *Sujet*) est **locale** à ta
+machine (`~/Documents/AMCx-banque/`). Tu peux passer à une **banque en ligne
+communautaire** hébergée sur Supabase :
+
+- Crée un projet Supabase (gratuit). Setup pas-à-pas dans
+  [supabase/README.md](supabase/README.md).
+- Dans AMCx : Réglages → Banque → coche « En ligne » → URL + clé anon →
+  Se connecter (code à 6 chiffres par email).
+- Les questions que tu sauves sont en `draft` (privées) jusqu'à ce que tu les
+  publies. Tu vois aussi toutes les questions `public` de la communauté.
+- Stats par-user : chaque prof voit ses propres taux de réussite par projet
+  (RLS Postgres garantit l'isolation).
+
+Migration de ta banque locale existante → en ligne :
+```bash
+python auto_grading/bank_migrate.py --also-patch-projects
+```
+
 ## Documentation détaillée
 
 Architecture, pipeline complet, formats des fichiers intermédiaires, pièges

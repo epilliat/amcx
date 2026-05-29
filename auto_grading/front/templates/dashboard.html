@@ -241,6 +241,63 @@
         </div>
       </details>
 
+      <details class="bank-settings">
+        <summary>📚 Banque de questions — local vs en ligne (Supabase)</summary>
+        <div class="bank-settings-body">
+          <label class="bank-mode-row">
+            <input type="radio" name="bank_mode" value="local"
+                   {% if cfg.bank_mode != 'online' %}checked{% endif %}> Local
+            <span class="small">(~/Documents/AMCx-banque/)</span>
+          </label>
+          <label class="bank-mode-row">
+            <input type="radio" name="bank_mode" value="online"
+                   {% if cfg.bank_mode == 'online' %}checked{% endif %}> En ligne
+            <span class="small">(Supabase — banque communautaire)</span>
+          </label>
+
+          <div id="bank-online-cfg" class="bank-online-cfg"
+               style="{% if cfg.bank_mode != 'online' %}display:none{% endif %}">
+            <label>URL Supabase
+              <input type="text" id="cfg-bank-url"
+                     placeholder="https://abcdefgh.supabase.co"
+                     value="{{ cfg.bank_supabase_url|default('', true) }}"></label>
+            <label>Clé anon (publique)
+              <input type="password" id="cfg-bank-anon" autocomplete="off"
+                     placeholder="eyJ…"
+                     value="{{ cfg.bank_supabase_anon_key|default('', true) }}"></label>
+            <button id="cfg-bank-save" class="btn btn-small">Enregistrer config</button>
+
+            <div class="bank-auth-block" id="bank-auth-block">
+              <div id="bank-auth-status" class="settings-hint">…</div>
+
+              <div id="bank-login-form" style="display:none">
+                <label>Email
+                  <input type="email" id="bank-email" placeholder="ton@email.fr"></label>
+                <button id="bank-send-otp" class="btn btn-small">Recevoir un code</button>
+                <span id="bank-otp-status" class="settings-hint"></span>
+              </div>
+
+              <div id="bank-verify-form" style="display:none">
+                <label>Code reçu (6 chiffres)
+                  <input type="text" id="bank-otp-code" maxlength="6"
+                         pattern="[0-9]{6}" placeholder="123456" inputmode="numeric"></label>
+                <button id="bank-verify-otp" class="btn btn-primary btn-small">Se connecter</button>
+                <button id="bank-cancel-otp" class="btn btn-small">Annuler</button>
+              </div>
+
+              <div id="bank-logout-form" style="display:none">
+                <button id="bank-logout" class="btn btn-small">Se déconnecter</button>
+              </div>
+            </div>
+
+            <span class="settings-hint">
+              Setup détaillé : <a href="https://github.com/epilliat/amcx/blob/main/supabase/README.md"
+                                  target="_blank" rel="noopener">supabase/README.md</a>
+            </span>
+          </div>
+        </div>
+      </details>
+
       <div class="param-block">
         <div class="param-block-title">Rescaling par colonne — note* = note × max ∕ seuil</div>
         {% for col in columns %}
@@ -773,6 +830,123 @@ document.getElementById('ai-usage-reset').addEventListener('click', async () => 
 // Auto-refresh quand on déplie le panel IA
 document.querySelector('.ai-settings')?.addEventListener('toggle', refreshAiUsage);
 refreshAiUsage();
+
+// === Réglages Banque (local / online Supabase) =============================
+
+const bankCfgEl    = document.getElementById('bank-online-cfg');
+const bankAuthEl   = document.getElementById('bank-auth-block');
+const bankStatusEl = document.getElementById('bank-auth-status');
+const loginForm    = document.getElementById('bank-login-form');
+const verifyForm   = document.getElementById('bank-verify-form');
+const logoutForm   = document.getElementById('bank-logout-form');
+
+// Switch mode local ↔ online
+document.querySelectorAll('input[name="bank_mode"]').forEach(r => {
+  r.addEventListener('change', async (e) => {
+    const mode = e.target.value;
+    bankCfgEl.style.display = (mode === 'online') ? '' : 'none';
+    await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bank_mode: mode})
+    });
+    if (mode === 'online') refreshBankAuthStatus();
+  });
+});
+
+// Enregistre URL + clé anon
+document.getElementById('cfg-bank-save')?.addEventListener('click', async () => {
+  const url = document.getElementById('cfg-bank-url').value.trim();
+  const anon = document.getElementById('cfg-bank-anon').value.trim();
+  const r = await fetch('/api/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bank_supabase_url: url, bank_supabase_anon_key: anon})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) refreshBankAuthStatus();
+  else bankStatusEl.textContent = '✘ ' + (j.error || 'erreur');
+});
+
+async function refreshBankAuthStatus() {
+  try {
+    const r = await fetch('/api/bank/auth-status');
+    const s = await r.json();
+    if (!s.configured) {
+      bankStatusEl.textContent = '⚠ Configure d\'abord URL + clé anon Supabase ci-dessus.';
+      loginForm.style.display = 'none';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = 'none';
+      return;
+    }
+    if (s.logged_in) {
+      bankStatusEl.innerHTML = '✓ Connecté en tant que <b>' + (s.email || '?') + '</b>';
+      loginForm.style.display = 'none';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = '';
+    } else {
+      bankStatusEl.textContent = 'Pas connecté.';
+      loginForm.style.display = '';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = 'none';
+    }
+  } catch (e) {
+    bankStatusEl.textContent = '✘ statut indisponible';
+  }
+}
+
+// Envoie le code OTP
+document.getElementById('bank-send-otp')?.addEventListener('click', async () => {
+  const email = document.getElementById('bank-email').value.trim();
+  const st = document.getElementById('bank-otp-status');
+  st.textContent = 'Envoi…';
+  const r = await fetch('/api/bank/auth/send-otp', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({email})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    st.textContent = '✓ ' + j.msg;
+    loginForm.style.display = 'none';
+    verifyForm.style.display = '';
+  } else {
+    st.textContent = '✘ ' + (j.error || 'erreur');
+  }
+});
+
+// Vérifie le code OTP
+document.getElementById('bank-verify-otp')?.addEventListener('click', async () => {
+  const email = document.getElementById('bank-email').value.trim();
+  const code = document.getElementById('bank-otp-code').value.trim();
+  const r = await fetch('/api/bank/auth/verify-otp', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({email, code})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    refreshBankAuthStatus();
+  } else {
+    alert('Échec : ' + (j.error || 'erreur'));
+  }
+});
+
+// Annule (retour à login)
+document.getElementById('bank-cancel-otp')?.addEventListener('click', () => {
+  verifyForm.style.display = 'none';
+  loginForm.style.display = '';
+  document.getElementById('bank-otp-status').textContent = '';
+});
+
+// Logout
+document.getElementById('bank-logout')?.addEventListener('click', async () => {
+  await fetch('/api/bank/auth/logout', {method: 'POST'});
+  refreshBankAuthStatus();
+});
+
+// Auto-refresh quand on déplie le panel Banque
+document.querySelector('.bank-settings')?.addEventListener('toggle', refreshBankAuthStatus);
+// Et au chargement, si mode déjà online
+if (document.querySelector('input[name="bank_mode"][value="online"]')?.checked) {
+  refreshBankAuthStatus();
+}
 
 // === Fichiers du projet : upload PDF + pipeline ============================
 // Upload : POST /api/upload-scan-pdf, puis reload de la page pour rafraîchir

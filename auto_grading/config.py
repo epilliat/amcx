@@ -55,6 +55,15 @@ DEFAULTS = {
     # --- IA (édition assistée de questions) --------------------------------
     "anthropic_api_key": "", # clé sk-ant-… stockée dans config.json du projet
     "ai_model":          "claude-sonnet-4-6",   # ou claude-opus-4-7
+    # --- Banque de questions (local par défaut, online via Supabase) -------
+    "bank_mode":              "local",   # "local" ou "online"
+    "bank_supabase_url":      "",        # ex. https://abcdefgh.supabase.co
+    "bank_supabase_anon_key": "",        # clé anon (publique, RLS-safe)
+    "bank_user_token":        "",        # JWT user (renouvelé via refresh_token)
+    "bank_refresh_token":     "",        # refresh token long-lived
+    "bank_user_id":           "",        # UUID user Supabase
+    "bank_user_email":        "",        # email connecté (cache pour l'UI)
+    "bank_token_expires_at":  0,         # timestamp unix d'expiration du JWT
 }
 
 

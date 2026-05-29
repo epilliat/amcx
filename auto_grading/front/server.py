@@ -64,7 +64,19 @@ from sujet_store import (parse_tex, save_questions, compile_pdf, SUJET_DIR,
                          regenerate_seed as sujet_regenerate_seed,
                          migrate_to_canonical as sujet_migrate_to_canonical)
 import bank
+import bank_online
+import bank_auth
 from config import load_config, save_config
+
+
+def _bank():
+    """Dispatcher banque locale ↔ Supabase selon `config.bank_mode`.
+
+    Le module retourné expose les mêmes fonctions (load, save, delete,
+    list_questions, update_project_stats, from_block, to_block). Switch à
+    chaud par l'user via Réglages → Banque sans redémarrer le serveur.
+    """
+    return bank_online if load_config().get("bank_mode") == "online" else bank
 from grade_imports import (read_table, analyze_table, match_report, set_name_override,
                            jsonable_cell, build_all_series, add_grade_file,
                            remove_grade_file, ensure_imports_dir, IMPORTS_DIR)
@@ -784,6 +796,17 @@ def api_config():
                 if m and m not in allowed:
                     return jsonify({"error": f"Modèle inconnu : {m}"}), 400
                 updates["ai_model"] = m or "claude-sonnet-4-6"
+            # Banque (mode + credentials Supabase). Les tokens user (bank_user_token,
+            # bank_refresh_token, etc.) sont posés par bank_auth, pas via cette route.
+            if "bank_mode" in body:
+                m = str(body["bank_mode"] or "local").strip()
+                if m not in ("local", "online"):
+                    return jsonify({"error": f"bank_mode invalide : {m}"}), 400
+                updates["bank_mode"] = m
+            if "bank_supabase_url" in body:
+                updates["bank_supabase_url"] = str(body["bank_supabase_url"] or "").strip()
+            if "bank_supabase_anon_key" in body:
+                updates["bank_supabase_anon_key"] = str(body["bank_supabase_anon_key"] or "").strip()
             col_updates = body.get("columns", [])
             if col_updates:
                 files = load_config().get("grade_files", [])
@@ -2271,7 +2294,11 @@ def api_sujet_migrate():
 # --------------------------------------------------------------------------
 
 def _bank_author_default() -> str:
-    """Auteur par défaut : header.author du sujet courant, sinon vide."""
+    """Auteur par défaut : email connecté en mode online, sinon
+    header.author du sujet courant, sinon vide."""
+    cfg = load_config()
+    if cfg.get("bank_mode") == "online" and cfg.get("bank_user_email"):
+        return cfg["bank_user_email"]
     try:
         sub = parse_subject()
         return (sub["config"].header.author or "").strip()
@@ -2291,13 +2318,16 @@ def api_bank_list():
         "author": args.get("author", ""),
     }
     try:
-        items = bank.list_questions(filters)
+        b = _bank()
+        items = b.list_questions(filters)
         all_tags: set[str] = set()
-        for q in bank.list_questions(None):
+        for q in b.list_questions(None):
             for t in q.get("tags") or []:
                 all_tags.add(t)
         return jsonify({"ok": True, "items": items,
                         "all_tags": sorted(all_tags)})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2306,9 +2336,11 @@ def api_bank_list():
 def api_bank_load(bank_id):
     """Charge une question complète (avec data)."""
     try:
-        return jsonify({"ok": True, "question": bank.load(bank_id)})
+        return jsonify({"ok": True, "question": _bank().load(bank_id)})
     except KeyError:
         return jsonify({"error": f"question inconnue : {bank_id}"}), 404
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2333,10 +2365,16 @@ def api_bank_save():
         if block is None:
             return jsonify({"error": f"bloc introuvable : {bid}"}), 404
         proj = project_state.display_name(config.project_root())
-        q = bank.from_block(block, project_name=proj, title=title,
-                            tags=tags, author=author)
-        bank.save(q)
-        return jsonify({"ok": True, "bank_id": q["bank_id"], "title": q["title"]})
+        b = _bank()
+        q = b.from_block(block, project_name=proj, title=title,
+                         tags=tags, author=author)
+        saved = b.save(q)
+        # save() local retourne un Path, online retourne la question. On
+        # uniformise : prend l'id depuis ce qui est disponible.
+        bid = (saved or {}).get("bank_id") if isinstance(saved, dict) else q.get("bank_id")
+        return jsonify({"ok": True, "bank_id": bid, "title": q["title"]})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -2345,8 +2383,10 @@ def api_bank_save():
 def api_bank_delete(bank_id):
     """Supprime définitivement une question de la banque."""
     try:
-        bank.delete(bank_id)
+        _bank().delete(bank_id)
         return jsonify({"ok": True})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2418,12 +2458,13 @@ def _sync_bank_stats() -> dict:
                         a["n_perfect"] += 1
                     a["max_score"] = mx
 
-    # Persiste dans la banque.
+    # Persiste dans la banque (local ou online selon bank_mode).
     project_name = project_state.display_name(config.project_root())
+    b = _bank()
     updated, skipped = 0, 0
     for bid_bank, a in accum.items():
         try:
-            bank.update_project_stats(
+            b.update_project_stats(
                 bid_bank, project_name,
                 n_eval=a["n_eval"], sum_normalized=a["sum_normalized"],
                 n_perfect=a["n_perfect"], max_score_at_sync=a["max_score"])
@@ -2457,17 +2498,63 @@ def api_bank_sync():
 @app.route("/api/bank/<bank_id>/import", methods=["POST"])
 def api_bank_import(bank_id):
     """Insère une question de la banque dans le sujet courant (en fin)."""
+    b = _bank()
     try:
-        q = bank.load(bank_id)
+        q = b.load(bank_id)
     except KeyError:
         return jsonify({"error": f"question inconnue : {bank_id}"}), 404
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
     try:
         # Le bloc à insérer porte un bid frais + data._bank_id (trace d'origine).
-        new = bank.to_block(q)
+        new = b.to_block(q)
         new_bid = sujet_add_block(new.kind, after_bid=None, data=new.data)
         return jsonify({"ok": True, "bid": new_bid})
     except Exception as e:
         return _crud_error(e)
+
+
+# --------------------------------------------------------------------------
+# Auth banque en ligne (Supabase OTP code à 6 chiffres par email)
+# --------------------------------------------------------------------------
+
+@app.route("/api/bank/auth-status")
+def api_bank_auth_status():
+    """Retourne {mode, configured, logged_in, user_id, email, ...}."""
+    cfg = load_config()
+    st = bank_auth.auth_status()
+    st["mode"] = cfg.get("bank_mode", "local")
+    return jsonify({"ok": True, **st})
+
+
+@app.route("/api/bank/auth/send-otp", methods=["POST"])
+def api_bank_send_otp():
+    """Envoie un code à 6 chiffres par email. Body: {email}."""
+    body = _json_body()
+    email = (body.get("email") or "").strip()
+    try:
+        bank_auth.send_otp(email)
+        return jsonify({"ok": True, "msg": f"Code envoyé à {email}"})
+    except bank_auth.BankAuthError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/bank/auth/verify-otp", methods=["POST"])
+def api_bank_verify_otp():
+    """Vérifie le code OTP et persiste les tokens. Body: {email, code}."""
+    body = _json_body()
+    try:
+        res = bank_auth.verify_otp(body.get("email", ""), body.get("code", ""))
+        return jsonify({"ok": True, **res})
+    except bank_auth.BankAuthError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/bank/auth/logout", methods=["POST"])
+def api_bank_logout():
+    """Efface les tokens locaux. (Ne révoque pas côté Supabase — JWT expire à 1h.)"""
+    bank_auth.logout()
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------

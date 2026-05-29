@@ -611,8 +611,71 @@ projet actif) :
 
 **Hors-scope MVP** : page `/banque` dédiée, icône 🔗 sur les blocs liés,
 bouton « 🔄 Mettre à jour la question dans la banque » (édition d'une question
-existante), synchro git, détection de dépendances LaTeX. Voir
-`~/.claude/plans/amcx-banque-de-questions.md` pour le plan complet (phases 2-4).
+existante), synchro git, détection de dépendances LaTeX.
+
+### Backend en ligne (Supabase) — multi-user
+
+À côté de la banque locale, un backend Supabase est disponible pour partager
+une banque entre plusieurs profs (communauté ouverte). Toggle via Réglages →
+Banque dans le dashboard. Setup : voir [supabase/README.md](supabase/README.md).
+
+**Architecture** :
+- [auto_grading/bank.py](auto_grading/bank.py) reste le backend local (défaut).
+- [auto_grading/bank_online.py](auto_grading/bank_online.py) : client HTTP qui
+  tape sur PostgREST de Supabase, même API que `bank.py`.
+- [auto_grading/bank_auth.py](auto_grading/bank_auth.py) : flot OTP code à
+  6 chiffres par email (pas de magic link cliquable → zéro redirect URL à
+  configurer).
+- [auto_grading/front/server.py](auto_grading/front/server.py) helper `_bank()` :
+  dispatcher qui retourne `bank` ou `bank_online` selon `config.bank_mode`.
+
+**Schéma Postgres** ([supabase/schema.sql](supabase/schema.sql)) :
+- `profiles` : extend `auth.users` (display_name + institution)
+- `bank_questions` : `{id uuid, author_id, kind, data jsonb, title, tags[],
+  status ∈ {draft,public,archived}, ...}`
+- `question_evals` : `{question_id, user_id, project_name, n_eval,
+  sum_normalized, n_perfect, ...}` (unique sur le triplet)
+- **RLS** : tout le monde lit les `status='public'` + ses propres lignes.
+  L'auteur seul modifie ses questions. Chaque user voit seulement SES propres
+  évals. Toute la logique d'autorisation tient en 4 blocs SQL.
+
+**Auth** : flot OTP — `POST /api/bank/auth/send-otp {email}` → Supabase envoie
+un code 6 chiffres → user le saisit → `POST /api/bank/auth/verify-otp
+{email, code}` → access_token + refresh_token persistés dans `config.json`
+(`bank_user_token`, `bank_refresh_token`, `bank_user_id`, `bank_user_email`).
+Refresh transparent via `bank_auth.refresh_token_if_possible()` au 1er 401.
+
+**Routes additionnelles** :
+- `GET  /api/bank/auth-status` → `{mode, configured, logged_in, user_id, email}`
+- `POST /api/bank/auth/send-otp` `{email}` → code 6 chiffres par mail
+- `POST /api/bank/auth/verify-otp` `{email, code}` → persiste tokens
+- `POST /api/bank/auth/logout` → efface tokens locaux
+
+Les routes existantes `/api/bank*` (list, load, save, delete, sync, import)
+dispatchent automatiquement vers le backend choisi — code UI inchangé.
+
+**Migration locale → en ligne** : script
+[auto_grading/bank_migrate.py](auto_grading/bank_migrate.py) :
+```bash
+python auto_grading/bank_migrate.py --also-patch-projects
+```
+Itère `~/Documents/AMCx-banque/*.json` → upload sur Supabase (status `draft`),
+préserve les `stats.by_project.*` → `question_evals`, persiste le mapping
+`{ancien_8hex: nouveau_uuid}` dans `~/.config/amcx/bank_migration.json`.
+Avec `--also-patch-projects`, parcourt les projets connus (recent_projects())
+et patche `data._bank_id` des blocs concernés. Idempotent.
+
+**Différences avec le local** :
+- `bank_id` = UUID v4 (36 chars) au lieu de 8 hex (collision-free pour la
+  communauté).
+- `stats.by_project` n'est PAS embarqué dans la question — c'est une table
+  séparée (`question_evals`). `bank_online.load()` la reconstruit pour le user
+  courant (RLS) avant de retourner — compat UI 100%.
+- `status` ∈ {draft, public, archived} : par défaut `draft` (visible que par
+  l'auteur). L'user passe à `public` quand prêt à partager.
+
+**Free tier Supabase** : 500 Mo DB + 2 Go egress/mois + 50k MAU. Couvre
+largement <1000 profs. Self-hostable plus tard (`supabase start` local).
 
 ## Édition IA assistée (Sonnet/Opus, 1 appel par modif)
 

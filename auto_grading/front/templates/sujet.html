@@ -636,12 +636,18 @@
   <div class="pm-modal-backdrop" data-close-bank="1"></div>
   <div class="pm-modal-card bank-modal-card" role="document">
     <button type="button" class="bank-modal-close" data-close-bank="1" aria-label="Fermer">×</button>
-    <h2 id="bankModalTitle">📚 Banque de questions</h2>
-    <p class="pm-modal-help">
+    <h2 id="bankModalTitle">📚 Banque de questions
+      <span id="bank-mode-badge" class="bank-mode-badge"></span>
+    </h2>
+    <p class="pm-modal-help" id="bank-modal-help">
       Les questions sauvegardées sont stockées localement dans
       <code id="bank-root-hint">~/Documents/AMCx-banque/</code>. Cliquez
       <strong>+ Insérer</strong> pour ajouter une question à la fin du sujet courant.
     </p>
+    <div id="bank-auth-warning" class="bank-auth-warning" style="display:none">
+      ⚠ Banque en ligne activée mais pas connecté.
+      <a href="/" target="_blank">Réglages → Banque</a> pour se connecter.
+    </div>
     <div class="bank-modal-grid">
       <aside class="bank-filters">
         <div class="bank-filter-field">
@@ -2270,12 +2276,42 @@ updateSaveBtn();
   let previewCache = {};       // bank_id -> question complète
 
   // --- Ouvrir / fermer la modale principale -------------------------------
+  async function refreshBankModeBadge() {
+    const badge = document.getElementById('bank-mode-badge');
+    const warn  = document.getElementById('bank-auth-warning');
+    const help  = document.getElementById('bank-modal-help');
+    const root  = document.getElementById('bank-root-hint');
+    try {
+      const r = await fetch('/api/bank/auth-status');
+      const s = await r.json();
+      if (s.mode === 'online') {
+        if (s.logged_in) {
+          badge.textContent = '🌍 en ligne · ' + (s.email || '');
+          badge.className = 'bank-mode-badge online';
+          warn.style.display = 'none';
+          if (root) root.textContent = 'Supabase (' + (s.email || '') + ')';
+        } else {
+          badge.textContent = '🌍 en ligne · non connecté';
+          badge.className = 'bank-mode-badge offline';
+          warn.style.display = '';
+        }
+      } else {
+        badge.textContent = '💾 local';
+        badge.className = 'bank-mode-badge local';
+        warn.style.display = 'none';
+      }
+    } catch (e) {
+      badge.textContent = '';
+    }
+  }
+
   function openBankModal() {
     bankModal.hidden = false;
     document.getElementById('bank-search').value = '';
     const r = bankModal.querySelector('input[name="bank-kind"][value=""]');
     if (r) r.checked = true;
     activeTags.clear();
+    refreshBankModeBadge();
     reloadBankList();
     setTimeout(() => document.getElementById('bank-search').focus(), 30);
   }
