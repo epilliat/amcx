@@ -1,0 +1,28 @@
+{# Partial : crop du nom manuscrit + grille du numéro étudiant (Q32-35).
+   Contexte requis : batch, page, id_questions.
+   Les cases-chiffres sont cliquables (single-select par colonne) → /api/set-id-digit. #}
+<div class="id-block" data-batch="{{ batch }}" data-page="{{ page }}">
+  <div class="id-name">
+    <div class="id-name-label">Nom / prénom manuscrit</div>
+    <img class="name-crop" src="/name_img/{{ batch }}/{{ page }}.jpg"
+         alt="nom manuscrit" loading="lazy">
+  </div>
+  <div class="id-grid">
+    {% for col in id_questions %}
+      <div class="id-col">
+        <div class="id-col-head">Chiffre {{ col.pos }}&nbsp;: <b class="id-col-read">{{ col.read }}</b></div>
+        <div class="id-col-cells">
+          {% for c in col.cases %}
+            <div class="case-wrap">
+              <img class="case {% if c.selected %}selected{% endif %}"
+                   src="/zoom_img/{{ batch }}/{{ page }}/{{ col.q }}_{{ c.char }}.jpg"
+                   data-q="{{ col.q }}" data-char="{{ c.char }}"
+                   alt="{{ col.q }}_{{ c.char }}" loading="lazy">
+              <div class="case-label">{{ c.char }}</div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>

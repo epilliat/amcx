@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-label="Claude" role="img">
+  <title>Claude</title>
+  <!-- Marque Anthropic : starburst 4 grandes branches cardinales + 4 petites
+       diagonales. Approximation libre pour usage UI dans AMCx. -->
+  <g fill="#D97757">
+    <!-- 4 grandes branches (haut / bas / gauche / droite) -->
+    <path d="M12 0.5 L13.2 10.8 L23.5 12 L13.2 13.2 L12 23.5 L10.8 13.2 L0.5 12 L10.8 10.8 Z"/>
+    <!-- 4 petites diagonales (triangles depuis chaque coin vers le centre) -->
+    <path d="M4.2 4.2 L9.8 10.8 L10.8 9.8 Z M19.8 4.2 L14.2 10.8 L13.2 9.8 Z M19.8 19.8 L13.2 14.2 L14.2 13.2 Z M4.2 19.8 L10.8 14.2 L9.8 13.2 Z"
+          opacity="0.55"/>
+  </g>
+</svg>

@@ -1,0 +1,49 @@
+{# Partial : grille des 31 questions en 2 zones (positifs/négatifs).
+   Contexte requis : questions, batch, page. Utilisé par zoom.html, zoom_fragment.html. #}
+{% for q in questions %}
+  <div class="q-block">
+    <div class="q-title">Q{{ q.q }} <span class="q-tag">{{ q.tag }}</span> <span class="q-type">[{{ q.type }}]</span> — correct: <b>{{ q.correct }}</b></div>
+    <div class="cases-row">
+      <div class="cases-zone cases-positifs">
+        <span class="cases-zone-label">Positifs</span>
+        <div class="cases-zone-grid">
+          {% for c in q.cases if c.selected %}
+            <div class="case-wrap" data-char="{{ c.char }}">
+              <img class="case selected {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}"
+                   src="/zoom_img/{{ batch }}/{{ page }}/{{ q.q }}_{{ c.char }}.jpg"
+                   data-q="{{ q.q }}" data-char="{{ c.char }}"
+                   alt="Q{{ q.q }} {{ c.char }}"
+                   loading="lazy">
+              <div class="case-label {% if c.diff %}label-diff{% elif c.doubtful %}label-doubt{% endif %}">
+                <span class="ch">{{ c.char }}</span>
+                {% if c.correct %}<span class="star">★</span>{% endif %}
+                {% if c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
+                {% elif c.doubtful %}<span class="doubt-mark" title="case douteuse — relire">?</span>{% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="cases-zone cases-negatifs">
+        <span class="cases-zone-label">Négatifs</span>
+        <div class="cases-zone-grid">
+          {% for c in q.cases if not c.selected %}
+            <div class="case-wrap" data-char="{{ c.char }}">
+              <img class="case {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}"
+                   src="/zoom_img/{{ batch }}/{{ page }}/{{ q.q }}_{{ c.char }}.jpg"
+                   data-q="{{ q.q }}" data-char="{{ c.char }}"
+                   alt="Q{{ q.q }} {{ c.char }}"
+                   loading="lazy">
+              <div class="case-label {% if c.diff %}label-diff{% elif c.doubtful %}label-doubt{% endif %}">
+                <span class="ch">{{ c.char }}</span>
+                {% if c.correct %}<span class="star">★</span>{% endif %}
+                {% if c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
+                {% elif c.doubtful %}<span class="doubt-mark" title="case douteuse — relire">?</span>{% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endfor %}

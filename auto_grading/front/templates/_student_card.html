@@ -1,0 +1,35 @@
+{# Fiche étudiant — fragment injecté dans le dashboard via /api/student-card. #}
+<div class="sc-head">
+  <div class="sc-id">
+    <b class="sc-name">{{ c.canonical_name }}</b>
+    <span class="small">{{ c.canonical_id }} — {{ c.batch }}/page_{{ "%03d"|format(c.page) }} (id lu : {{ c.student_id }})</span>
+  </div>
+  <div class="sc-score-box">
+    <span class="sc-score">{{ "%.2f"|format(c.score) }}</span>
+    <span class="sc-score-max">/ {{ c.max_score|int }}</span>
+  </div>
+</div>
+
+<div class="sc-flags">
+  {% if c.validated %}<span class="badge badge-validated">validé</span>{% endif %}
+  {% for f in c.flags %}{% if f.startswith('cv_differs_amc') or f.startswith('amc_unvalidated') or f.startswith('ambiguous') or f.startswith('no_mires') or f.startswith('id_incomplet') %}<span class="badge badge-{{ f.split('(')[0] }}">{{ f }}</span>{% endif %}{% endfor %}
+  <span class="sc-actions">
+    <a href="/student/{{ c.batch }}/{{ c.page }}/zoom" class="btn btn-primary btn-small">Ouvrir zoom</a>
+    <a href="/student/{{ c.batch }}/{{ c.page }}" class="btn btn-small">Vue copie</a>
+  </span>
+</div>
+
+<table class="sc-questions">
+  <thead><tr><th>Q</th><th>Type</th><th>Coché</th><th>Correct</th><th>Pts</th></tr></thead>
+  <tbody>
+  {% for q in c.per_question %}
+    <tr class="{% if q.score >= q.max %}q-ok{% elif q.score > 0 %}q-partial{% else %}q-zero{% endif %}{% if q.has_diff %} q-diff{% endif %}">
+      <td>Q{{ q.q }}</td>
+      <td class="q-tag-cell">{{ q.tag }}</td>
+      <td class="q-mono">{{ q.selected }}</td>
+      <td class="q-mono">{{ q.correct }}</td>
+      <td>{{ "%.2f"|format(q.score) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>

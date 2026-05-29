@@ -1,0 +1,5 @@
+{
+  "id": "examen_minimal",
+  "name": "Examen minimal",
+  "description": "Sujet canonique de démarrage : un en-tête éditable, une section, un QCM à réponses multiples, un QCM à réponse unique, et une zone de réponse écrite (answerbox) avec grille barème correcteur sur la feuille de réponses."
+}

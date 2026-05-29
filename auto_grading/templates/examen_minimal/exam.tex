@@ -1,0 +1,164 @@
+%%QCM-PREAMBLE
+\documentclass[a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amsfonts, amssymb}
+\usepackage{enumitem}
+\usepackage[francais,bloc,ensemble,nowatermark]{automultiplechoice}
+\usepackage{verbatim,multicol}
+\usepackage[most]{tcolorbox}
+
+\newtcolorbox{answerbox}[1][4cm]{
+  width=\linewidth, height=#1, colback=white, colframe=black,
+  arc=0pt, outer arc=0pt, boxrule=0.4pt,
+  left=4pt, right=4pt, top=2pt, bottom=2pt,
+}
+
+\def\R{\mathbb{R}}
+\def\N{\mathcal{N}}
+\def\E{\mathbb{E}}
+\def\P{\mathbb{P}}
+\def\Z{\mathbb{Z}}
+
+\begin{document}
+\AMCrandomseed{1234567}
+\def\AMCformQuestion#1{{\sc Question #1 :}}
+
+%%QCM-PREAMBLE-END
+
+%%QCM-EXEMPLAIRE-OPEN ncopies=1
+\exemplaire{1}{
+
+%%QCM-HEADER
+%%H:establishment{Établissement}
+%%H:year{Année 20XX--20XX}
+%%H:title{Examen : titre de l'examen}
+%%H:duration{Durée : X heures}
+%%H:subtitle{Calculatrice autorisée}
+
+\noindent\begin{tabular}{p{0.5\linewidth}p{0.5\linewidth}}
+{\sc Établissement} & \hfill Année 20XX--20XX \\
+ & \hfill 
+\end{tabular}
+
+\begin{center}
+\textbf{Examen : titre de l'examen}\\
+{\small Durée : X heures}\\
+{\small \textit{Calculatrice autorisée}}
+\end{center}
+
+%%H:instructions-start
+Les réponses sont à donner exclusivement sur la feuille de réponses jointe. Les questions portant le symbole \multiSymbole{} peuvent avoir plusieurs bonnes réponses ; les autres ont une unique bonne réponse.
+%%H:instructions-end
+%%QCM-HEADER-END
+
+%%QCM-BLOCKS-START
+%%QCM-BLOCK bid=t-intro01 kind=text
+\section*{Questions}
+%%QCM-END bid=t-intro01
+
+%%QCM-BLOCK bid=q-exmult1 kind=question_qcm qtype=mult tag=exemple_multiple
+\begin{questionmult}{exemple_multiple}
+Quelle(s) affirmation(s) ci-dessous est (sont) correcte(s) ?
+\begin{reponses}
+\bonne{Une bonne réponse}\bareme{b=1/2,m=0}
+\bonne{Une autre bonne réponse}\bareme{b=1/2,m=0}
+\mauvaise{Une mauvaise réponse}\bareme{b=0,m=1/2}
+\mauvaise{Encore une mauvaise réponse}\bareme{b=0,m=1/2}
+\end{reponses}
+\end{questionmult}
+%%QCM-END bid=q-exmult1
+
+%%QCM-BLOCK bid=q-exsing1 kind=question_qcm qtype=single tag=exemple_simple
+\begin{question}{exemple_simple}
+Quelle est la bonne réponse ?
+\begin{reponses}
+\bonne{La bonne réponse}
+\mauvaise{Une mauvaise réponse}
+\mauvaise{Une autre mauvaise réponse}
+\mauvaise{Une dernière mauvaise réponse}
+\end{reponses}
+\end{question}
+%%QCM-END bid=q-exsing1
+
+%%QCM-BLOCK bid=a-justif1 kind=answerbox placement=inline
+\noindent \textbf{Question~\ref{q-a-justif1}} — \textbf{Justifie ta réponse}\par\vspace{2pt}
+\begin{answerbox}[4cm]\end{answerbox}
+\element{bareme}{%
+\begingroup\csname AMC@ordretrue\endcsname\csname AMC@inside@digittrue\endcsname\def\AMCchoiceLabel##1{\the\numexpr\value{##1}-1\relax}\def\AMCanswer##1##2{##1\hspace{0.5em}}
+\begin{question}{bareme-a-justif1}
+\label{q-a-justif1}%
+\begin{choicescustom}
+  \wrongchoice{0}\scoring{0}
+  \correctchoice{1}\scoring{1}
+  \correctchoice{2}\scoring{2}
+  \correctchoice{3}\scoring{3}
+\end{choicescustom}
+\end{question}
+\endgroup
+}
+%%QCM-END bid=a-justif1
+
+%%QCM-BLOCKS-END
+
+\newpage
+%%QCM-ANSWER-SHEET
+%%A:id_grid_digits{4}
+%%A:name_field{1}
+%%A:columns{2}
+
+\AMCdebutFormulaire
+
+\vspace{0.5cm}\hrule\vspace{0.5cm}
+{\Large\bf\begin{center}{Feuille de réponses}\end{center}}
+
+{\noindent \large\bf \underline{Identifiants} :}\\
+
+\vskip5mm {\setlength{\parindent}{0pt}\hspace*{\fill}\AMCcodeGridInt{etu}{4}\hspace*{\fill}
+\begin{minipage}[b]{6.5cm}
+$\longleftarrow{}$\hspace{0pt plus 1cm} codez votre numéro d'étu\-diant ci-contre, et inscrivez votre nom et prénom ci-dessous $\downarrow\downarrow\downarrow$
+
+\vspace{3ex}
+
+\hfill\champnom{\fbox{
+    \begin{minipage}{.9\linewidth}
+      Nom et prénom :
+      
+      \vspace*{.5cm}\dotfill
+
+      \vspace*{.5cm}\dotfill
+      \vspace*{1mm}
+    \end{minipage}
+  }}\hfill\vspace{5ex}\end{minipage}\hspace*{\fill}
+}
+
+\vspace{0.7cm}
+
+{\noindent \large\bf \underline{Réponses} :}\\
+
+{  \noindent \bf Les réponses aux questions sont à donner exclusivement ci-dessous ; les réponses données ailleurs ne seront pas prises en compte.
+}
+
+\noindent   \underline{Attention} : les cases doivent être noircies et non simplement cochées. En cas d'erreur, utiliser du Tipp-Ex pour effacer complètement la case (NE PAS redessiner la case effacée).
+
+\vspace{0.5cm}
+
+\begin{multicols}{2}\columnseprule=.4pt
+
+\formulaire
+
+\end{multicols}
+
+\ifcsname open@k\endcsname\insertgroup{open}\fi
+
+\ifcsname bareme@k\endcsname
+\begin{tcolorbox}[title=R\'eserv\'e correcteur, colback=white, colframe=black!55, fonttitle=\bfseries\small, boxrule=0.5pt, arc=2pt, left=4pt, right=4pt, top=2pt, bottom=2pt, before skip=8pt, after skip=4pt]
+\begin{multicols}{2}\columnseprule=.4pt
+{\csname AMC@shuffleGfalse\endcsname\insertgroup{bareme}}
+\end{multicols}
+\end{tcolorbox}
+\fi
+%%QCM-ANSWER-SHEET-END
+}
+%%QCM-EXEMPLAIRE-CLOSE
+\end{document}

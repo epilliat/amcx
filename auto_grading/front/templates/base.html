@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}AMCx{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% block head %}{% endblock %}
+</head>
+<body>
+<nav class="topbar">
+  <span class="topbar-brand">{{ app_name|default('AMCx') }}</span>
+
+  <div class="project-menu" id="projectMenu">
+    <button type="button" class="project-menu-btn" id="projectMenuBtn"
+            aria-haspopup="true" aria-expanded="false">
+      <span class="project-menu-name" id="projectMenuName">{{ project_name|default('Aucun projet') }}</span>
+      <span class="project-menu-caret">▾</span>
+    </button>
+    <div class="project-menu-dropdown" id="projectMenuDropdown" hidden>
+      <button type="button" class="pm-item" data-action="open">📂&nbsp; Ouvrir un projet…</button>
+      <button type="button" class="pm-item" data-action="create">➕&nbsp; Créer un nouveau projet…</button>
+      <div class="pm-sep">Récents</div>
+      <div id="pmRecents" class="pm-recents">
+        {% for r in project_recent %}
+          <div class="pm-recent">
+            <button type="button" class="pm-recent-open" data-path="{{ r.path }}" title="{{ r.path }}">{{ r.name }}</button>
+            <button type="button" class="pm-recent-forget" data-path="{{ r.path }}" title="Oublier ce projet">✕</button>
+          </div>
+        {% else %}
+          <div class="pm-empty">— aucun —</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <a href="/sujet" class="topbar-link {% if active == 'sujet' %}active{% endif %}">Sujet</a>
+  <a href="/" class="topbar-link {% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/questions" class="topbar-link {% if active == 'questions' %}active{% endif %}">Questions</a>
+  <a href="/flagged" class="topbar-link {% if active == 'flagged' %}active{% endif %}">Review rapide</a>
+  <a href="/identites" class="topbar-link {% if active == 'identites' %}active{% endif %}">Identités</a>
+  <span class="topbar-spacer"></span>
+  <a href="/export.csv" class="topbar-link topbar-export">⤓ Export CSV</a>
+</nav>
+
+<!-- Modale : ouvrir un projet existant -->
+<div class="pm-modal" id="openProjectModal" hidden role="dialog" aria-labelledby="openProjectTitle">
+  <div class="pm-modal-backdrop" data-close></div>
+  <div class="pm-modal-card">
+    <h2 id="openProjectTitle">Ouvrir un projet</h2>
+
+    <div class="pm-modal-field">
+      <label>Projets dans <code id="openProjectRoot">~/Documents/AMCx/</code></label>
+      <div id="openProjectDiscover" class="pm-discovered">
+        <div class="pm-discovered-loading">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="pm-modal-field">
+      <label for="openProjectPath">… ou autre chemin</label>
+      <input type="text" id="openProjectPath" placeholder="/home/.../mon_examen">
+      <div class="pm-modal-hint">Dossier qui contient <code>sujet/exam.tex</code>.</div>
+    </div>
+
+    <div class="pm-modal-error" id="openProjectError" hidden></div>
+    <div class="pm-modal-actions">
+      <button type="button" class="pm-btn-secondary" data-close>Annuler</button>
+      <button type="button" class="pm-btn-primary" id="openProjectSubmit">Ouvrir</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modale : créer un nouveau projet -->
+<div class="pm-modal" id="createProjectModal" hidden role="dialog" aria-labelledby="createProjectTitle">
+  <div class="pm-modal-backdrop" data-close></div>
+  <div class="pm-modal-card">
+    <h2 id="createProjectTitle">Nouveau projet</h2>
+    <div class="pm-modal-field">
+      <label for="createProjectName">Nom du projet</label>
+      <input type="text" id="createProjectName" placeholder="examen_jan_2026" autocomplete="off">
+      <div class="pm-modal-hint" id="createProjectDest">Sera créé dans <code>~/Documents/AMCx/</code>…</div>
+    </div>
+    <div class="pm-modal-field">
+      <div class="pm-modal-radios" id="createProjectTemplate">
+        <label class="pm-modal-radio">
+          <input type="radio" name="cpt" value="examen_minimal" checked>
+          <span>📋&nbsp; Examen minimal <em>(template fourni)</em></span>
+        </label>
+        <label class="pm-modal-radio">
+          <input type="radio" name="cpt" value="from_amc">
+          <span>📥&nbsp; Importer un fichier AMC existant <em>(.tex)</em></span>
+        </label>
+      </div>
+    </div>
+    <div class="pm-modal-field" id="createProjectAmcRow" hidden>
+      <label for="createProjectAmcFile">Fichier AMC (.tex)</label>
+      <input type="file" id="createProjectAmcFile" accept=".tex">
+    </div>
+    <div class="pm-modal-error" id="createProjectError" hidden></div>
+    <div class="pm-modal-actions">
+      <button type="button" class="pm-btn-secondary" data-close>Annuler</button>
+      <button type="button" class="pm-btn-primary" id="createProjectSubmit">Créer</button>
+    </div>
+  </div>
+</div>
+
+{% block content %}{% endblock %}
+{% block scripts %}{% endblock %}
+
+<script>
+// --- Menu projet + modales (Phase 3+4) -------------------------------------
+
+(function(){
+  const btn = document.getElementById('projectMenuBtn');
+  const dd  = document.getElementById('projectMenuDropdown');
+  if (!btn || !dd) return;
+
+  function closeMenu() { dd.hidden = true; btn.setAttribute('aria-expanded', 'false'); }
+  function openMenu()  { dd.hidden = false; btn.setAttribute('aria-expanded', 'true'); }
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dd.hidden ? openMenu() : closeMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (!dd.hidden && !dd.contains(e.target) && e.target !== btn) closeMenu();
+  });
+
+  // Items du menu
+  dd.addEventListener('click', (e) => {
+    const action = e.target.closest('[data-action]')?.dataset.action;
+    if (action === 'open')   { closeMenu(); openOpenModal(); }
+    if (action === 'create') { closeMenu(); showModal('createProjectModal'); document.getElementById('createProjectName').focus(); }
+    const recent = e.target.closest('.pm-recent-open');
+    if (recent) { closeMenu(); switchProject(recent.dataset.path); }
+    const forget = e.target.closest('.pm-recent-forget');
+    if (forget)  { forgetProject(forget.dataset.path); }
+  });
+
+  // Affiche la modale Ouvrir + remplit la liste découverte dans ~/Documents/AMCx/.
+  function openOpenModal() {
+    showModal('openProjectModal');
+    document.getElementById('openProjectPath').focus();
+    loadDiscovered();
+  }
+  // Exposé globalement pour que l'onboarding (qui hérite de base.html) puisse appeler.
+  window.openOpenModal = openOpenModal;
+
+  async function loadDiscovered() {
+    const box = document.getElementById('openProjectDiscover');
+    const rootEl = document.getElementById('openProjectRoot');
+    if (!box) return;
+    box.innerHTML = '<div class="pm-discovered-loading">Chargement…</div>';
+    try {
+      const r = await fetch('/api/projects/discover', {cache: 'no-store'});
+      const j = await r.json();
+      if (rootEl && j.root) rootEl.textContent = j.root + '/';
+      if (!j.projects || j.projects.length === 0) {
+        box.innerHTML = '<div class="pm-discovered-empty">Aucun projet trouvé. Crée un nouveau projet, ou colle un chemin ci-dessous.</div>';
+        return;
+      }
+      box.innerHTML = '';
+      for (const p of j.projects) {
+        const row = document.createElement('div');
+        row.className = 'pm-discovered-row' + (p.complete ? '' : ' pm-discovered-incomplete');
+
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'pm-discovered-item';
+        item.dataset.path = p.path;
+        item.title = p.path;
+        const label = p.complete
+          ? '<span class="pm-discovered-name">' + escapeHtml(p.name) + '</span>'
+          : '<span class="pm-discovered-name">' + escapeHtml(p.name) + '</span>'
+            + ' <span class="pm-discovered-tag">incomplet — pas de sujet/exam.tex</span>';
+        item.innerHTML = label;
+        if (p.complete) {
+          item.addEventListener('click', () => {
+            document.getElementById('openProjectModal').hidden = true;
+            switchProject(p.path);
+          });
+        } else {
+          item.disabled = true;
+        }
+        row.appendChild(item);
+
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'pm-discovered-del';
+        del.title = 'Supprimer ce dossier';
+        del.textContent = '✕';
+        del.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const lines = p.complete
+            ? [
+                `⚠ Supprimer définitivement le projet « ${p.name} » ?`,
+                ``,
+                `Tout le contenu de ce dossier sera effacé :`,
+                `  • sujet/ (exam.tex + PDF compilé + calage .xy)`,
+                `  • pages/ (scans extraits des PDF de copies)`,
+                `  • raw_responses/ (réponses corrigées par l'utilisateur)`,
+                `  • results/, compte_rendu/, models/ s'ils existent`,
+                ``,
+                `Chemin : ${p.dir}`,
+                ``,
+                `Cette action est IRRÉVERSIBLE.`,
+              ]
+            : [
+                `Supprimer le dossier incomplet « ${p.name} » ?`,
+                ``,
+                `Aucun exam.tex détecté, mais le dossier sera effacé :`,
+                `  ${p.dir}`,
+                ``,
+                `Cette action est IRRÉVERSIBLE.`,
+              ];
+          if (!confirm(lines.join('\n'))) return;
+          const r = await fetch('/api/projects/delete-folder', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dir: p.dir})
+          });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({error:'erreur inconnue'}));
+            alert(e.error || ('HTTP ' + r.status));
+            return;
+          }
+          loadDiscovered();
+        });
+        row.appendChild(del);
+
+        box.appendChild(row);
+      }
+    } catch (err) {
+      box.innerHTML = '<div class="pm-discovered-empty">Impossible de scanner le dossier.</div>';
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // --- Modales (génériques) ----------------------------------------------
+  function showModal(id) { document.getElementById(id).hidden = false; }
+  function hideModal(id) { document.getElementById(id).hidden = true; }
+  document.addEventListener('click', (e) => {
+    if (e.target.matches('[data-close]')) {
+      const m = e.target.closest('.pm-modal');
+      if (m) m.hidden = true;
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') document.querySelectorAll('.pm-modal:not([hidden])').forEach(m => m.hidden = true);
+  });
+
+  // --- Ouvrir un projet --------------------------------------------------
+  const openInput  = document.getElementById('openProjectPath');
+  const openSubmit = document.getElementById('openProjectSubmit');
+  const openError  = document.getElementById('openProjectError');
+  openSubmit?.addEventListener('click', () => {
+    const path = openInput.value.trim();
+    if (!path) { openError.hidden = false; openError.textContent = 'Saisis un chemin.'; return; }
+    switchProject(path, openError);
+  });
+  openInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openSubmit.click(); });
+
+  // --- Créer un projet (Phase 4 wires this up; le HTML est déjà en place) -
+  const nameInput   = document.getElementById('createProjectName');
+  const destHint    = document.getElementById('createProjectDest');
+  const amcRow      = document.getElementById('createProjectAmcRow');
+  const amcInput    = document.getElementById('createProjectAmcFile');
+  const createSubmit= document.getElementById('createProjectSubmit');
+  const createError = document.getElementById('createProjectError');
+  let defaultRoot = '~/Documents/AMCx/';
+  fetch('/api/projects').then(r => r.json()).then(j => { if (j.default_root) defaultRoot = j.default_root + '/'; updateDest(); });
+  function updateDest() {
+    const n = (nameInput?.value || '').trim() || '<nom>';
+    if (destHint) destHint.innerHTML = 'Sera créé dans <code>' + defaultRoot + n + '/</code>';
+  }
+  nameInput?.addEventListener('input', updateDest);
+  document.querySelectorAll('input[name="cpt"]').forEach(r => {
+    r.addEventListener('change', () => { amcRow.hidden = (r.value === 'blank' || !r.checked); });
+  });
+  createSubmit?.addEventListener('click', () => createProject(createError));
+
+  async function createProject(errorEl) {
+    errorEl.hidden = true;
+    const name = (nameInput.value || '').trim();
+    if (!/^[a-zA-Z0-9_\-. ]+$/.test(name)) {
+      errorEl.hidden = false; errorEl.textContent = 'Nom invalide (lettres, chiffres, _ - . espace).';
+      return;
+    }
+    const tpl = document.querySelector('input[name="cpt"]:checked')?.value || 'examen_minimal';
+
+    let body;
+    if (tpl === 'from_amc') {
+      const f = amcInput.files?.[0];
+      if (!f) { errorEl.hidden = false; errorEl.textContent = 'Choisis un fichier .tex.'; return; }
+      const fd = new FormData();
+      fd.append('name', name);
+      fd.append('template', 'from_amc');
+      fd.append('file', f);
+      body = fd;
+    } else {
+      body = JSON.stringify({name, template: tpl});
+    }
+
+    let r;
+    try {
+      r = await fetch('/api/projects/create', {
+        method: 'POST',
+        headers: body instanceof FormData ? undefined : {'Content-Type': 'application/json'},
+        body
+      });
+    } catch (err) {
+      errorEl.hidden = false; errorEl.textContent = 'Erreur réseau : ' + err;
+      return;
+    }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({error:'erreur inconnue'}));
+      errorEl.hidden = false; errorEl.textContent = e.error || ('HTTP ' + r.status);
+      return;
+    }
+    const j = await r.json();
+    if (j.path) {
+      // Le serveur va redémarrer (dans un thread daemon) — on attend.
+      await waitUntilServerReady('/api/projects');
+      window.location.href = '/';
+    }
+  }
+
+  // --- Helpers réseau ----------------------------------------------------
+  async function switchProject(path, errorEl) {
+    let r;
+    try {
+      r = await fetch('/api/projects/open', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path})
+      });
+    } catch (err) {
+      if (errorEl) { errorEl.hidden = false; errorEl.textContent = 'Erreur réseau : ' + err; }
+      return;
+    }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({error:'erreur inconnue'}));
+      const msg = e.error || ('HTTP ' + r.status);
+      if (errorEl) { errorEl.hidden = false; errorEl.textContent = msg; }
+      else alert('Impossible d\'ouvrir : ' + msg);
+      return;
+    }
+    // Le serveur redémarre — attendre qu'il réponde à nouveau.
+    await waitUntilServerReady('/api/projects');
+    window.location.href = '/';
+  }
+
+  async function forgetProject(path) {
+    const r = await fetch('/api/projects/forget', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path})
+    });
+    if (r.ok) window.location.reload();
+  }
+
+  async function waitUntilServerReady(url, maxTries = 40) {
+    for (let i = 0; i < maxTries; i++) {
+      await new Promise(rs => setTimeout(rs, 250));
+      try {
+        const r = await fetch(url, {cache:'no-store'});
+        if (r.ok) return true;
+      } catch {}
+    }
+    return false;
+  }
+})();
+</script>
+
+<script>
+// Global : clic sur une case-chiffre du numéro étudiant → sélection (1 par colonne) + persistance.
+document.addEventListener('click', async (e) => {
+  const img = e.target.closest('.id-block img.case');
+  if (!img) return;
+  const block = img.closest('.id-block');
+  const r = await fetch('/api/set-id-digit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      batch: block.dataset.batch, page: parseInt(block.dataset.page),
+      q: parseInt(img.dataset.q), char: img.dataset.char,
+    })
+  });
+  if (r.ok) {
+    const j = await r.json();
+    const col = img.closest('.id-col');
+    col.querySelectorAll('img.case').forEach(c => c.classList.remove('selected'));
+    img.classList.add('selected');
+    const read = col.querySelector('.id-col-read');
+    if (read) read.textContent = img.dataset.char;
+  }
+});
+</script>
+</body>
+</html>

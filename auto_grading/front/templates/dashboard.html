@@ -1,0 +1,1089 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — {{ total }} copies{% endblock %}
+
+{% block content %}
+
+<div class="dash">
+
+  <aside class="dash-left">
+    <div class="dash-left-head">
+      <input type="text" id="dash-search" placeholder="Rechercher nom / ID…">
+      <div class="filters chips">
+        <button data-filter="all" class="active">Tous</button>
+        <button data-filter="diff">Diff CV/AMC</button>
+        <button data-filter="amc_unvalidated">AMC non validé</button>
+        <button data-filter="no_mires">NO_MIRES</button>
+        <button data-filter="id_incomplet">ID incomplet</button>
+        <button data-filter="ambiguous">Ambigu</button>
+        <button data-filter="validated">Validés</button>
+      </div>
+      <div class="list-count"><span id="visible-count">{{ total }}</span> / {{ total }} copies</div>
+    </div>
+    <div class="student-list" id="student-list">
+      {% for c in copies %}
+        {% set has_diff = (c.cv_amc_diff_count is not none) and (c.cv_amc_diff_count > 0) %}
+        <div class="student-row"
+             data-batch="{{ c.batch }}" data-page="{{ c.page }}"
+             data-flags="{{ ' '.join(c.flags) }}"
+             data-diff="{{ 1 if has_diff else 0 }}"
+             data-search="{{ c.canonical_name|lower }} {{ c.canonical_id }} {{ c.student_id }}">
+          <span class="sr-name">{{ c.canonical_name }}</span>
+          <span class="sr-dots">
+            {% if c.validated %}<span class="dot dot-validated" title="validé"></span>{% endif %}
+            {% if has_diff %}<span class="dot dot-diff" title="diff CV/AMC"></span>{% endif %}
+            {% if 'ambiguous' in c.flags %}<span class="dot dot-ambig" title="ambigu"></span>{% endif %}
+            {% if 'no_mires' in c.flags or 'id_incomplet' in c.flags %}<span class="dot dot-danger" title="lecture incertaine"></span>{% endif %}
+          </span>
+          <span class="sr-score">{{ "%.1f"|format(c.score) }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <main class="dash-right">
+
+    {# ===== Fichiers du projet : copies scannées + liste étudiants ============== #}
+    <section class="project-files">
+      <h2 class="pf-title">📁 Fichiers du projet</h2>
+      <div class="pf-grid">
+
+        {# Carte 1 : copies scannées (PDF) #}
+        <div class="pf-card pf-card-scans">
+          <div class="pf-card-head">
+            <span class="pf-card-icon">📄</span>
+            <span>Copies scannées (PDF)</span>
+          </div>
+          <div class="pf-card-body">
+            <div class="pf-path">
+              Dossier : <code>{{ project_files.amc_dir }}</code>
+            </div>
+            {% if project_files.scan_pdfs %}
+            <ul class="pf-pdf-list">
+              {% for pdf in project_files.scan_pdfs %}
+              <li>
+                <button type="button" class="pf-pdf-hide" data-name="{{ pdf.name }}"
+                        title="Retirer ce PDF de la liste AMCx (fichier conservé sur disque)">✕</button>
+                <div class="pf-pdf-info">
+                  <span class="pf-pdf-name">{{ pdf.name }}</span>
+                  <span class="pf-pdf-meta">{{ pdf.pages }} pages · {{ "%.1f"|format(pdf.size_mb) }} Mo · {{ pdf.mtime }}</span>
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+            <div class="pf-stats">
+              📥 <strong>{{ project_files.n_extracted }}</strong> extraites ·
+              ⚙ <strong>{{ project_files.n_corrected }}</strong> corrigées ·
+              ✓ <strong>{{ project_files.n_validated }}</strong> validées
+            </div>
+            {% else %}
+            <div class="pf-empty">Aucun PDF dans <code>{{ project_files.amc_dir }}</code>.</div>
+            {% endif %}
+            {% if project_files.scan_pdfs_hidden %}
+            <details class="pf-hidden-pdfs">
+              <summary>{{ project_files.scan_pdfs_hidden|length }} fichier(s) retiré(s) de la liste</summary>
+              <ul class="pf-pdf-list pf-hidden-list">
+                {% for pdf in project_files.scan_pdfs_hidden %}
+                <li>
+                  <button type="button" class="pf-pdf-unhide" data-name="{{ pdf.name }}"
+                          title="Ré-ajouter à la liste AMCx">+</button>
+                  <span class="pf-pdf-name pf-pdf-hidden">{{ pdf.name }}</span>
+                </li>
+                {% endfor %}
+              </ul>
+            </details>
+            {% endif %}
+
+            <div class="pf-actions">
+              <label class="btn btn-primary btn-small">
+                + Ajouter un PDF
+                <input type="file" accept=".pdf" hidden id="pf-upload-pdf">
+              </label>
+              <button type="button" class="btn btn-small" id="pf-process"
+                      {% if not project_files.scan_pdfs %}disabled{% endif %}>
+                ⚙ Traiter les scans
+              </button>
+              <span id="pf-status" class="settings-hint"></span>
+            </div>
+
+            <div class="pf-progress" id="pf-progress" hidden>
+              <div class="pf-progress-step" id="pf-progress-step">Préparation…</div>
+              <div class="pf-progress-bar">
+                <div class="pf-progress-fill" id="pf-progress-fill" style="width:0%"></div>
+              </div>
+              <details class="pf-progress-log-wrap">
+                <summary>voir le détail</summary>
+                <pre class="pf-progress-log" id="pf-progress-log"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        {# Carte 2 : liste étudiants xlsx #}
+        <div class="pf-card pf-card-students">
+          <div class="pf-card-head">
+            <span class="pf-card-icon">📋</span>
+            <span>Liste étudiants</span>
+          </div>
+          <div class="pf-card-body">
+            {% if project_files.student_xlsx_name %}
+            <div class="pf-xlsx-file">
+              Fichier : <code>{{ project_files.student_xlsx_name }}</code>
+              {% if not project_files.student_xlsx_exists %}
+              <span class="pf-warn">⚠ introuvable</span>
+              {% endif %}
+            </div>
+            <div class="pf-stats">
+              👥 <strong>{{ project_files.n_students }}</strong> étudiants
+            </div>
+            {% else %}
+            <div class="pf-empty">Aucune liste d'étudiants chargée.</div>
+            {% endif %}
+            <div class="pf-actions">
+              <button type="button" class="btn btn-primary btn-small" id="pf-open-xlsx">
+                {% if project_files.student_xlsx_name %}↻ Changer la liste{% else %}+ Charger la liste{% endif %}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {# Carte 3 : fichiers de notes externes (csv/xlsx) #}
+        <div class="pf-card pf-card-grades">
+          <div class="pf-card-head">
+            <span class="pf-card-icon">📊</span>
+            <span>Fichiers de notes externes</span>
+          </div>
+          <div class="pf-card-body">
+            {% if grade_files_info %}
+            <ul class="pf-grade-list">
+              {% for gf in grade_files_info %}
+              <li>
+                <div class="pf-grade-name">{{ gf.filename }}</div>
+                <div class="pf-grade-meta">
+                  {{ gf.grade_cols|length }} colonne(s) · jointure {{ gf.join_mode }}
+                  {% set total_matched = gf.grade_cols|sum(attribute='n_matched') %}
+                  {% if total_matched %}
+                    · {{ (total_matched / gf.grade_cols|length)|int }} matchs/col
+                  {% endif %}
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <div class="pf-empty">Aucun fichier de notes importé.</div>
+            {% endif %}
+            <div class="pf-actions">
+              <button type="button" class="btn btn-primary btn-small" id="pf-open-grades">
+                {% if grade_files_info %}↻ Gérer{% else %}+ Importer{% endif %}
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <section class="global-stats">
+      <h2 class="gs-title">Récapitulatif — {{ total }} copies</h2>
+      <div class="stat-cards">
+        <div class="stat-card"><div class="num">{{ stats.n }}</div><div class="label">copies</div></div>
+        <div class="stat-card sc-ok"><div class="num">{{ stats.n_validated }}</div><div class="label">validées</div></div>
+        <div class="stat-card sc-warn"><div class="num">{{ stats.n_to_review }}</div><div class="label">à revoir</div></div>
+        <div class="stat-card sc-hi"><div class="num">{{ "%.2f"|format(stats.mean) }}</div><div class="label">moyenne μ</div></div>
+        <div class="stat-card"><div class="num">{{ "%.2f"|format(stats.variance) }}</div><div class="label">variance σ²</div></div>
+        <div class="stat-card"><div class="num">{{ "%.2f"|format(stats.std) }}</div><div class="label">écart-type σ</div></div>
+        <div class="stat-card"><div class="num">{{ "%.1f"|format(stats.median) }}</div><div class="label">médiane</div></div>
+        <div class="stat-card"><div class="num">{{ "%.1f"|format(stats.min) }} – {{ "%.1f"|format(stats.max) }}</div><div class="label">min – max</div></div>
+        <div class="stat-card sc-warn"><div class="num">{{ stats.n_below }}</div><div class="label">sous le seuil ({{ "%g"|format(stats.pass_mark) }})</div></div>
+      </div>
+
+      <div class="settings-bar">
+        <span class="settings-title">⚙ Réglages</span>
+        <label>Granularité (largeur de barre)
+          <input type="number" id="cfg-granularity" step="0.5" min="0.1" max="50"
+                 value="{{ "%g"|format(cfg.hist_granularity) }}"></label>
+        <label>Seuil de réussite
+          <input type="number" id="cfg-pass-mark" step="0.5" min="0"
+                 value="{{ "%g"|format(cfg.pass_mark) }}"></label>
+        <button id="cfg-apply" class="btn btn-primary btn-small">Appliquer</button>
+        <button id="save-report" class="btn btn-small">💾 Sauvegarder le compte rendu</button>
+        <button id="bank-sync" class="btn btn-small" title="Recalcule les stats des questions importées depuis la banque (depuis les copies du projet courant)">📚 Mettre à jour la banque</button>
+        <span id="report-status" class="settings-hint"></span>
+        <span id="bank-sync-status" class="settings-hint"></span>
+        <span class="settings-hint">↵ Entrée dans un champ = Appliquer</span>
+      </div>
+
+      <details class="ai-settings">
+        <summary><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon" alt=""> IA — édition assistée des questions (clé API Anthropic)</summary>
+        <div class="ai-settings-body">
+          <label>Clé API
+            <input type="password" id="cfg-ai-key" autocomplete="off"
+                   placeholder="sk-ant-…"
+                   value="{{ cfg.anthropic_api_key|default('', true) }}"></label>
+          <label>Modèle
+            <select id="cfg-ai-model">
+              {% set sel = cfg.ai_model|default('claude-sonnet-4-6', true) %}
+              <option value="claude-sonnet-4-6" {% if sel == 'claude-sonnet-4-6' %}selected{% endif %}>Sonnet 4.6 (rapide, bon marché)</option>
+              <option value="claude-opus-4-7"   {% if sel == 'claude-opus-4-7'   %}selected{% endif %}>Opus 4.7 (qualité supérieure)</option>
+              <option value="claude-haiku-4-5"  {% if sel == 'claude-haiku-4-5'  %}selected{% endif %}>Haiku 4.5 (le moins cher)</option>
+            </select></label>
+          <button id="cfg-ai-save" class="btn btn-small">Enregistrer</button>
+          <span id="cfg-ai-status" class="settings-hint"></span>
+          <span class="settings-hint">
+            Crée une clé sur
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+            Coût typique : ~1¢ par modification de question.
+          </span>
+          <div class="ai-usage-widget" id="ai-usage-widget">
+            <span class="ai-usage-title">📊 Consommation session</span>
+            <span id="ai-usage-line">aucun appel</span>
+            <button type="button" class="btn btn-tiny" id="ai-usage-reset">Reset</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="param-block">
+        <div class="param-block-title">Rescaling par colonne — note* = note × max ∕ seuil</div>
+        {% for col in columns %}
+          <div class="param-row" data-col-key="{{ col.key }}"
+               {% if col.key != 'qcm' %}data-path="{{ col.path }}" data-idx="{{ col.idx }}"{% endif %}>
+            <span class="param-label"><span class="lg-swatch" style="background:{{ col.color }}"></span>{{ col.label }}</span>
+            <label>seuil supérieur <input type="number" class="p-seuil" step="0.5" min="0.5"
+                   value="{{ "%g"|format(col.seuil) }}"></label>
+            <label>max <input type="number" class="p-max" step="0.5" min="0.5"
+                   value="{{ "%g"|format(col.max) }}"></label>
+          </div>
+        {% endfor %}
+      </div>
+
+      <div class="histogram">
+        <div class="hist-title">Calibration — distributions rescalées (note × max ∕ seuil)</div>
+        <svg viewBox="0 0 {{ hist_top.width }} {{ hist_top.height }}" class="hist-svg"
+             data-report-name="histogramme_calibration.svg" preserveAspectRatio="xMidYMid meet">
+          {% for s in hist_top.series %}
+            {% for b in s.bars %}{% if b.count %}
+              <rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}"
+                    rx="1.5" fill="{{ s.color }}" fill-opacity="{{ s.opacity }}">
+                <title>{{ s.name }} — [{{ b.lo }}, {{ b.hi }}] : {{ b.count }} copie(s)</title>
+              </rect>
+            {% endif %}{% endfor %}
+          {% endfor %}
+          <line x1="0" y1="{{ hist_top.base_y }}" x2="{{ hist_top.width }}" y2="{{ hist_top.base_y }}" stroke="#ccc"/>
+          {% for t in hist_top.xticks %}
+            <text x="{{ t.x }}" y="{{ hist_top.base_y + 16 }}" class="hist-tick">{{ t.label }}</text>
+          {% endfor %}
+        </svg>
+        <div class="hist-legend">
+          {% for l in hist_top.legend %}
+            <span><span class="lg-swatch" style="background:{{ l.color }}"></span>{{ l.name }}</span>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="param-block">
+        <div class="param-block-title">Agrégation finale — poids par colonne + plafond (post-traitement)</div>
+        {% for col in columns %}
+          <div class="param-row" data-col-key="{{ col.key }}"
+               {% if col.key != 'qcm' %}data-path="{{ col.path }}" data-idx="{{ col.idx }}"{% endif %}>
+            <span class="param-label"><span class="lg-swatch" style="background:{{ col.color }}"></span>{{ col.label }}</span>
+            <label>poids d'agrégation <input type="number" class="p-weight" step="0.1" min="0"
+                   value="{{ "%g"|format(col.agg_weight) }}"></label>
+          </div>
+        {% endfor %}
+        <div class="param-row">
+          <span class="param-label">Plafond de la note finale</span>
+          <label>seuil final <input type="number" id="cfg-final-threshold" step="0.5" min="0.5"
+                 value="{{ "%g"|format(cfg.final_threshold) }}"></label>
+          <span class="small">note finale = min(moyenne pondérée, seuil) — appliqué seulement ici</span>
+        </div>
+      </div>
+
+      <div class="histogram">
+        <div class="hist-title">Note finale agrégée —
+          <b>{{ stats.n_below }}</b> étudiant(s) sous le seuil de {{ "%g"|format(stats.pass_mark) }}</div>
+        <svg viewBox="0 0 {{ hist_bottom.width }} {{ hist_bottom.height }}" class="hist-svg"
+             data-report-name="histogramme_note_finale.svg" preserveAspectRatio="xMidYMid meet">
+          {% if hist_bottom.band_w and hist_bottom.band_w > 0 %}
+            <rect x="{{ hist_bottom.band_x }}" y="{{ hist_bottom.pad_t }}" width="{{ hist_bottom.band_w }}"
+                  height="{{ hist_bottom.base_y - hist_bottom.pad_t }}" fill="#f80" opacity="0.10"/>
+          {% endif %}
+          {% for s in hist_bottom.series %}
+            {% for b in s.bars %}
+              <rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="2" fill="{{ s.color }}">
+                <title>[{{ b.lo }}, {{ b.hi }}] : {{ b.count }} copie(s)</title>
+              </rect>
+              {% if b.count %}
+                <text x="{{ b.cx }}" y="{{ b.y - 3 }}" class="hist-barlabel">{{ b.count }}</text>
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+          <line x1="0" y1="{{ hist_bottom.base_y }}" x2="{{ hist_bottom.width }}" y2="{{ hist_bottom.base_y }}" stroke="#ccc"/>
+          {% for t in hist_bottom.xticks %}
+            <text x="{{ t.x }}" y="{{ hist_bottom.base_y + 16 }}" class="hist-tick">{{ t.label }}</text>
+          {% endfor %}
+          <line x1="{{ hist_bottom.mean_x }}" y1="{{ hist_bottom.pad_t }}" x2="{{ hist_bottom.mean_x }}" y2="{{ hist_bottom.base_y }}"
+                stroke="#f80" stroke-width="2" stroke-dasharray="4 3"/>
+          <text x="{{ hist_bottom.mean_x }}" y="{{ hist_bottom.pad_t + 8 }}" class="hist-mean-label">μ={{ "%.1f"|format(stats.mean) }}</text>
+          {% if hist_bottom.vline_x %}
+            <line x1="{{ hist_bottom.vline_x }}" y1="{{ hist_bottom.pad_t }}" x2="{{ hist_bottom.vline_x }}" y2="{{ hist_bottom.base_y }}"
+                  stroke="#d6485a" stroke-width="2"/>
+            <text x="{{ hist_bottom.vline_x }}" y="{{ hist_bottom.base_y - 4 }}" class="hist-vline-label">seuil {{ "%g"|format(hist_bottom.vline_val) }}</text>
+          {% endif %}
+        </svg>
+        <div class="hist-legend">
+          <span><span class="lg-swatch" style="background:#f80"></span>moyenne</span>
+          <span><span class="lg-swatch" style="background:#f80;opacity:.25"></span>± écart-type</span>
+          <span><span class="lg-swatch" style="background:#d6485a"></span>seuil de réussite — {{ stats.n_below }} en dessous</span>
+        </div>
+      </div>
+
+      <div class="formula-box">
+        <div class="formula-title">📐 Formule de la note finale (à donner aux étudiants)</div>
+        <div class="formula-main">
+          Note finale = min(
+          {%- if formula.terms|length == 1 %} {{ formula.terms[0].label }}*
+          {%- else %} ( {% for t in formula.terms %}{% if not loop.first %} + {% endif %}{{ "%g"|format(t.weight) }}·{{ t.label }}*{% endfor %} ) ∕ {{ "%g"|format(formula.denom) }}
+          {%- endif %} ,  {{ "%g"|format(formula.threshold) }} )
+        </div>
+        <div class="formula-defs">
+          {% for t in formula.terms %}
+            <div><b>{{ t.label }}*</b> = {{ t.label }} × {{ "%g"|format(t.max) }} ∕ {{ "%g"|format(t.seuil) }}
+              <span class="small">({{ t.label }} sur {{ "%g"|format(t.seuil) }}, ramené sur {{ "%g"|format(t.max) }})</span></div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="scatter-box">
+        <div class="hist-title">Nuage de points — corrélation entre deux notes</div>
+        <div class="scatter-controls">
+          <label>X <select id="sc-x"></select></label>
+          <label>Y <select id="sc-y"></select></label>
+          <span id="sc-corr" class="sc-corr">—</span>
+        </div>
+        <svg id="sc-svg" viewBox="0 0 470 340" class="hist-svg"
+             data-report-name="nuage_points.svg" preserveAspectRatio="xMidYMid meet"></svg>
+        <div id="sc-tooltip" class="sc-tooltip"></div>
+      </div>
+      <script id="scatter-data" type="application/json">{{ scatter|tojson }}</script>
+    </section>
+  </main>
+
+</div>
+
+<div class="modal-overlay" id="xlsx-modal">
+  <div class="modal">
+    <h3>Liste étudiants (xlsx)</h3>
+    <p class="modal-hint">Choisis un fichier Excel et indique les colonnes nom / prénom / ID.
+       Sert à relier les identifiants lus aux noms des étudiants.</p>
+    <label class="modal-field">Fichier xlsx
+      <input type="file" id="xlsx-file" accept=".xlsx">
+    </label>
+    <div id="xlsx-cols" class="xlsx-cols" style="display:none">
+      <label class="modal-field">Colonne ID <select id="col-id"></select></label>
+      <label class="modal-field">Colonne Nom <select id="col-nom"></select></label>
+      <label class="modal-field">Colonne Prénom <select id="col-prenom"></select></label>
+    </div>
+    <div id="xlsx-status" class="modal-status"></div>
+    <div class="modal-actions">
+      <button class="btn" id="xlsx-cancel">Annuler</button>
+      <button class="btn btn-primary" id="xlsx-save" disabled>Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="grades-modal">
+  <div class="modal modal-wide">
+    <h3>Fichiers de notes (csv / xlsx)</h3>
+    <p class="modal-hint">Importe des notes externes pour les superposer à l'histogramme
+       et les agréger. Jointure aux étudiants par identifiant <b>ou par nom</b> ;
+       le fichier source n'est jamais modifié.</p>
+
+    {% if grade_files_info %}
+    <div class="grade-files-list">
+      {% for gf in grade_files_info %}
+        <div class="grade-file-row" data-path="{{ gf.path }}"
+             data-join-mode="{{ gf.join_mode }}" data-join-col="{{ gf.join_col }}"
+             data-data-start="{{ gf.data_start }}">
+          <div class="gfr-head">
+            <b>{{ gf.filename }}</b>
+            <span class="small">jointure par {{ 'nom' if gf.join_mode == 'name' else 'identifiant' }}
+              · col. {{ gf.join_col + 1 }}</span>
+            {% set nprob = gf.report.n_ambiguous + gf.report.n_unmatched %}
+            {% if nprob %}<span class="gi-badge-warn">⚠ {{ nprob }} à vérifier</span>{% endif %}
+            <button class="btn btn-tiny gf-remove">✕ Retirer</button>
+          </div>
+          <div class="gfr-cols">
+            {% for gc in gf.grade_cols %}
+              <span class="gfr-col">
+                <b>{{ gc.label }}</b> <span class="small">({{ gc.n_matched }} joints)</span>
+              </span>
+            {% endfor %}
+            <span class="small">— seuil / max / poids se règlent sous les histogrammes</span>
+          </div>
+          {% if gf.report.problems %}
+          <div class="gi-resolve">
+            <div class="gi-resolve-title">Noms à confirmer ({{ gf.report.problems|length }})</div>
+            {% for p in gf.report.problems %}
+              <div class="gi-resolve-row" data-raw="{{ p.raw }}">
+                <span class="gi-resolve-name">{{ p.raw }}</span>
+                <select class="gi-resolve-sel">
+                  {% if p.auto %}
+                    <option value="">↳ auto : {{ p.auto.name }} ({{ p.auto.score }})</option>
+                  {% else %}
+                    <option value="">↳ aucun match auto</option>
+                  {% endif %}
+                  {% for c in p.candidates %}
+                    <option value="{{ c.id }}">{{ c.name }} — {{ c.score }}</option>
+                  {% endfor %}
+                  <option value="__ignore__">⊘ ignorer cette ligne</option>
+                </select>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if gf.report.resolved %}
+          <div class="gi-resolve gi-resolved">
+            <div class="gi-resolve-title">Résolus manuellement ({{ gf.report.resolved|length }})</div>
+            {% for rr in gf.report.resolved %}
+              <div class="gi-resolve-row" data-raw="{{ rr.raw }}">
+                <span class="gi-resolve-name">{{ rr.raw }} → <b>{{ rr.target }}</b></span>
+                <button class="btn btn-tiny gi-revert">↩ auto</button>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    {% else %}
+      <p class="modal-hint"><i>Aucun fichier de notes importé pour l'instant.</i></p>
+    {% endif %}
+
+    <hr class="modal-sep">
+    <label class="modal-field">Ajouter un fichier (.csv / .xlsx)
+      <input type="file" id="grade-file" accept=".csv,.xlsx">
+    </label>
+    <div id="gi-config" class="gi-form" style="display:none">
+      <div class="modal-field">Jointure aux étudiants
+        <div class="gi-radio">
+          <label><input type="radio" name="join-mode" value="name"> par nom (fuzzy)</label>
+          <label><input type="radio" name="join-mode" value="id"> par identifiant</label>
+        </div>
+      </div>
+      <label class="modal-field">Colonne de jointure <select id="gi-join-col"></select></label>
+      <label class="modal-field">Première ligne de données (index 0-based)
+        <input type="number" id="gi-data-start" min="0" step="1" value="0"></label>
+      <div class="modal-field">Colonnes de notes (coche celles à importer)
+        <div class="grade-cols-list" id="gi-grade-cols"></div>
+      </div>
+      <div class="modal-field">Aperçu
+        <div class="gi-preview" id="gi-preview"></div>
+      </div>
+    </div>
+    <div id="grades-status" class="modal-status"></div>
+    <div class="modal-actions">
+      <button class="btn" id="grades-cancel">Fermer</button>
+      <button class="btn btn-primary" id="grades-save" disabled>Enregistrer le fichier</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const rows = Array.from(document.querySelectorAll('.student-row'));
+const search = document.getElementById('dash-search');
+const visibleCount = document.getElementById('visible-count');
+let activeFilter = 'all';
+
+document.querySelectorAll('[data-filter]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-filter]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    activeFilter = b.dataset.filter;
+    applyFilter();
+  });
+});
+search.addEventListener('input', applyFilter);
+
+function applyFilter() {
+  const q = search.value.toLowerCase().trim();
+  let n = 0;
+  rows.forEach(r => {
+    const flags = r.dataset.flags;
+    const hasDiff = r.dataset.diff === '1';
+    let vis = true;
+    if (activeFilter === 'diff') vis = hasDiff;
+    else if (activeFilter === 'validated') vis = flags.includes('validated');
+    else if (activeFilter !== 'all') vis = flags.includes(activeFilter);
+    if (vis && q) vis = r.dataset.search.includes(q);
+    r.style.display = vis ? '' : 'none';
+    if (vis) n++;
+  });
+  visibleCount.textContent = n;
+}
+
+// Click sur un étudiant → ouvre la vue copie
+rows.forEach(r => r.addEventListener('click', () => {
+  location.href = `/student/${r.dataset.batch}/${r.dataset.page}`;
+}));
+
+// --- réglages : granularité + paramètres par colonne (rescaling + agrégation) ---
+async function applyConfig() {
+  const body = {
+    hist_granularity: parseFloat(document.getElementById('cfg-granularity').value),
+    final_threshold: parseFloat(document.getElementById('cfg-final-threshold').value),
+    pass_mark: parseFloat(document.getElementById('cfg-pass-mark').value),
+  };
+  // chaque colonne a 2 lignes de paramètres (rescaling + agrégation) → on fusionne
+  const cols = {};
+  document.querySelectorAll('.param-row').forEach(row => {
+    const key = row.dataset.colKey;
+    if (!key) return;
+    const c = cols[key] || (cols[key] = {key: key, path: row.dataset.path,
+                                         idx: row.dataset.idx});
+    const seuil = row.querySelector('.p-seuil');
+    const max = row.querySelector('.p-max');
+    const weight = row.querySelector('.p-weight');
+    if (seuil) c.seuil = parseFloat(seuil.value);
+    if (max) c.max = parseFloat(max.value);
+    if (weight) c.agg_weight = parseFloat(weight.value);
+  });
+  const qcm = cols['qcm'];
+  if (qcm) {
+    if (qcm.seuil !== undefined) body.qcm_seuil = qcm.seuil;
+    if (qcm.max !== undefined) body.qcm_max = qcm.max;
+    if (qcm.agg_weight !== undefined) body.qcm_agg_weight = qcm.agg_weight;
+  }
+  body.columns = Object.values(cols).filter(c => c.key !== 'qcm').map(c => ({
+    path: c.path, idx: parseInt(c.idx, 10),
+    seuil: c.seuil, max: c.max, agg_weight: c.agg_weight,
+  }));
+  const r = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (r.ok) { location.reload(); }
+  else { const j = await r.json(); alert(j.error || 'erreur'); }
+}
+document.getElementById('cfg-apply').addEventListener('click', applyConfig);
+// ↵ Entrée dans un champ de réglage = Appliquer
+document.querySelectorAll('.settings-bar input, .param-row input').forEach(inp => {
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); applyConfig(); }
+  });
+});
+
+// --- nuage de points (scatter + corrélation de Pearson) ---
+const SCATTER = JSON.parse(document.getElementById('scatter-data').textContent);
+const scX = document.getElementById('sc-x');
+const scY = document.getElementById('sc-y');
+const scCorr = document.getElementById('sc-corr');
+const scSvg = document.getElementById('sc-svg');
+
+function scEsc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  return (sxx === 0 || syy === 0) ? null : sxy / Math.sqrt(sxx * syy);
+}
+function scLabel(id) {
+  const v = SCATTER.variables.find(v => v.id === id);
+  return v ? v.label : id;
+}
+let scXLabel = '', scYLabel = '';
+function drawScatter() {
+  const xid = scX.value, yid = scY.value;
+  scXLabel = scLabel(xid);
+  scYLabel = scLabel(yid);
+  const pts = SCATTER.points.filter(p => p.v[xid] != null && p.v[yid] != null);
+  const xs = pts.map(p => p.v[xid]), ys = pts.map(p => p.v[yid]);
+  const r = pearson(xs, ys);
+  scCorr.textContent = (r == null)
+    ? 'corrélation : —'
+    : `corrélation r = ${r.toFixed(3)}  (n = ${pts.length})`;
+  const W = 470, H = 340, padL = 44, padB = 36, padT = 12, padR = 14;
+  if (!pts.length) { scSvg.innerHTML = '<text x="235" y="170" text-anchor="middle" fill="#999">aucune donnée</text>'; return; }
+  const xlo = Math.min(...xs), xhi = Math.max(...xs);
+  const ylo = Math.min(...ys), yhi = Math.max(...ys);
+  const xspan = (xhi - xlo) || 1, yspan = (yhi - ylo) || 1;
+  const sx = v => padL + (v - xlo) / xspan * (W - padL - padR);
+  const sy = v => (H - padB) - (v - ylo) / yspan * (H - padT - padB);
+  let s = '';
+  // axes
+  s += `<line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#bbb"/>`;
+  s += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H-padB}" stroke="#bbb"/>`;
+  // graduations
+  for (let k = 0; k <= 4; k++) {
+    const xv = xlo + xspan * k / 4, yv = ylo + yspan * k / 4;
+    s += `<text x="${sx(xv).toFixed(1)}" y="${H-padB+15}" font-size="10" fill="#999" text-anchor="middle">${(+xv.toFixed(1))}</text>`;
+    s += `<text x="${padL-6}" y="${(sy(yv)+3).toFixed(1)}" font-size="10" fill="#999" text-anchor="end">${(+yv.toFixed(1))}</text>`;
+  }
+  // points (class + data-* pour le tooltip interactif ; <title> pour le SVG exporté)
+  for (const p of pts) {
+    s += `<circle class="sc-dot" cx="${sx(p.v[xid]).toFixed(1)}" cy="${sy(p.v[yid]).toFixed(1)}" r="4" `
+       + `fill="#0a6ed1" fill-opacity="0.55" stroke="#0a6ed1" `
+       + `data-name="${scEsc(p.name)}" data-xv="${p.v[xid]}" data-yv="${p.v[yid]}">`
+       + `<title>${scEsc(p.name)}  (${p.v[xid]} ; ${p.v[yid]})</title></circle>`;
+  }
+  // libellés d'axes
+  s += `<text x="${(padL+(W-padR))/2}" y="${H-4}" font-size="11" fill="#555" text-anchor="middle">${scEsc(scLabel(xid))}</text>`;
+  s += `<text x="12" y="${(padT+(H-padB))/2}" font-size="11" fill="#555" text-anchor="middle" transform="rotate(-90 12 ${(padT+(H-padB))/2})">${scEsc(scLabel(yid))}</text>`;
+  scSvg.innerHTML = s;
+}
+// tooltip interactif : survol d'un point → nom + valeurs (délégation sur le svg,
+// survit aux redraws de innerHTML)
+const scTip = document.getElementById('sc-tooltip');
+scSvg.addEventListener('mouseover', e => {
+  const c = e.target.closest('.sc-dot');
+  if (!c) return;
+  scTip.innerHTML = '<b>' + scEsc(c.dataset.name) + '</b><br>'
+    + scEsc(scXLabel) + ' : ' + c.dataset.xv + '<br>'
+    + scEsc(scYLabel) + ' : ' + c.dataset.yv;
+  scTip.style.display = 'block';
+});
+scSvg.addEventListener('mousemove', e => {
+  if (scTip.style.display !== 'block') return;
+  scTip.style.left = (e.clientX + 14) + 'px';
+  scTip.style.top = (e.clientY + 14) + 'px';
+});
+scSvg.addEventListener('mouseout', e => {
+  if (e.target.closest('.sc-dot')) scTip.style.display = 'none';
+});
+
+(function initScatter() {
+  const opts = SCATTER.variables.map(v => `<option value="${scEsc(v.id)}">${scEsc(v.label)}</option>`).join('');
+  scX.innerHTML = opts;
+  scY.innerHTML = opts;
+  const n = SCATTER.variables.length;
+  scX.selectedIndex = 0;
+  scY.selectedIndex = n > 1 ? 1 : 0;
+  scX.addEventListener('change', drawScatter);
+  scY.addEventListener('change', drawScatter);
+  drawScatter();
+})();
+
+// --- sauvegarde du compte rendu (csv + graphiques) ---
+function serializeSvg(svgEl) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  style.textContent =
+    '.hist-tick{font-size:10px;fill:#999;text-anchor:middle}'
+    + '.hist-barlabel{font-size:9px;fill:#666;text-anchor:middle}'
+    + '.hist-mean-label{font-size:10px;fill:#e07a00;font-weight:700;text-anchor:middle}'
+    + '.hist-vline-label{font-size:10px;fill:#d6485a;font-weight:700;text-anchor:middle}'
+    + 'text{font-family:system-ui,sans-serif}';
+  clone.insertBefore(style, clone.firstChild);
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + clone.outerHTML;
+}
+document.getElementById('save-report').addEventListener('click', async () => {
+  const status = document.getElementById('report-status');
+  status.textContent = 'Sauvegarde…';
+  const svgs = [];
+  document.querySelectorAll('svg[data-report-name]').forEach(svg => {
+    svgs.push({filename: svg.dataset.reportName, content: serializeSvg(svg)});
+  });
+  const r = await fetch('/api/save-report', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({svgs: svgs})
+  });
+  const j = await r.json();
+  status.textContent = r.ok
+    ? `✓ compte rendu enregistré dans ${j.dir}/ (${j.n_rows} notes, ${j.n_svg} graphiques)`
+    : '✘ ' + (j.error || 'erreur');
+});
+
+// --- bouton "📚 Mettre à jour la banque" ---------------------------------
+// Scan toutes les copies du projet courant et remet à jour les stats des
+// questions dont `data._bank_id` est rempli (idempotent : remplace l'entrée
+// `stats.by_project[<projet>]` de chaque question). Skip open/answerbox.
+document.getElementById('bank-sync').addEventListener('click', async () => {
+  const btn = document.getElementById('bank-sync');
+  const st = document.getElementById('bank-sync-status');
+  btn.disabled = true;
+  st.textContent = 'Synchronisation…';
+  try {
+    const r = await fetch('/api/bank/sync', {method: 'POST'});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      st.textContent = '✘ ' + (j.error || 'erreur');
+      return;
+    }
+    if (j.updated === 0) {
+      st.textContent = j.msg || '✓ aucune question importée';
+    } else {
+      st.textContent = '✓ ' + j.updated + ' question(s) mises à jour (' +
+                       j.total_copies + ' copies, projet ' + j.project + ')';
+    }
+  } catch (e) {
+    st.textContent = '✘ ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// --- Réglages IA (clé Anthropic + modèle) ---
+document.getElementById('cfg-ai-save').addEventListener('click', async () => {
+  const key = document.getElementById('cfg-ai-key').value.trim();
+  const model = document.getElementById('cfg-ai-model').value;
+  const st = document.getElementById('cfg-ai-status');
+  st.textContent = 'Enregistrement…';
+  const r = await fetch('/api/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({anthropic_api_key: key, ai_model: model})
+  });
+  const j = await r.json().catch(() => ({}));
+  st.textContent = r.ok ? '✓ enregistré' : '✘ ' + (j.error || 'erreur');
+});
+
+// --- Compteur de tokens IA (session) ---
+async function refreshAiUsage() {
+  const line = document.getElementById('ai-usage-line');
+  try {
+    const r = await fetch('/api/ai/usage');
+    const u = await r.json();
+    if (!u.n_calls) {
+      line.textContent = 'aucun appel depuis le démarrage';
+      return;
+    }
+    const totalIn = (u.input_tokens || 0) + (u.cache_creation || 0) + (u.cache_read || 0);
+    const cost = u.cost_usd != null ? ' · $' + u.cost_usd.toFixed(4) : '';
+    const breakdown = Object.entries(u.by_model || {}).map(([m, n]) => m + '×' + n).join(', ');
+    line.innerHTML = `${u.n_calls} appel(s) · ${totalIn} input + ${u.output_tokens || 0} output` +
+                     cost + (breakdown ? ` · <em>${breakdown}</em>` : '') +
+                     (u.started_at ? ` · depuis ${u.started_at.slice(11, 16)}` : '');
+  } catch (e) {
+    line.textContent = 'indisponible';
+  }
+}
+document.getElementById('ai-usage-reset').addEventListener('click', async () => {
+  await fetch('/api/ai/usage/reset', {method: 'POST'});
+  refreshAiUsage();
+});
+// Auto-refresh quand on déplie le panel IA
+document.querySelector('.ai-settings')?.addEventListener('toggle', refreshAiUsage);
+refreshAiUsage();
+
+// === Fichiers du projet : upload PDF + pipeline ============================
+// Upload : POST /api/upload-scan-pdf, puis reload de la page pour rafraîchir
+// la liste. Traitement : POST /api/process-scans → task_id → polling à 1.5 s.
+(function () {
+  const upInput = document.getElementById('pf-upload-pdf');
+  const procBtn = document.getElementById('pf-process');
+  const status  = document.getElementById('pf-status');
+  const progress = document.getElementById('pf-progress');
+  const stepEl  = document.getElementById('pf-progress-step');
+  const fillEl  = document.getElementById('pf-progress-fill');
+  const logEl   = document.getElementById('pf-progress-log');
+
+  // --- Upload PDF ---------------------------------------------------------
+  if (upInput) {
+    upInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      status.textContent = `Upload ${file.name} (${(file.size/1e6).toFixed(1)} Mo)…`;
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const r = await fetch('/api/upload-scan-pdf', {method: 'POST', body: fd});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) { status.textContent = '✘ ' + (j.error || 'erreur'); return; }
+        status.textContent = `✓ ${j.name} (${j.pages} pages, ${j.size_mb} Mo) — rechargement…`;
+        setTimeout(() => location.reload(), 600);
+      } catch (err) {
+        status.textContent = '✘ Réseau : ' + err;
+      }
+    });
+  }
+
+  // --- Process scans (async) ----------------------------------------------
+  if (procBtn) {
+    procBtn.addEventListener('click', async () => {
+      if (!confirm('Lancer le traitement des PDFs ?\n\n' +
+                   '1. Extraction PDF → JPGs (300 dpi)\n' +
+                   '2. Correction CV+ML (peut prendre plusieurs minutes selon le nombre de copies)\n' +
+                   '3. Fusion dans raw_responses/\n\n' +
+                   'Les copies déjà validées dans l\'UI seront préservées.')) return;
+      procBtn.disabled = true;
+      progress.hidden = false;
+      stepEl.textContent = 'Démarrage…';
+      fillEl.style.width = '0%';
+      logEl.textContent = '';
+      try {
+        const r = await fetch('/api/process-scans', {method: 'POST'});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          status.textContent = '✘ ' + (j.error || 'erreur');
+          procBtn.disabled = false;
+          return;
+        }
+        await _pollTask(j.task_id);
+      } catch (e) {
+        status.textContent = '✘ ' + e;
+        procBtn.disabled = false;
+      }
+    });
+  }
+
+  async function _pollTask(taskId) {
+    while (true) {
+      let s;
+      try {
+        const r = await fetch('/api/process-scans/' + taskId);
+        s = await r.json();
+      } catch (e) {
+        stepEl.textContent = 'Erreur réseau : ' + e;
+        break;
+      }
+      stepEl.textContent = s.step || '…';
+      fillEl.style.width = (s.progress || 0) + '%';
+      if (s.log) logEl.textContent = s.log.slice(-50).join('\n');
+      if (s.status === 'done') {
+        status.textContent = `✓ Traitement terminé · ${s.n_extracted||0} extraites · ${s.n_graded||0} corrigées · ${s.n_seeded||0} dans raw_responses/`;
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+      if (s.status === 'error') {
+        status.textContent = '✘ Pipeline : ' + (s.error || 'erreur');
+        if (procBtn) procBtn.disabled = false;
+        return;
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  // --- Bouton "Changer la liste" → ouvre la modale xlsx existante ---------
+  const openXlsxBtn = document.getElementById('pf-open-xlsx');
+  if (openXlsxBtn) {
+    openXlsxBtn.addEventListener('click', () => {
+      const m = document.getElementById('xlsx-modal');
+      if (m) m.classList.add('open');
+    });
+  }
+
+  // --- Hide / unhide d'un PDF (le fichier reste sur disque) ---------------
+  document.querySelectorAll('.pf-pdf-hide').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      if (!name) return;
+      if (!confirm(`Retirer « ${name} » de la liste AMCx ?\n\n` +
+                   `Le fichier reste sur le disque (tu peux le ré-ajouter plus tard). ` +
+                   `Les pages déjà extraites et corrigées de ce PDF ne sont pas supprimées.`)) return;
+      btn.disabled = true;
+      const r = await fetch('/api/scan-pdf/hide', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        alert('Échec : ' + (j.error || 'erreur'));
+        btn.disabled = false;
+        return;
+      }
+      location.reload();
+    });
+  });
+  document.querySelectorAll('.pf-pdf-unhide').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      if (!name) return;
+      btn.disabled = true;
+      const r = await fetch('/api/scan-pdf/unhide', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        alert('Échec : ' + (j.error || 'erreur'));
+        btn.disabled = false;
+        return;
+      }
+      location.reload();
+    });
+  });
+})();
+
+// --- modale liste étudiants (xlsx) ---
+const xlsxModal = document.getElementById('xlsx-modal');
+const xlsxStatus = document.getElementById('xlsx-status');
+const xlsxSave = document.getElementById('xlsx-save');
+// L'ouverture est gérée via #pf-open-xlsx (carte « Liste étudiants »).
+document.getElementById('xlsx-cancel').addEventListener('click', () => xlsxModal.classList.remove('open'));
+
+document.getElementById('xlsx-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  xlsxStatus.textContent = 'Lecture du fichier…';
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload-xlsx', {method: 'POST', body: fd});
+  const j = await r.json();
+  if (!r.ok) { xlsxStatus.textContent = '✘ ' + j.error; return; }
+  const sels = ['col-id', 'col-nom', 'col-prenom'].map(id => document.getElementById(id));
+  sels.forEach((sel, k) => {
+    sel.innerHTML = (k === 2 ? '<option value="">(aucune)</option>' : '') +
+      j.columns.map(c => `<option value="${c}">${c}</option>`).join('');
+    if (j.columns[k]) sel.value = j.columns[k];
+  });
+  document.getElementById('xlsx-cols').style.display = '';
+  xlsxSave.disabled = false;
+  xlsxStatus.textContent = j.columns.length + ' colonnes détectées.';
+});
+
+xlsxSave.addEventListener('click', async () => {
+  xlsxStatus.textContent = 'Enregistrement…';
+  const r = await fetch('/api/student-list', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      id_col: document.getElementById('col-id').value,
+      nom_col: document.getElementById('col-nom').value,
+      prenom_col: document.getElementById('col-prenom').value,
+    })
+  });
+  const j = await r.json();
+  if (r.ok) { xlsxStatus.textContent = '✓ ' + j.n_students + ' étudiants — rechargement…'; location.reload(); }
+  else xlsxStatus.textContent = '✘ ' + j.error;
+});
+
+// --- modale fichiers de notes (csv / xlsx) ---
+const gradesModal = document.getElementById('grades-modal');
+const gradesStatus = document.getElementById('grades-status');
+const gradesSave = document.getElementById('grades-save');
+let giAnalysis = null, giPath = null;
+// L'ouverture est gérée via #pf-open-grades (carte « Fichiers de notes »).
+document.getElementById('grades-cancel').addEventListener('click', () => gradesModal.classList.remove('open'));
+const _pfGradesBtn = document.getElementById('pf-open-grades');
+if (_pfGradesBtn) _pfGradesBtn.addEventListener('click', () => gradesModal.classList.add('open'));
+
+function giEsc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function giCell(v) { return (v === null || v === undefined || v === '') ? '∅' : v; }
+
+function giRenderPreview() {
+  if (!giAnalysis) return;
+  const joinCol = parseInt(document.getElementById('gi-join-col').value, 10);
+  const dataStart = parseInt(document.getElementById('gi-data-start').value, 10) || 0;
+  const gcols = [...document.querySelectorAll('#gi-grade-cols .gc-check:checked')]
+    .map(cb => ({idx: parseInt(cb.dataset.idx, 10), label: cb.dataset.label}));
+  const rows = giAnalysis.rows_preview || [];
+  let html = '', shown = 0;
+  for (let i = dataStart; i < rows.length && shown < 4; i++) {
+    const r = rows[i];
+    const parts = gcols.map(g => `${giEsc(g.label)}: <b>${giEsc(giCell(r[g.idx]))}</b>`);
+    html += `<div class="gi-pv-row">${giEsc(giCell(r[joinCol]))} &nbsp;│&nbsp; `
+          + `${parts.join(' &nbsp;│&nbsp; ')}</div>`;
+    shown++;
+  }
+  document.getElementById('gi-preview').innerHTML = html || '<i>(aucune ligne de données)</i>';
+}
+document.getElementById('gi-join-col').addEventListener('change', giRenderPreview);
+document.getElementById('gi-data-start').addEventListener('input', giRenderPreview);
+
+document.getElementById('grade-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  gradesStatus.textContent = 'Analyse du fichier…';
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload-grade-file', {method: 'POST', body: fd});
+  const j = await r.json();
+  if (!r.ok) { gradesStatus.textContent = '✘ ' + j.error; return; }
+  giPath = j.path;
+  giAnalysis = j.analysis;
+  const sug = giAnalysis.suggested;
+  document.querySelectorAll('input[name=join-mode]').forEach(rb => {
+    rb.checked = (rb.value === sug.join_mode);
+  });
+  document.getElementById('gi-join-col').innerHTML = giAnalysis.columns.map(c => {
+    const hint = c.looks_id ? ' [id ?]' : (c.looks_name ? ' [nom ?]' : '');
+    return `<option value="${c.idx}" ${c.idx === sug.join_col ? 'selected' : ''}>`
+      + `${giEsc(c.label)} (col ${c.idx + 1})${hint}</option>`;
+  }).join('');
+  const ds = document.getElementById('gi-data-start');
+  ds.value = sug.data_start;
+  ds.max = Math.max(0, giAnalysis.nrow - 1);
+  document.getElementById('gi-grade-cols').innerHTML = giAnalysis.columns.map(c => {
+    const on = sug.grade_cols.includes(c.idx);
+    const tag = c.looks_grade ? ' <span class="small">· note ?</span>' : '';
+    return `<label class="grade-col-row">
+      <input type="checkbox" class="gc-check" data-idx="${c.idx}" data-label="${giEsc(c.label)}" ${on ? 'checked' : ''}>
+      <span class="gc-name">${giEsc(c.label)} <span class="small">col ${c.idx + 1}</span>${tag}</span>
+    </label>`;
+  }).join('');
+  document.querySelectorAll('#gi-grade-cols .gc-check').forEach(cb => {
+    cb.addEventListener('change', giRenderPreview);
+  });
+  document.getElementById('gi-config').style.display = '';
+  gradesSave.disabled = false;
+  giRenderPreview();
+  gradesStatus.textContent = giAnalysis.ncol + ' colonnes · ' + giAnalysis.nrow + ' lignes détectées.';
+});
+
+gradesSave.addEventListener('click', async () => {
+  const grade_cols = [];
+  document.querySelectorAll('#gi-grade-cols .gc-check:checked').forEach(cb => {
+    grade_cols.push({idx: parseInt(cb.dataset.idx, 10), label: cb.dataset.label});
+  });
+  if (!grade_cols.length) { gradesStatus.textContent = '✘ choisis au moins une colonne de notes'; return; }
+  const mode = document.querySelector('input[name=join-mode]:checked');
+  gradesStatus.textContent = 'Enregistrement…';
+  const r = await fetch('/api/grade-file', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      path: giPath,
+      join_mode: mode ? mode.value : 'name',
+      join_col: parseInt(document.getElementById('gi-join-col').value, 10),
+      data_start: parseInt(document.getElementById('gi-data-start').value, 10) || 0,
+      grade_cols: grade_cols,
+    })
+  });
+  const j = await r.json();
+  if (r.ok) { gradesStatus.textContent = '✓ enregistré — rechargement…'; location.reload(); }
+  else gradesStatus.textContent = '✘ ' + j.error;
+});
+
+document.querySelectorAll('.gf-remove').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const row = btn.closest('.grade-file-row');
+    if (!confirm('Retirer ce fichier de notes ?')) return;
+    const r = await fetch('/api/grade-file/remove', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: row.dataset.path})
+    });
+    if (r.ok) location.reload();
+  });
+});
+
+async function giResolve(path, raw, studentId) {
+  const r = await fetch('/api/grade-file/resolve', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: path, raw_name: raw, student_id: studentId})
+  });
+  if (r.ok) location.reload();
+  else { const j = await r.json(); alert(j.error || 'erreur'); }
+}
+document.querySelectorAll('.gi-resolve-sel').forEach(sel => {
+  sel.addEventListener('change', () => {
+    const row = sel.closest('.gi-resolve-row');
+    giResolve(sel.closest('.grade-file-row').dataset.path, row.dataset.raw, sel.value);
+  });
+});
+document.querySelectorAll('.gi-revert').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const row = btn.closest('.gi-resolve-row');
+    giResolve(btn.closest('.grade-file-row').dataset.path, row.dataset.raw, '');
+  });
+});
+</script>
+{% endblock %}

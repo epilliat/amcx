@@ -1,0 +1,37 @@
+# Données spécifiques à un examen — jamais commitées
+auto_grading/pages/
+auto_grading/raw_responses/
+auto_grading/raw_responses_cv/
+auto_grading/results/
+auto_grading/_removed/
+auto_grading/to_review/
+auto_grading/compte_rendu/
+auto_grading/imports/
+auto_grading/sujet/*.tex
+auto_grading/sujet/*.pdf
+auto_grading/sujet/*.xy
+auto_grading/sujet/*.legacy-backup
+auto_grading/sujet/open_zones.json
+auto_grading/config.json
+auto_grading/student_list*.xlsx
+projet/
+
+# Runtime / build
+auto_grading/front/static/zoom_cache/
+**/__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.egg-info/
+
+# Env
+.venv/
+venv/
+.env
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
+.DS_Store

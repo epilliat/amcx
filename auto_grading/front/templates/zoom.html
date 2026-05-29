@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Zoom — {{ batch }}/page_{{ "%03d"|format(page) }}{% endblock %}
+{% block content %}
+<header class="sticky">
+  <div class="topnav">
+    <a href="/" class="back">← Index</a>
+    <a href="/student/{{ batch }}/{{ page }}" class="nav-btn">↑ Vue copie</a>
+    <a href="/flagged" class="nav-btn">↗ Review rapide</a>
+    {% if nav.prev %}<a href="/student/{{ nav.prev[0] }}/{{ nav.prev[1] }}/zoom" class="nav-btn" id="prev-link">← Préc zoom</a>{% endif %}
+    {% if nav.next %}<a href="/student/{{ nav.next[0] }}/{{ nav.next[1] }}/zoom" class="nav-btn" id="next-link">Suiv zoom →</a>{% endif %}
+  </div>
+  <h1>Zoom — {{ data.student_name or '?' }} <span class="small">{{ batch }}/page_{{ "%03d"|format(page) }} (id: {{ data.student_id }})</span></h1>
+  <div class="actions">
+    <span id="status" class="status">Modifications sauvegardées automatiquement</span>
+    <button id="save-validate" class="btn btn-primary">Sauvegarder & valider</button>
+  </div>
+  <p class="legend">
+    Cases dans la zone <span class="legend-filled">Positifs</span> = cochées, <span class="legend-empty">Négatifs</span> = non.
+    Click sur une case pour la déplacer dans l'autre zone (sauvegarde auto).
+    <span class="legend-correct">★</span> = correct, <span class="legend-diff">⚠</span> = CV ≠ AMC.
+    Raccourcis: <kbd>←</kbd>/<kbd>→</kbd> navigation.
+  </p>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="reponses">Réponses</button>
+    {% if data.open_answers %}<button class="tab-btn" data-tab="libres">Réponses libres ({{ data.open_answers|length }})</button>{% endif %}
+    <button class="tab-btn" data-tab="identite">Identité</button>
+  </div>
+</header>
+
+<div class="tab-panel" id="tab-reponses">
+  <div class="zoom-grid">
+{% include "_zoom_grid.html" %}
+  </div>
+</div>
+{% if data.open_answers %}
+<div class="tab-panel" id="tab-libres" style="display:none">
+  <div class="open-answers-list">
+    {% for q, oa in data.open_answers|dictsort %}
+      {% set is_ok = oa.score and oa.score > 0 %}
+      <div class="open-answer-card{% if is_ok %} ok{% else %} ko{% endif %}" data-q="{{ q }}" data-bid="{{ oa.bid|default('') }}">
+        <div class="oa-head">
+          <b>Q libre {{ q }}{% if oa.tag %} · <code>{{ oa.tag }}</code>{% endif %}</b>
+          <span class="badge {% if is_ok %}badge-ok{% else %}badge-ko{% endif %}">
+            {% if is_ok %}✓ {{ oa.score }} / {{ oa.points }} pt{% else %}✘ 0 / {{ oa.points }} pt{% endif %}
+          </span>
+          <span class="small">attendu&nbsp;: <code>{{ oa.expected }}</code> ({{ oa.match_mode }})</span>
+          {% if oa.confidence is defined %}<span class="small">conf. OCR&nbsp;: {{ (oa.confidence * 100)|round|int }}%</span>{% endif %}
+        </div>
+        <div class="oa-body">
+          <img class="oa-crop" src="/api/open-answer/{{ batch }}/{{ page }}/{{ q }}.jpg"
+               alt="zone de réponse" loading="lazy">
+          <div class="oa-edit">
+            <label>Transcription (OCR)
+              <input type="text" class="oa-raw-text" value="{{ oa.raw_text|default('') }}"
+                     placeholder="(texte lu)">
+            </label>
+            <button type="button" class="nav-btn oa-revalidate" title="Recalcule le score à partir de la transcription corrigée">↻ Re-noter</button>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+<div class="tab-panel" id="tab-identite" style="display:none">
+{% include "_id_grid.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const BATCH = '{{ batch }}';
+const PAGE = {{ page }};
+const status = document.getElementById('status');
+
+// Déplace la .case-wrap dans la zone opposée en respectant l'ordre alphabétique sur data-char.
+function moveCaseToOtherZone(wrap) {
+  const block = wrap.closest('.q-block');
+  const fromZone = wrap.closest('.cases-zone');
+  const targetClass = fromZone.classList.contains('cases-positifs') ? 'cases-negatifs' : 'cases-positifs';
+  const targetGrid = block.querySelector('.' + targetClass + ' .cases-zone-grid');
+  const ch = wrap.dataset.char;
+  let inserted = false;
+  for (const sib of targetGrid.querySelectorAll(':scope > .case-wrap')) {
+    if (sib.dataset.char > ch) { targetGrid.insertBefore(wrap, sib); inserted = true; break; }
+  }
+  if (!inserted) targetGrid.appendChild(wrap);
+}
+
+document.querySelectorAll('#tab-reponses img.case').forEach(img => {
+  img.addEventListener('click', async () => {
+    const q = img.dataset.q, char = img.dataset.char;
+    status.textContent = 'Sauvegarde...';
+    const r = await fetch('/api/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch: BATCH, page: PAGE, q: q, char: char})
+    });
+    if (r.ok) {
+      img.classList.toggle('selected');
+      moveCaseToOtherZone(img.closest('.case-wrap'));
+      status.textContent = '✓ Sauvegardé Q' + q + ' ' + char;
+      setTimeout(() => status.textContent = 'Modifications sauvegardées automatiquement', 1500);
+    } else {
+      status.textContent = '✘ Erreur';
+    }
+  });
+});
+
+document.getElementById('save-validate').addEventListener('click', async () => {
+  await fetch('/api/mark_validated', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({batch: BATCH, page: PAGE})
+  });
+  // après validation, aller au suivant si dispo, sinon retour student
+  const next = document.getElementById('next-link');
+  if (next) location.href = next.href; else location.href = '/student/' + BATCH + '/' + PAGE;
+});
+
+// raccourcis clavier
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const prev = document.getElementById('prev-link');
+  const next = document.getElementById('next-link');
+  if (e.key === 'ArrowLeft' && prev) location.href = prev.href;
+  if (e.key === 'ArrowRight' && next) location.href = next.href;
+});
+
+// bascule d'onglets Réponses / Identité
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('tab-' + btn.dataset.tab).style.display = '';
+  });
+});
+
+// Re-noter une question libre : POST /api/open-answer-override avec la
+// transcription corrigée par l'utilisateur. Le serveur re-match contre
+// expected_answer + match_mode du sujet pour recalculer le score.
+document.querySelectorAll('.oa-revalidate').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const card = btn.closest('.open-answer-card');
+    const q = card.dataset.q;
+    const text = card.querySelector('.oa-raw-text').value;
+    btn.disabled = true; btn.textContent = '…';
+    const r = await fetch('/api/open-answer-override', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch: BATCH, page: PAGE, q: q, raw_text: text})
+    });
+    const j = await r.json();
+    btn.disabled = false; btn.textContent = '↻ Re-noter';
+    if (!r.ok) { alert(j.error || 'erreur'); return; }
+    const badge = card.querySelector('.badge');
+    const ok = j.score && j.score > 0;
+    card.classList.toggle('ok', ok); card.classList.toggle('ko', !ok);
+    badge.className = 'badge ' + (ok ? 'badge-ok' : 'badge-ko');
+    badge.textContent = ok ? `✓ ${j.score} / ${j.points} pt` : `✘ 0 / ${j.points} pt`;
+    status.textContent = '✓ Q libre ' + q + ' re-notée';
+    setTimeout(() => status.textContent = 'Modifications sauvegardées automatiquement', 1500);
+  });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+{% block title %}{{ match.matched.nom if match.matched else "?" }} {{ match.matched.prenom if match.matched else "" }} — {{ batch }}/page_{{ "%03d"|format(page) }}{% endblock %}
+{% block content %}
+<header>
+  <div class="topnav">
+    <a href="/" class="back">← Dashboard</a>
+    {% if nav.prev %}<a href="/student/{{ nav.prev[0] }}/{{ nav.prev[1] }}" class="nav-btn">← Préc</a>{% endif %}
+    {% if nav.next %}<a href="/student/{{ nav.next[0] }}/{{ nav.next[1] }}" class="nav-btn">Suiv →</a>{% endif %}
+  </div>
+  <h1>
+    {{ match.matched.nom if match.matched else "?" }} {{ match.matched.prenom if match.matched else "" }}
+    <span class="small">— {{ batch }}/page_{{ "%03d"|format(page) }}</span>
+  </h1>
+  <div class="meta">
+    <span>ID canonique: <b>{{ match.matched.id if match.matched else "?" }}</b>
+       {% if match.matched and match.matched.id[-4:] != data.student_id %}
+       <span class="hint">(lu: {{ data.student_id }})</span>
+       {% endif %}
+    </span>
+    <span>Match: {{ match.method }} ({{ "%.2f"|format(match.score) }})</span>
+    <span>Score: <b>{{ "%.2f"|format(scores.total) }}</b> / 32</span>
+    <span>Source: <b>{{ data._source }}</b></span>
+    {% if data._amc_copy %}<span>AMC copy: <b>{{ data._amc_copy }}</b></span>{% endif %}
+    {% for f in data._flags or [] %}<span class="badge badge-{{ f.split('(')[0] }}">{{ f }}</span>{% endfor %}
+  </div>
+  <div class="actions">
+    <a href="/student/{{ batch }}/{{ page }}/zoom" class="btn btn-primary">Zoom cases</a>
+    <button id="mark-validated" class="btn" {% if 'validated' in (data._flags or []) %}disabled{% endif %}>
+      {% if 'validated' in (data._flags or []) %}✓ Validé{% else %}Marquer validé{% endif %}
+    </button>
+  </div>
+</header>
+
+<div class="student-page">
+
+<aside class="copy-sidebar">
+  <div class="copy-sidebar-head">
+    <input type="text" id="copy-search" placeholder="Rechercher nom / ID…">
+    <div class="filters chips" id="copy-filters">
+      <button data-filter="all" class="active">Tous</button>
+      <button data-filter="diff">Diff</button>
+      <button data-filter="ambiguous">Ambigu</button>
+      <button data-filter="no_mires">NO_MIRES</button>
+      <button data-filter="id_incomplet">ID</button>
+      <button data-filter="validated">Validés</button>
+    </div>
+    <div class="list-count"><span id="visible-count">{{ sidebar_copies|length }}</span> / {{ sidebar_copies|length }}</div>
+  </div>
+  <div class="student-list" id="copy-list">
+    {% for c in sidebar_copies %}
+      {% set has_diff = (c.cv_amc_diff_count is not none) and (c.cv_amc_diff_count > 0) %}
+      <div class="student-row{% if c.batch == batch and c.page == page %} active{% endif %}"
+           data-batch="{{ c.batch }}" data-page="{{ c.page }}"
+           data-flags="{{ ' '.join(c.flags) }}"
+           data-diff="{{ 1 if has_diff else 0 }}"
+           data-search="{{ c.canonical_name|lower }} {{ c.canonical_id }} {{ c.student_id }}">
+        <span class="sr-name">{{ c.canonical_name }}</span>
+        <span class="sr-dots">
+          {% if c.validated %}<span class="dot dot-validated" title="validé"></span>{% endif %}
+          {% if has_diff %}<span class="dot dot-diff" title="diff CV/AMC"></span>{% endif %}
+          {% if 'ambiguous' in c.flags %}<span class="dot dot-ambig" title="ambigu"></span>{% endif %}
+          {% if 'no_mires' in c.flags or 'id_incomplet' in c.flags %}<span class="dot dot-danger" title="lecture incertaine"></span>{% endif %}
+        </span>
+        <span class="sr-score">{{ "%.1f"|format(c.score) }}</span>
+      </div>
+    {% endfor %}
+  </div>
+</aside>
+
+<main class="student-main">
+<div class="layout">
+  <div class="image-pane">
+    <div class="copy-overlay-wrap">
+      <img id="copy-img" src="/img_canon/{{ batch }}/{{ page }}.jpg" alt="copie">
+      <svg id="cell-overlay" viewBox="0 0 {{ canon_w }} {{ canon_h }}"
+           preserveAspectRatio="none">
+        {% for c in cells %}
+        <circle class="cell-mark{% if c.selected %} sel{% endif %}"
+                cx="{{ "%.1f"|format(c.cx) }}" cy="{{ "%.1f"|format(c.cy) }}"
+                r="{{ "%.1f"|format(c.r) }}"
+                data-kind="{{ c.kind }}" data-q="{{ c.q }}" data-char="{{ c.char }}"></circle>
+        {% endfor %}
+      </svg>
+    </div>
+  </div>
+  <div class="answers-pane">
+    <table class="answers">
+      <thead><tr><th>Q</th><th>T</th><th>CV</th>{% if data._amc_answers %}<th>AMC</th>{% endif %}<th>Correct</th><th>Score</th></tr></thead>
+      <tbody>
+      {% for q in questions %}
+        <tr class="{% if q.score == 1.0 or q.score == 2.0 %}good{% elif q.score == 0 %}bad{% else %}partial{% endif %} {% if q.has_diff %}row-diff{% endif %}">
+          <td>Q{{ q.q }}</td>
+          <td>{{ "S" if q.type == "single" else "M" }}</td>
+          <td>{{ ", ".join(q.selected) if q.selected else "—" }}</td>
+          {% if data._amc_answers %}
+          <td class="{% if q.has_diff %}diff-cell{% endif %}">{{ ", ".join(q.amc_selected) if q.amc_selected else "—" }}</td>
+          {% endif %}
+          <td>{{ ", ".join(q.correct) }}</td>
+          <td>{{ "%.2f"|format(q.score) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if data.notes %}<p class="notes"><b>Notes:</b> {{ data.notes }}</p>{% endif %}
+
+    <div class="embedded-zoom">
+      <h3>Zoom cases <span class="small">— click pour toggler (sync avec l'image)</span></h3>
+      {% with questions=zoom_questions %}
+        {% include "_zoom_grid.html" %}
+      {% endwith %}
+    </div>
+  </div>
+</div>
+</main>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const BATCH = '{{ batch }}', PAGE = {{ page }};
+
+document.getElementById('mark-validated').addEventListener('click', async () => {
+  await fetch('/api/mark_validated', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({batch: BATCH, page: PAGE})
+  });
+  location.reload();
+});
+
+// ----- Toggle d'une case + sync entre l'overlay (image) et la grille zoom -----
+async function toggleCell(q, ch) {
+  const r = await fetch('/api/toggle', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({batch: BATCH, page: PAGE, q: q, char: ch})
+  });
+  if (!r.ok) return false;
+  // sync rond overlay (image canonique)
+  const circle = document.querySelector(
+    `#cell-overlay .cell-mark[data-q="${q}"][data-char="${ch}"]`);
+  if (circle) circle.classList.toggle('sel');
+  // sync case zoom-grid (déplace de positifs ↔ négatifs)
+  const img = document.querySelector(
+    `.embedded-zoom img.case[data-q="${q}"][data-char="${ch}"]`);
+  if (img) {
+    img.classList.toggle('selected');
+    moveZoomCaseToOtherZone(img.closest('.case-wrap'));
+  }
+  return true;
+}
+
+function moveZoomCaseToOtherZone(wrap) {
+  const block = wrap.closest('.q-block');
+  const fromZone = wrap.closest('.cases-zone');
+  const targetClass = fromZone.classList.contains('cases-positifs')
+                      ? 'cases-negatifs' : 'cases-positifs';
+  const targetGrid = block.querySelector('.' + targetClass + ' .cases-zone-grid');
+  const ch = wrap.dataset.char;
+  let inserted = false;
+  for (const sib of targetGrid.querySelectorAll(':scope > .case-wrap')) {
+    if (sib.dataset.char > ch) { targetGrid.insertBefore(wrap, sib); inserted = true; break; }
+  }
+  if (!inserted) targetGrid.appendChild(wrap);
+}
+
+// Click sur un rond overlay — QCM : toggle. ID : single-select dans la colonne.
+document.querySelectorAll('#cell-overlay .cell-mark[data-kind="qcm"]').forEach(c => {
+  c.addEventListener('click', async () => {
+    c.classList.add('busy');
+    await toggleCell(c.dataset.q, c.dataset.char);
+    c.classList.remove('busy');
+  });
+});
+document.querySelectorAll('#cell-overlay .cell-mark[data-kind="id"]').forEach(c => {
+  c.addEventListener('click', async () => {
+    const q = c.dataset.q, ch = c.dataset.char;
+    // si déjà coché → on enlève (colonne devient "?"). Sinon → on choisit ce chiffre.
+    const wantsClear = c.classList.contains('sel');
+    const payload = {batch: BATCH, page: PAGE, q: q,
+                     char: wantsClear ? '?' : ch};
+    c.classList.add('busy');
+    const r = await fetch('/api/set-id-digit', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    c.classList.remove('busy');
+    if (!r.ok) return;
+    // dans la MÊME colonne, désélectionner tous les chiffres,
+    // puis remettre `.sel` sur celui qu'on vient de choisir (sauf en mode clear).
+    document.querySelectorAll(
+      `#cell-overlay .cell-mark[data-kind="id"][data-q="${q}"]`
+    ).forEach(s => s.classList.remove('sel'));
+    if (!wantsClear) c.classList.add('sel');
+  });
+});
+
+// Click sur une case dans le zoom-grid embarqué
+document.querySelectorAll('.embedded-zoom img.case').forEach(img => {
+  img.addEventListener('click', async () => {
+    // on déplace via la sync ci-dessus aussi → bind sur le data-attr de la case-wrap
+    const wrap = img.closest('.case-wrap');
+    const q = img.dataset.q, ch = img.dataset.char;
+    // data-char sur la case-wrap est juste la lettre ; pour le tri, on l'a déjà.
+    if (!wrap.dataset.char) wrap.dataset.char = ch;
+    await toggleCell(q, ch);
+  });
+});
+
+// ----- Préservation du scroll lors de la navigation prev/next -----
+const SCROLL_KEY = 'student-scroll';
+
+// au chargement : restaurer si on vient d'une navigation prev/next
+const saved = sessionStorage.getItem(SCROLL_KEY);
+if (saved !== null) {
+  sessionStorage.removeItem(SCROLL_KEY);
+  // attendre que les images aient leurs hauteurs (sinon scroll incorrect)
+  requestAnimationFrame(() => window.scrollTo(0, parseInt(saved, 10) || 0));
+}
+
+function navTo(href) {
+  sessionStorage.setItem(SCROLL_KEY, String(window.scrollY));
+  location.href = href;
+}
+
+// Flèches clavier
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  {% if nav.prev %}if (e.key === 'ArrowLeft')  navTo('/student/{{ nav.prev[0] }}/{{ nav.prev[1] }}');{% endif %}
+  {% if nav.next %}if (e.key === 'ArrowRight') navTo('/student/{{ nav.next[0] }}/{{ nav.next[1] }}');{% endif %}
+});
+
+// Liens Préc / Suiv : préserver aussi le scroll
+document.querySelectorAll('a.nav-btn').forEach(a => {
+  const href = a.getAttribute('href') || '';
+  if (href.startsWith('/student/')) {
+    a.addEventListener('click', e => { e.preventDefault(); navTo(href); });
+  }
+});
+
+// ----- Sidebar : search + filtres + click → switch copie -----
+(function() {
+  const list = document.getElementById('copy-list');
+  if (!list) return;
+  const rows = Array.from(list.querySelectorAll('.student-row'));
+  const search = document.getElementById('copy-search');
+  const counter = document.getElementById('visible-count');
+  const filterBtns = document.querySelectorAll('#copy-filters button');
+  let currentFilter = 'all';
+
+  function applyFilter() {
+    const q = (search.value || '').toLowerCase().trim();
+    let n = 0;
+    rows.forEach(r => {
+      const matchesSearch = !q || (r.dataset.search || '').includes(q);
+      let matchesFilter = currentFilter === 'all';
+      if (!matchesFilter) {
+        if (currentFilter === 'diff') matchesFilter = r.dataset.diff === '1';
+        else matchesFilter = (r.dataset.flags || '').split(/\s+/).some(f =>
+          f === currentFilter || f.startsWith(currentFilter + '('));
+      }
+      const show = matchesSearch && matchesFilter;
+      r.style.display = show ? '' : 'none';
+      if (show) n++;
+    });
+    counter.textContent = n;
+  }
+
+  search.addEventListener('input', applyFilter);
+  filterBtns.forEach(btn => btn.addEventListener('click', () => {
+    filterBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    applyFilter();
+  }));
+
+  // click sur une ligne → navigue (en préservant le scroll de la page courante)
+  rows.forEach(r => r.addEventListener('click', () => {
+    navTo(`/student/${r.dataset.batch}/${r.dataset.page}`);
+  }));
+
+  // scroll l'étudiant actif au centre de la sidebar au chargement
+  const active = list.querySelector('.student-row.active');
+  if (active) active.scrollIntoView({ block: 'center' });
+})();
+</script>
+{% endblock %}

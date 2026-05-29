@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block title %}Questions — AMCx{% endblock %}
+
+{% block content %}
+<div class="questions-page">
+  <header class="questions-header">
+    <h2>📋 Questions — ranking</h2>
+    <div class="questions-controls">
+      <label class="qctrl">Tri :
+        <select id="q-sort">
+          <option value="success_desc">Taux ↓ (plus réussies en haut)</option>
+          <option value="success_asc" selected>Taux ↑ (moins réussies en haut)</option>
+          <option value="q_asc">Numéro ↑</option>
+          <option value="q_desc">Numéro ↓</option>
+          <option value="n_eval_desc">Nb évaluations ↓</option>
+        </select>
+      </label>
+      <span class="qctrl-spacer"></span>
+      <span class="q-meta" id="q-meta">Chargement…</span>
+    </div>
+  </header>
+
+  <div class="questions-split">
+
+    <aside class="q-list-pane">
+      <ol id="q-list" class="q-list">
+        <li class="q-empty">Chargement…</li>
+      </ol>
+    </aside>
+
+    <section class="q-right-pane">
+      <div class="q-pdf-card">
+        <h3 class="q-pdf-title">
+          <span id="q-pdf-label">Sélectionne une question</span>
+          {% if has_pdf %}
+          <a href="/sujet/pdf" target="_blank" rel="noopener" class="q-pdf-open" title="Ouvrir le PDF complet">📄 PDF</a>
+          {% endif %}
+        </h3>
+        <div class="q-pdf-wrap" id="q-pdf-wrap">
+          <p class="q-empty">Aperçu PDF de la question sélectionnée.</p>
+        </div>
+      </div>
+
+      <div class="q-hist-card">
+        <h3 class="q-hist-title">📊 Distribution des scores
+          <span class="q-hist-sub" id="q-hist-sub"></span>
+        </h3>
+        <div class="q-hist-wrap" id="q-hist-wrap">
+          <p class="q-empty">L'histogramme apparaît ici.</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let QUESTIONS = [];
+let SELECTED_Q = null;
+let TOTAL_COPIES = 0;
+
+function pctFmt(r) {
+  return r == null ? '—' : (r * 100).toFixed(1) + '%';
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadStats() {
+  const r = await fetch('/api/questions/stats');
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    document.getElementById('q-list').innerHTML =
+      '<li class="q-empty q-err">Erreur : ' + (j.error || 'inconnue') + '</li>';
+    return;
+  }
+  QUESTIONS = j.questions || [];
+  TOTAL_COPIES = j.total_copies || 0;
+  const evalSomething = QUESTIONS.some(q => q.n_eval > 0);
+  document.getElementById('q-meta').textContent =
+    evalSomething
+      ? `${QUESTIONS.length} questions · ${TOTAL_COPIES} copies évaluées`
+      : `${QUESTIONS.length} questions · aucune copie évaluée`;
+  renderList();
+  if (QUESTIONS.length && !SELECTED_Q) {
+    selectQuestion(QUESTIONS[0].q);
+  }
+}
+
+function sortedQuestions() {
+  const sort = document.getElementById('q-sort').value;
+  const arr = QUESTIONS.slice();
+  const meanOf = q => (q.mean == null ? (sort === 'success_asc' ? Infinity : -Infinity) : q.mean);
+  // Note : pour 'asc' on met les n_eval=0 au fond (Infinity côté plus haut),
+  // car « moins réussies » ne doit pas inclure « pas notées ».
+  switch (sort) {
+    case 'success_desc':
+      arr.sort((a, b) => meanOf(b) - meanOf(a));
+      break;
+    case 'success_asc':
+      arr.sort((a, b) => meanOf(a) - meanOf(b));
+      break;
+    case 'q_asc':
+      arr.sort((a, b) => a.q - b.q);
+      break;
+    case 'q_desc':
+      arr.sort((a, b) => b.q - a.q);
+      break;
+    case 'n_eval_desc':
+      arr.sort((a, b) => b.n_eval - a.n_eval);
+      break;
+  }
+  return arr;
+}
+
+function renderList() {
+  const host = document.getElementById('q-list');
+  const arr = sortedQuestions();
+  if (!arr.length) {
+    host.innerHTML = '<li class="q-empty">Aucune question dans ce sujet.</li>';
+    return;
+  }
+  host.innerHTML = '';
+  arr.forEach(q => {
+    const li = document.createElement('li');
+    li.className = 'q-item';
+    if (q.q === SELECTED_Q) li.classList.add('is-active');
+    li.dataset.q = q.q;
+
+    const ratio = q.mean;
+    let cls = 'mid';
+    if (ratio != null) {
+      if (ratio >= 0.7) cls = 'good';
+      else if (ratio >= 0.4) cls = 'mid';
+      else cls = 'bad';
+    } else { cls = 'none'; }
+
+    li.innerHTML =
+      '<div class="q-item-head">' +
+        '<span class="q-num">Q' + q.q + '</span>' +
+        '<span class="q-tag">' + escapeHtml(q.tag || '') + '</span>' +
+        (q.bank_id ? '<span class="q-bank-icon" title="Importée depuis la banque ' + escapeHtml(q.bank_id) + '">🔗</span>' : '') +
+        '<span class="q-success q-success-' + cls + '" title="' +
+          (q.n_perfect != null ? q.n_perfect + ' notes max · ' + q.n_eval + ' évaluations' : 'pas d\'évaluations') +
+        '">' + pctFmt(ratio) + '</span>' +
+      '</div>' +
+      '<div class="q-item-body">' + escapeHtml(q.statement) + '</div>' +
+      '<div class="q-item-foot">' +
+        '<span class="q-type">' + (q.type === 'mult' ? 'mult' : 'single') + '</span>' +
+        '<span class="q-eval">' + q.n_eval + ' éval</span>' +
+        '<span class="q-bar">' + miniBar(q) + '</span>' +
+      '</div>';
+    li.addEventListener('click', () => selectQuestion(q.q));
+    host.appendChild(li);
+  });
+}
+
+function miniBar(q) {
+  if (q.mean == null || q.n_eval === 0) return '';
+  const pct = Math.max(0, Math.min(1, q.mean));
+  const w = Math.round(pct * 60);
+  let color = '#1a7a2e';
+  if (q.mean < 0.4) color = '#c33';
+  else if (q.mean < 0.7) color = '#b07a00';
+  return '<span class="q-bar-track">' +
+         '<span class="q-bar-fill" style="width:' + w + 'px;background:' + color + '"></span>' +
+         '</span>';
+}
+
+function selectQuestion(q_num) {
+  SELECTED_Q = q_num;
+  // refresh active in list
+  document.querySelectorAll('.q-item').forEach(el => {
+    el.classList.toggle('is-active', parseInt(el.dataset.q) === q_num);
+  });
+  const q = QUESTIONS.find(x => x.q === q_num);
+  if (!q) return;
+  document.getElementById('q-pdf-label').textContent =
+    'Q' + q.q + ' — ' + (q.tag || '(sans tag)');
+  loadPdfPreview(q.q);
+  renderHistogram(q);
+}
+
+async function loadPdfPreview(q_num) {
+  const wrap = document.getElementById('q-pdf-wrap');
+  wrap.innerHTML = '<p class="q-empty">Chargement…</p>';
+  // Vérifie d'abord que la région existe
+  let meta = null;
+  try {
+    const r = await fetch('/sujet/region/' + q_num + '.json');
+    if (r.ok) meta = await r.json();
+  } catch (e) {}
+  if (!meta) {
+    wrap.innerHTML = '<p class="q-empty">Pas d\'aperçu PDF (compile le sujet pour le générer).</p>';
+    return;
+  }
+  // On affiche un crop tight de la question (image PNG côté serveur).
+  wrap.innerHTML = '<img class="q-pdf-img" src="/sujet/region/' + q_num + '.png?v=' + Date.now() + '" alt="Q' + q_num + ' aperçu" loading="lazy">';
+}
+
+function renderHistogram(q) {
+  const wrap = document.getElementById('q-hist-wrap');
+  const sub = document.getElementById('q-hist-sub');
+  if (!q.scores || q.scores.length === 0) {
+    wrap.innerHTML = '<p class="q-empty">Aucune copie évaluée pour cette question.</p>';
+    sub.textContent = '';
+    return;
+  }
+  const mx = q.max_score || 1;
+  // Normalise. Clamp [-0.5, 1.0] pour éviter les outliers négatifs énormes (mult).
+  const norm = q.scores.map(s => Math.max(-0.5, Math.min(1.0, s / mx)));
+  // Bins de 0.1, de -0.5 à 1.0 → 15 bins. Bin idx = floor((v + 0.5) * 10).
+  const nbins = 15;
+  const counts = new Array(nbins).fill(0);
+  norm.forEach(v => {
+    const idx = Math.min(nbins - 1, Math.max(0, Math.floor((v + 0.5) * 10)));
+    counts[idx]++;
+  });
+  const maxCount = Math.max(...counts, 1);
+  const W = 520, H = 200;
+  const PL = 36, PR = 12, PT = 14, PB = 32;
+  const innerW = W - PL - PR, innerH = H - PT - PB;
+  const bw = innerW / nbins;
+  const meanNorm = q.mean;
+
+  let bars = '';
+  for (let i = 0; i < nbins; i++) {
+    const c = counts[i];
+    if (c === 0) continue;
+    const h = (c / maxCount) * innerH;
+    const x = PL + i * bw;
+    const y = PT + innerH - h;
+    const binLo = (-0.5 + i / 10).toFixed(1);
+    const binHi = (-0.5 + (i + 1) / 10).toFixed(1);
+    // Couleur selon position : <0 rouge, 0..0.4 orange, 0.4..0.7 jaune, 0.7+ vert
+    let color = '#1a7a2e';
+    const mid = -0.5 + (i + 0.5) / 10;
+    if (mid < 0) color = '#c33';
+    else if (mid < 0.4) color = '#e07a00';
+    else if (mid < 0.7) color = '#b07a00';
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${h.toFixed(1)}" fill="${color}">` +
+            `<title>[${binLo}, ${binHi}) : ${c}</title></rect>`;
+  }
+
+  // Axes
+  const xLabels = [-0.5, 0, 0.25, 0.5, 0.75, 1.0];
+  let ticks = '';
+  xLabels.forEach(v => {
+    const x = PL + ((v + 0.5) * 10) * bw;
+    ticks += `<line x1="${x.toFixed(1)}" y1="${PT + innerH}" x2="${x.toFixed(1)}" y2="${PT + innerH + 3}" stroke="#888"/>` +
+             `<text x="${x.toFixed(1)}" y="${PT + innerH + 14}" font-size="10" fill="#666" text-anchor="middle">${(v * 100).toFixed(0)}%</text>`;
+  });
+  // Y axis ticks
+  const yTickCount = 4;
+  for (let i = 0; i <= yTickCount; i++) {
+    const v = Math.round((maxCount * i) / yTickCount);
+    const y = PT + innerH - (i / yTickCount) * innerH;
+    ticks += `<line x1="${PL - 3}" y1="${y.toFixed(1)}" x2="${PL}" y2="${y.toFixed(1)}" stroke="#888"/>` +
+             `<text x="${PL - 5}" y="${y.toFixed(1) + 3}" font-size="10" fill="#666" text-anchor="end">${v}</text>`;
+  }
+  // Mean vertical line
+  let meanLine = '';
+  if (meanNorm != null) {
+    const mClamped = Math.max(-0.5, Math.min(1.0, meanNorm));
+    const xm = PL + ((mClamped + 0.5) * 10) * bw;
+    meanLine = `<line x1="${xm.toFixed(1)}" y1="${PT}" x2="${xm.toFixed(1)}" y2="${PT + innerH}" stroke="#1a4480" stroke-width="2" stroke-dasharray="3,2"/>` +
+               `<text x="${xm.toFixed(1)}" y="${PT - 2}" font-size="10" fill="#1a4480" text-anchor="middle" font-weight="700">moy ${(meanNorm * 100).toFixed(1)}%</text>`;
+  }
+
+  const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="q-hist-svg">` +
+              `<line x1="${PL}" y1="${PT + innerH}" x2="${PL + innerW}" y2="${PT + innerH}" stroke="#888"/>` +
+              `<line x1="${PL}" y1="${PT}" x2="${PL}" y2="${PT + innerH}" stroke="#888"/>` +
+              ticks + bars + meanLine +
+              `</svg>`;
+  wrap.innerHTML = svg;
+
+  // Sous-titre récapitulatif
+  sub.textContent = `${q.n_eval} copies · ${q.n_perfect} max (${pctFmt(q.n_perfect / q.n_eval)}) · moyenne ${pctFmt(meanNorm)} · max barème ${q.max_score}`;
+}
+
+document.getElementById('q-sort').addEventListener('change', renderList);
+loadStats();
+</script>
+{% endblock %}

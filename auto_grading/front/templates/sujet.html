@@ -1,0 +1,2978 @@
+{% extends "base.html" %}
+{% block title %}Sujet — AMCx{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="sujet-page" data-mode="{{ mode }}">
+
+  {# ----- Bandeau global : config, header, answer sheet, sélecteur copie ----- #}
+  <details class="sujet-bandeau" {% if mode == 'canonical' %}open{% endif %}>
+    <summary>
+      <span class="bd-title">⚙ Réglages globaux du sujet</span>
+      <span class="bd-mode {{ mode }}">
+        {% if mode == 'canonical' %}canonique{% elif mode == 'legacy' %}legacy{% else %}vide{% endif %}
+      </span>
+      {% if mode == 'legacy' %}
+      <span class="bd-warn" title="lecture seule : passer en canonique pour éditer (voir la Zone dangereuse en bas du bandeau)">
+        🔒 lecture seule
+      </span>
+      {% endif %}
+      <span class="bd-spacer"></span>
+      <span class="bd-copy-pick">
+        Copie&nbsp;:
+        <select id="copy-picker" title="copie affichée (mapping case ↔ lettre)">
+          {% if available_copies %}
+            {% for c in available_copies %}
+            <option value="{{ c }}"{% if c == 1 %} selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          {% else %}
+            <option value="1" selected>1</option>
+          {% endif %}
+        </select>
+        <span class="bd-copy-hint">(debug / aperçu)</span>
+      </span>
+    </summary>
+
+    <div class="bd-body">
+      {# ----- Randomisation ----- #}
+      <fieldset class="bd-group">
+        <legend>Randomisation</legend>
+        <label class="bd-field">
+          Nombre de copies
+          <input type="number" id="cfg-num-copies" min="1" max="999" step="1"
+                 value="{{ config.num_copies }}"
+                 title="\exemplaire{N} — N copies différentes seront compilées dans le PDF">
+        </label>
+        <label class="bd-field bd-field-seed">
+          Seed
+          <input type="number" id="cfg-random-seed" step="1"
+                 value="{{ config.random_seed }}"
+                 title="\AMCrandomseed{...} — graine de randomisation">
+          <button type="button" id="seed-regen-btn" title="générer un nouveau seed aléatoire">♻</button>
+        </label>
+        <label class="bd-field bd-check">
+          <input type="checkbox" id="cfg-shuffle-answers" {% if config.shuffle_answers %}checked{% endif %}
+                 {% if mode != 'canonical' %}disabled{% endif %}>
+          mélanger l'ordre des réponses
+        </label>
+        <label class="bd-field bd-check">
+          <input type="checkbox" id="cfg-shuffle-questions" {% if config.shuffle_questions %}checked{% endif %}
+                 {% if mode != 'canonical' %}disabled{% endif %}>
+          mélanger l'ordre des questions
+        </label>
+      </fieldset>
+
+      {# ----- En-tête du sujet ----- #}
+      <fieldset class="bd-group">
+        <legend>En-tête du sujet
+          {% if header.raw_tex %}
+          <span class="bd-mode-raw" title="L'en-tête est édité en LaTeX brut ;
+              les champs structurés ci-dessous sont ignorés tant que le brut est rempli.">
+            mode LaTeX brut</span>
+          {% endif %}
+        </legend>
+
+        {# --- Champs structurés (utilisés si raw_tex est vide) --- #}
+        <details class="bd-subgroup" {% if not header.raw_tex %}open{% endif %}>
+          <summary>Champs structurés
+            {% if header.raw_tex %}<em>(désactivés — le LaTeX brut prime)</em>{% endif %}
+          </summary>
+          <div class="bd-fields" {% if mode != 'canonical' or header.raw_tex %}data-disabled="1"{% endif %}>
+            <label class="bd-field"><span>Établissement</span>
+              <input type="text" id="hdr-establishment" value="{{ header.establishment }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field"><span>Année</span>
+              <input type="text" id="hdr-year" value="{{ header.year }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field"><span>Auteur</span>
+              <input type="text" id="hdr-author" value="{{ header.author }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field bd-field-wide"><span>Titre</span>
+              <input type="text" id="hdr-title" value="{{ header.title }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field"><span>Durée</span>
+              <input type="text" id="hdr-duration" value="{{ header.duration }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field bd-field-wide"><span>Sous-titre</span>
+              <input type="text" id="hdr-subtitle" value="{{ header.subtitle }}"
+                spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field bd-field-full"><span>Instructions (LaTeX)</span>
+              <textarea id="hdr-instructions" rows="3" spellcheck="false"
+                {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}>{{ header.instructions }}</textarea></label>
+          </div>
+        </details>
+
+        {# --- LaTeX brut (prime si rempli) --- #}
+        <details class="bd-subgroup" {% if header.raw_tex %}open{% endif %}>
+          <summary>LaTeX brut (avancé — prime sur les champs structurés ci-dessus)</summary>
+          {% if mode == 'canonical' %}
+          <label class="bd-field bd-field-full">
+            <span>Code LaTeX inséré tel quel dans l'en-tête de chaque copie.
+              Vider ce champ pour réactiver les champs structurés.</span>
+            <textarea id="hdr-raw-tex" rows="8" spellcheck="false"
+              class="bd-raw-tex">{{ header.raw_tex }}</textarea>
+          </label>
+          {% else %}
+          <div class="bd-field bd-field-full">
+            <span>Lecture seule (mode legacy — migrer vers canonique pour éditer)</span>
+            <pre class="bd-raw-preview">{{ header.raw_tex or '(aucun en-tête détecté)' }}</pre>
+          </div>
+          {% endif %}
+        </details>
+      </fieldset>
+
+      {# ----- Feuille de réponses ----- #}
+      <fieldset class="bd-group" {% if mode != 'canonical' %}disabled{% endif %}>
+        <legend>Feuille de réponses
+          {% if answer_sheet_tex %}
+          <span class="bd-mode-raw" title="La feuille de réponses est en LaTeX brut ;
+              les champs structurés sont ignorés tant que le brut est rempli.">
+            mode LaTeX brut</span>
+          {% endif %}
+        </legend>
+
+        {# --- Champs structurés (ignorés si answer_sheet_tex est rempli) --- #}
+        <details class="bd-subgroup" {% if not answer_sheet_tex %}open{% endif %}>
+          <summary>Champs structurés
+            {% if answer_sheet_tex %}<em>(désactivés — le LaTeX brut prime)</em>{% endif %}
+          </summary>
+          <div class="bd-fields" {% if mode != 'canonical' or answer_sheet_tex %}data-disabled="1"{% endif %}>
+            <label class="bd-field">
+              Chiffres ID étudiant
+              <input type="number" id="as-id-grid-digits" min="1" max="9" step="1"
+                     value="{{ answer_sheet.id_grid_digits }}"
+                     title="\AMCcodeGridInt{etu}{N}"
+                     {% if mode != 'canonical' or answer_sheet_tex %}disabled{% endif %}>
+            </label>
+            <label class="bd-field bd-check">
+              <input type="checkbox" id="as-name-field" {% if answer_sheet.name_field %}checked{% endif %}
+                     {% if mode != 'canonical' or answer_sheet_tex %}disabled{% endif %}>
+              champ nom manuscrit
+            </label>
+            <label class="bd-field">
+              Colonnes
+              <input type="number" id="as-columns" min="1" max="4" step="1"
+                     value="{{ answer_sheet.columns }}"
+                     title="multicols sur la feuille de réponses"
+                     {% if mode != 'canonical' or answer_sheet_tex %}disabled{% endif %}>
+            </label>
+            <span class="bd-hint">
+              Grille « copie » imprimée automatiquement quand N&gt;1.
+            </span>
+          </div>
+        </details>
+
+        {# --- LaTeX brut (prime si rempli) --- #}
+        <details class="bd-subgroup" {% if answer_sheet_tex %}open{% endif %}>
+          <summary>LaTeX brut (avancé — prime sur les champs structurés ci-dessus)</summary>
+          {% if mode == 'canonical' %}
+          <label class="bd-field bd-field-full">
+            <span>Code LaTeX inséré tel quel pour la feuille de réponses.
+              <strong>Vider ce champ</strong> pour réactiver la génération canonique.</span>
+            <textarea id="as-raw-tex" rows="10" spellcheck="false"
+              class="bd-raw-tex">{{ answer_sheet_tex }}</textarea>
+          </label>
+          {% else %}
+          <div class="bd-field bd-field-full">
+            <span>Lecture seule (mode legacy — migrer vers canonique pour éditer)</span>
+            <pre class="bd-raw-preview">{{ answer_sheet_tex or '(par défaut)' }}</pre>
+          </div>
+          {% endif %}
+        </details>
+      </fieldset>
+
+      {# ----- Danger zone (mode legacy uniquement) ----- #}
+      {% if mode == 'legacy' %}
+      <fieldset class="bd-group bd-danger">
+        <legend>⚠ Zone dangereuse</legend>
+        <div class="bd-danger-body">
+          <p class="bd-danger-text">
+            Votre <code>exam.tex</code> est en mode <strong>legacy</strong> :
+            l'UI peut éditer les questions existantes mais pas en ajouter,
+            supprimer ou réorganiser, ni éditer l'en-tête/feuille de réponses.
+          </p>
+          <p class="bd-danger-text">
+            <strong>Migrer vers canonique</strong> ajoute des marqueurs
+            <code>%%QCM-…</code> autour de chaque question, ce qui débloque
+            tout le CRUD. Le préambule et la feuille de réponses originaux
+            sont préservés tels quels (donc <em>aucun effet sur la mise en
+            page du PDF</em>). Un backup <code>exam.tex.legacy-backup</code>
+            est créé automatiquement.
+          </p>
+          <p class="bd-danger-text bd-danger-warn">
+            ⚠ <strong>Ne pas migrer un sujet déjà imprimé/scanné/corrigé</strong>
+            (ex. EXAM_2026) : même si rien ne change visuellement, ré-éditer
+            ensuite peut désaligner les positions de cases entre les copies
+            existantes et le calage.
+          </p>
+          <button type="button" id="migrate-btn" class="btn btn-danger">
+            🔥 Migrer vers le format canonique
+          </button>
+        </div>
+      </fieldset>
+      {% endif %}
+    </div>
+  </details>
+
+  {# ----- Toolbar : sauvegarder / compiler + insertion blocs ----- #}
+  <div class="sujet-toolbar">
+    <div class="sujet-toolbar-left">
+      <span class="sujet-total">Total barème :
+        <strong id="total-max">{{ "%.2f"|format(total_max) }}</strong></span>
+      <span class="sujet-hint">
+        Entrée (champs) ou Ctrl+Entrée : sauvegarder ·
+        Alt+Entrée : compiler · survol d'un bloc : aperçu PDF.
+      </span>
+    </div>
+    <div class="sujet-toolbar-right">
+      {% if has_pdf %}
+      <a class="btn" href="/sujet/pdf" target="_blank" rel="noopener">📄 Voir le PDF</a>
+      {% endif %}
+      {% if mode == 'canonical' %}
+      <button class="btn" id="openBankBtn" type="button" title="Importer une question depuis la banque">📚 Banque</button>
+      {% endif %}
+      <button class="btn btn-primary" id="save-btn">💾 Sauvegarder</button>
+      <button class="btn btn-compile" id="compile-btn">⚙ Compiler</button>
+    </div>
+  </div>
+
+  {% if mode == 'canonical' %}
+  <div class="sujet-add-toolbar">
+    <span class="sujet-add-label">Insérer un bloc :</span>
+    <button type="button" class="btn btn-add" data-add-kind="text">+ texte libre</button>
+    <button type="button" class="btn btn-add" data-add-kind="question_qcm" data-qtype="single">+ QCM choix unique</button>
+    <button type="button" class="btn btn-add" data-add-kind="question_qcm" data-qtype="mult">+ QCM choix multiple</button>
+    <button type="button" class="btn btn-add" data-add-kind="answerbox">+ zone réponse</button>
+    <button type="button" class="btn btn-add" data-add-kind="question_open">+ question ouverte (AMC)</button>
+    <button type="button" class="btn btn-add" data-add-kind="question_freeform"
+            title="Question à réponse libre, auto-gradée par HTR contre expected_answer (extra [htr])">+ question libre (HTR)</button>
+    <span class="sujet-add-hint">→ ajout à la fin (déplacer ensuite avec ☰)</span>
+  </div>
+  {% endif %}
+
+  <div class="compile-status" id="compile-status"></div>
+  <pre class="compile-log" id="compile-log" hidden></pre>
+
+  <div class="sujet-split">
+
+  {# ----- Panel de structure (outline) à gauche ----- #}
+  <aside class="sujet-outline" id="sujet-outline">
+    <div class="outline-header">
+      <span>📑 Structure</span>
+      <button type="button" class="outline-collapse-all" id="outline-collapse-all"
+              title="tout plier / tout déplier">⇕</button>
+    </div>
+    <nav class="outline-nav" id="outline-nav">
+      {# rendu en JS par buildOutline() pour s'adapter aux ajouts/suppressions #}
+    </nav>
+  </aside>
+
+  <div class="sujet-left" id="blocks-list">
+
+  {% if not blocks %}
+  <p class="sujet-empty">Aucun bloc. Vérifiez <code>auto_grading/sujet/exam.tex</code>.</p>
+  {% endif %}
+
+  {% for b in blocks %}
+  {# ----- En-tête commun à tous les blocs : drag handle, boutons, type ----- #}
+  <section class="sujet-block sujet-block-{{ b.kind }}"
+           data-bid="{{ b.bid }}" data-kind="{{ b.kind }}"
+           {% if b.kind == 'question_qcm' %}data-q="{{ b.q }}" data-type="{{ b.data.qtype }}"{% endif %}
+           {% if b.get('preview_q') %}data-preview-q="{{ b.preview_q }}"{% endif %}
+           {% if b.data.get('readonly') %}data-readonly="1"{% endif %}
+           {% if b.data.get('title') %}data-title="{{ b.data.title }}"{% endif %}
+           {% if b.data.get('level') %}data-level="{{ b.data.level }}"{% endif %}>
+    <div class="block-toolbar">
+      {% if mode == 'canonical' %}
+      <span class="block-handle" draggable="true"
+            title="glisser pour déplacer ce bloc">☰</span>
+      {% else %}
+      <span class="block-handle disabled" title="mode legacy : drag&drop désactivé">☰</span>
+      {% endif %}
+      <span class="block-kind-tag">
+        {% if b.kind == 'text' %}TEXTE
+        {% elif b.kind == 'question_qcm' %}QCM Q{{ b.q }}
+        {% elif b.kind == 'question_open' %}OPEN
+        {% elif b.kind == 'question_freeform' %}LIBRE 🪄
+        {% elif b.kind == 'answerbox' %}RÉPONSE{% if b.data.placement == 'end' %} ← fin{% endif %}
+        {% endif %}
+      </span>
+      <span class="q-dirty-dot" title="modifications non sauvegardées">●</span>
+      <span class="block-toolbar-spacer"></span>
+      {% if mode == 'canonical' %}
+      {% if b.kind == 'question_qcm' %}
+      <button type="button" class="block-btn block-ai" title="Demander à Claude de modifier cette question"><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon" alt="Claude"></button>
+      {% endif %}
+      <button type="button" class="block-btn block-move-up" title="monter">▲</button>
+      <button type="button" class="block-btn block-move-down" title="descendre">▼</button>
+      <button type="button" class="block-btn block-duplicate" title="dupliquer">⎘</button>
+      <button type="button" class="block-btn block-delete" title="supprimer">✕</button>
+      {% else %}
+      <span class="block-legacy-hint">édition uniquement (mode legacy)</span>
+      {% endif %}
+    </div>
+
+    {# ----- Corps du bloc selon le kind ----- #}
+    {% if b.kind == 'text' %}
+      {% if b.data.get('readonly') %}
+      {# Bloc legacy en lecture seule : titre + tex brut repliable. #}
+      <div class="sujet-field text-readonly">
+        <div class="field-label">
+          <span class="field-tag">{{ b.data.get('level', 'intercalaire') }}</span>
+          {{ b.data.get('title', 'Texte LaTeX') }}
+          <span class="field-note">lecture seule — passer en canonique pour éditer</span>
+        </div>
+        <details class="text-readonly-source">
+          <summary>voir / replier le LaTeX brut ({{ b.data.tex|length }} car.)</summary>
+          <pre>{{ b.data.tex }}</pre>
+        </details>
+        <textarea class="md-src text-src" hidden>{{ b.data.tex }}</textarea>
+      </div>
+      {% else %}
+      <div class="sujet-field">
+        <div class="field-label">Bloc texte libre <span class="field-tag">LaTeX</span></div>
+        <div class="md-pair">
+          <textarea class="md-src text-src" rows="3" spellcheck="false">{{ b.data.tex }}</textarea>
+          <div class="md-view"></div>
+        </div>
+      </div>
+      {% endif %}
+
+    {% elif b.kind == 'question_qcm' %}
+    {# Rendu QCM (identique à l'ancien sujet.html) ; les champs d'édition restent
+       compatibles avec /api/sujet/save (mode legacy) ET /api/sujet/blocks/update (canonique). #}
+    <header class="sujet-q-head">
+      <div class="sujet-q-id">
+        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+               title="identifiant LaTeX">
+        <select class="q-type-select" title="type">
+          <option value="single"{% if b.data.qtype == 'single' %} selected{% endif %}>choix unique</option>
+          <option value="mult"{% if b.data.qtype == 'mult' %} selected{% endif %}>choix multiple</option>
+        </select>
+        <label class="q-horiz" title="disposition des réponses">
+          <input type="checkbox" class="q-env-horiz"{% if b.data.env == 'reponseshoriz' %} checked{% endif %}>
+          horiz</label>
+      </div>
+      <div class="sujet-q-bareme">
+        {% if b.data.qtype == 'mult' %}
+        <span class="bar-grouplabel">Barème — toutes :</span>
+        <label class="bar-field">bonnes
+          <input type="text" class="bar-global-b" spellcheck="false"></label>
+        <label class="bar-field">mauvaises
+          <input type="text" class="bar-global-m" spellcheck="false"></label>
+        {% else %}
+        <label class="bar-field">Valeur
+          <input type="text" class="bar-value" spellcheck="false"
+                 value="{{ b.data.get('value', '1') }}"></label>
+        {% endif %}
+        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
+      </div>
+    </header>
+
+    <div class="sujet-field">
+      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+      <div class="md-pair">
+        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+        <div class="md-view"></div>
+      </div>
+    </div>
+
+    <div class="sujet-field">
+      <div class="field-label">Réponses <span class="field-tag">LaTeX</span>
+        {% if b.data.qtype == 'mult' %}<span class="field-note">— chaque case = barème de cette réponse</span>{% endif %}
+        {% if mode == 'canonical' %}
+        <span class="field-actions">
+          <button type="button" class="btn-mini ans-add" title="ajouter une réponse">+ réponse</button>
+        </span>
+        {% endif %}
+      </div>
+      <div class="sujet-answers">
+        {% for i in range(b.data.answers|length) %}
+          {% set a = b.data.answers[i] %}
+          {% set char = b.answers_with_char[i].char if b.answers_with_char|length > i else None %}
+        <div class="md-answer {{ 'is-correct' if a.correct else 'is-wrong' }}"
+             data-correct="{{ '1' if a.correct else '0' }}">
+          <div class="ans-mark">
+            <button type="button" class="ans-badge"
+                    title="cliquer pour basculer bonne / mauvaise">{{ '✔ bonne' if a.correct else '✗ mauvaise' }}</button>
+            {% if char %}<span class="ans-char">case {{ char }}</span>{% endif %}
+            {% if b.data.qtype == 'mult' %}
+            <input type="text" class="ans-bareme" spellcheck="false"
+                   title="barème de cette réponse" value="{{ a.bareme }}">
+            {% else %}
+            <span class="ans-score"></span>
+            {% endif %}
+            {% if mode == 'canonical' %}
+            <button type="button" class="btn-mini ans-remove" title="supprimer cette réponse">✕</button>
+            {% endif %}
+          </div>
+          <div class="md-pair">
+            <textarea class="md-src ans-src" rows="2" spellcheck="false">{{ a.text }}</textarea>
+            <div class="md-view"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% elif b.kind == 'question_open' %}
+    <header class="sujet-q-head">
+      <div class="sujet-q-id">
+        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+               title="identifiant LaTeX de la question ouverte">
+        <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+          lignes
+          <input type="number" class="open-lines" min="1" max="40" step="1"
+                 value="{{ b.data.lines }}"></label>
+        <label class="q-horiz" title="barème total possible">
+          points max
+          <input type="number" class="open-points" min="0" step="0.5"
+                 value="{{ b.data.points }}"></label>
+      </div>
+      <div class="sujet-q-bareme">
+        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
+      </div>
+    </header>
+
+    <div class="sujet-field">
+      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+      <div class="md-pair">
+        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+        <div class="md-view"></div>
+      </div>
+    </div>
+
+    <div class="sujet-field">
+      <div class="field-label">Cases de notation (cochables par le correcteur)
+        <span class="field-tag">\AMCOpen</span>
+        {% if mode == 'canonical' %}
+        <span class="field-actions">
+          <button type="button" class="btn-mini grading-add" title="ajouter une case">+ case</button>
+        </span>
+        {% endif %}
+      </div>
+      <div class="open-grading-cases">
+        {% for c in b.data.grading_cases %}
+        <div class="grading-case">
+          <label>label
+            <input type="text" class="grading-label" value="{{ c.label }}" spellcheck="false"></label>
+          <label>valeur
+            <input type="number" class="grading-value" step="0.5" value="{{ c.value }}"></label>
+          {% if mode == 'canonical' %}
+          <button type="button" class="btn-mini grading-remove" title="supprimer">✕</button>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% elif b.kind == 'question_freeform' %}
+    {# Question à réponse libre auto-gradée par HTR (extra [htr]).
+       Le PDF imprime un \AMCOpen ; le HTR transcrit la réponse de
+       l'étudiant et la compare à `expected_answer` selon `match_mode`.
+       Sans [htr] installé, la case 0/points reste cochable manuellement
+       par le correcteur sur la feuille (rétrocompat). #}
+    <header class="sujet-q-head">
+      <div class="sujet-q-id">
+        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+               title="identifiant LaTeX">
+        <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+          lignes
+          <input type="number" class="ff-lines" min="1" max="20" step="1"
+                 value="{{ b.data.lines }}"></label>
+        <label class="q-horiz" title="note attribuée si la réponse est correcte">
+          points
+          <input type="number" class="ff-points" min="0" step="0.5"
+                 value="{{ b.data.points }}"></label>
+      </div>
+      <div class="sujet-q-bareme">
+        <span class="badge" style="background:#e0d4f5;color:#6533c0;border:1px solid #c8b8ee;">🪄 HTR</span>
+        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.data.points) }}</strong></span>
+      </div>
+    </header>
+
+    <div class="sujet-field">
+      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+      <div class="md-pair">
+        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+        <div class="md-view"></div>
+      </div>
+    </div>
+
+    <div class="sujet-field">
+      <div class="field-label">Réponse attendue <span class="field-tag">expected_answer</span></div>
+      <input type="text" class="ff-expected" spellcheck="false"
+             value="{% if b.data.expected_answer is string %}{{ b.data.expected_answer }}{% else %}{{ b.data.expected_answer|join(' | ') }}{% endif %}"
+             placeholder="ex. 42  ·  (sépare par | pour plusieurs réponses acceptées : Bernoulli | bernoulli)">
+    </div>
+
+    <div class="sujet-field" style="display:flex;gap:14px;align-items:end;">
+      <label class="ab-field" title="comment comparer la lecture OCR à expected_answer">
+        mode de match
+        <select class="ff-match-mode">
+          <option value="exact"{% if b.data.match_mode == 'exact' %} selected{% endif %}>exact (égal après strip+lower)</option>
+          <option value="numeric_tol"{% if b.data.match_mode == 'numeric_tol' %} selected{% endif %}>numeric_tol (nombre, écart ≤ tol)</option>
+          <option value="contains"{% if b.data.match_mode == 'contains' %} selected{% endif %}>contains (substring lower)</option>
+          <option value="regex"{% if b.data.match_mode == 'regex' %} selected{% endif %}>regex</option>
+        </select>
+      </label>
+      <label class="ab-field" title="tolérance numérique (utilisée seulement si mode = numeric_tol)">
+        numeric_tol
+        <input type="number" class="ff-numeric-tol" min="0" step="0.01" value="{{ b.data.numeric_tol }}">
+      </label>
+    </div>
+
+    {% elif b.kind == 'answerbox' %}
+    {# Cadre `\begin{answerbox}` (correction manuelle, pas de cases AMC).
+       Le placement détermine où le bloc apparaîtra dans le .tex compilé. #}
+    <header class="sujet-q-head">
+      <div class="sujet-q-id">
+        <label class="ab-field" title="hauteur du cadre (ex. 4cm, 5cm, 10cm)">
+          hauteur
+          <input type="text" class="ab-height" value="{{ b.data.height }}"
+                 placeholder="5cm" spellcheck="false"></label>
+        <label class="ab-field" title="où apparaît le cadre dans le PDF">
+          placement
+          <select class="ab-placement">
+            <option value="inline"{% if b.data.placement == 'inline' %} selected{% endif %}>dans le flux des questions</option>
+            <option value="end"{% if b.data.placement == 'end' %} selected{% endif %}>sur la feuille de réponses (en fin)</option>
+          </select>
+        </label>
+        <label class="ab-field" title="grille AMC à cocher par le correcteur (0 = aucune). Détectable a posteriori via le tag « bareme-<bid> » dans exam.xy.">
+          barème max
+          <input type="number" class="ab-bareme-max" min="0" max="99" step="0.25"
+                 value="{{ b.data.bareme_max or 0 }}"></label>
+        <label class="ab-field" title="pas entre 2 cases consécutives. Ex. max=1 + step=0.25 → 5 cases (scores 0, 0.25, 0.5, 0.75, 1). Les labels affichés restent 0, 1, 2, …">
+          pas
+          <input type="number" class="ab-bareme-step" min="0.01" max="99" step="0.25"
+                 value="{{ b.data.bareme_step or 1 }}"></label>
+      </div>
+    </header>
+
+    <div class="sujet-field">
+      <div class="field-label">Titre (optionnel) <span class="field-tag">au-dessus du cadre</span></div>
+      <input type="text" class="ab-title" value="{{ b.data.title }}"
+             placeholder="ex. Justifie ta réponse">
+    </div>
+
+    <div class="sujet-field">
+      <div class="field-label">Instructions (optionnel) <span class="field-tag">LaTeX</span></div>
+      <div class="md-pair">
+        <textarea class="md-src ab-instructions" rows="2" spellcheck="false">{{ b.data.instructions }}</textarea>
+        <div class="md-view"></div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  </div><!-- /sujet-left -->
+
+  <aside class="sujet-right">
+    <div class="preview-panel">
+      <div class="preview-title" id="preview-title">Aperçu PDF</div>
+      <div class="preview-hint-small">Clic sur l'aperçu = vue agrandie scrollable.</div>
+      <div class="preview-body" id="preview-body">
+        <p class="preview-hint">Survolez ou cliquez un bloc pour afficher
+          sa partie du PDF du sujet.</p>
+      </div>
+    </div>
+  </aside>
+  </div><!-- /sujet-split -->
+
+{# Lightbox plein écran pour zoomer sur l'aperçu PDF (clic sur l'image du panel droit) #}
+<div class="preview-zoom" id="previewZoom" hidden role="dialog" aria-labelledby="previewZoomTitle">
+  <div class="preview-zoom-card">
+    <div class="preview-zoom-head">
+      <span class="preview-zoom-title" id="previewZoomTitle">Aperçu</span>
+      <button type="button" class="preview-zoom-close" id="previewZoomClose">Fermer (Esc)</button>
+    </div>
+    <div class="preview-zoom-body" id="previewZoomBody"></div>
+  </div>
+</div>
+
+</div>
+
+{# Menu contextuel de l'outline (clic droit sur item/section) — canonique seul. #}
+{% if mode == 'canonical' %}
+<div id="outlineContextMenu" class="outline-ctx-menu" hidden role="menu">
+  <button type="button" data-action="add-section" role="menuitem">
+    <span class="ctx-icon outline-icon-text">§</span> Ajouter une section
+  </button>
+  <button type="button" data-action="add-qcm-single" role="menuitem">
+    <span class="ctx-icon outline-icon-qcm">▢</span> Question à réponse unique
+  </button>
+  <button type="button" data-action="add-qcm-mult" role="menuitem">
+    <span class="ctx-icon outline-icon-qcm">⊞</span> Question à réponses multiples
+  </button>
+  <button type="button" data-action="add-answerbox-inline" role="menuitem">
+    <span class="ctx-icon outline-icon-answer">✎</span> Zone réponse écrite (inline)
+  </button>
+  <button type="button" data-action="add-answerbox-end" role="menuitem">
+    <span class="ctx-icon outline-icon-answer">✎</span> Zone réponse écrite (en fin)
+  </button>
+  <div class="ctx-sep"></div>
+  <button type="button" data-action="add-open" role="menuitem">
+    <span class="ctx-icon outline-icon-open">◰</span> Question ouverte (AMC)
+  </button>
+  <button type="button" data-action="add-text" role="menuitem">
+    <span class="ctx-icon outline-icon-text">¶</span> Bloc de texte libre
+  </button>
+  <div class="ctx-sep"></div>
+  <button type="button" data-action="save-to-bank" role="menuitem">
+    <span class="ctx-icon">💾</span> Sauver dans la banque
+  </button>
+  <div class="ctx-sep"></div>
+  <button type="button" data-action="delete" role="menuitem" class="ctx-danger">
+    <span class="ctx-icon">🗑</span> Supprimer ce bloc
+  </button>
+</div>
+
+{# Modale Banque (browse + import) — canonique seul. #}
+<div id="bankModal" class="pm-modal bank-modal" hidden role="dialog" aria-modal="true" aria-labelledby="bankModalTitle">
+  <div class="pm-modal-backdrop" data-close-bank="1"></div>
+  <div class="pm-modal-card bank-modal-card" role="document">
+    <button type="button" class="bank-modal-close" data-close-bank="1" aria-label="Fermer">×</button>
+    <h2 id="bankModalTitle">📚 Banque de questions</h2>
+    <p class="pm-modal-help">
+      Les questions sauvegardées sont stockées localement dans
+      <code id="bank-root-hint">~/Documents/AMCx-banque/</code>. Cliquez
+      <strong>+ Insérer</strong> pour ajouter une question à la fin du sujet courant.
+    </p>
+    <div class="bank-modal-grid">
+      <aside class="bank-filters">
+        <div class="bank-filter-field">
+          <label for="bank-search">Recherche</label>
+          <input type="text" id="bank-search" placeholder="titre ou tag…" autocomplete="off">
+        </div>
+        <div class="bank-filter-field">
+          <label>Type</label>
+          <label class="bank-radio"><input type="radio" name="bank-kind" value="" checked> Tous</label>
+          <label class="bank-radio"><input type="radio" name="bank-kind" value="question_qcm"> QCM</label>
+          <label class="bank-radio"><input type="radio" name="bank-kind" value="question_open"> Ouverte (AMC)</label>
+          <label class="bank-radio"><input type="radio" name="bank-kind" value="answerbox"> Zone réponse</label>
+          <label class="bank-radio"><input type="radio" name="bank-kind" value="text"> Texte</label>
+        </div>
+        <div class="bank-filter-field">
+          <label>Tags</label>
+          <div id="bank-tags-list" class="bank-tags-list">
+            <span class="bank-empty-tags">Aucun tag pour le moment.</span>
+          </div>
+        </div>
+      </aside>
+      <section class="bank-list-pane">
+        <div class="bank-list-header">
+          <span id="bank-count">0 question(s)</span>
+        </div>
+        <div id="bank-list" class="bank-list">
+          <p class="bank-empty">Chargement…</p>
+        </div>
+      </section>
+      <aside class="bank-preview-pane">
+        <h3 class="bank-preview-title">Aperçu</h3>
+        <div id="bank-preview" class="bank-preview">
+          <p class="bank-empty">Survolez une question pour la prévisualiser.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+{# Modale "Claude" — propose un diff puis applique. #}
+<div id="aiEditModal" class="pm-modal ai-modal" hidden role="dialog" aria-modal="true" aria-labelledby="aiEditModalTitle">
+  <div class="pm-modal-backdrop" data-close-ai="1"></div>
+  <div class="pm-modal-card ai-modal-card" role="document">
+    <button type="button" class="bank-modal-close" data-close-ai="1" aria-label="Fermer">×</button>
+    <h2 id="aiEditModalTitle"><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon claude-icon-md" alt=""> Modifier la question avec Claude</h2>
+    <p class="pm-modal-help">
+      Décris ce que tu veux modifier. Claude propose une nouvelle version,
+      tu valides ou tu rejettes. Aucune écriture sans ton clic « Appliquer ».
+    </p>
+
+    <div class="ai-connect" id="ai-connect" hidden>
+      <h3 class="ai-connect-title">Connecter Claude</h3>
+      <p class="ai-connect-intro">
+        Anthropic ne propose pas (encore) de « Sign in with Claude » pour les
+        apps tierces. Deux chemins possibles :
+      </p>
+      <div class="ai-connect-options">
+        <div class="ai-connect-card">
+          <div class="ai-connect-card-head">🔑 Clé API Anthropic</div>
+          <p>Le plus rapide. ~1¢ par modification de question.</p>
+          <a href="https://console.anthropic.com/settings/keys"
+             target="_blank" rel="noopener"
+             class="btn btn-primary ai-connect-link">→ Créer / récupérer une clé</a>
+          <div class="ai-connect-paste">
+            <input type="password" id="ai-connect-key"
+                   placeholder="Colle ta clé sk-ant-… ici" autocomplete="off">
+            <button type="button" class="btn btn-primary" id="ai-connect-save">Enregistrer</button>
+          </div>
+          <div class="ai-connect-hint" id="ai-connect-save-status"></div>
+        </div>
+
+        <div class="ai-connect-card">
+          <div class="ai-connect-card-head">📦 Abonnement Claude (Pro/Max)</div>
+          <p>Via <b>Claude Code</b> : utilise ton quota d'abonnement, pas de
+             facturation au token. Auth par browser-OAuth (une seule fois).</p>
+          <a href="https://claude.com/claude-code"
+             target="_blank" rel="noopener"
+             class="btn ai-connect-link">↗ Installer Claude Code</a>
+          <ol class="ai-connect-steps">
+            <li>Installe Claude Code (lien ci-dessus, ~30 s)</li>
+            <li>Ouvre un terminal, tape <code>claude</code>. Ça ouvre ton
+                browser pour te connecter à ton compte Claude.</li>
+            <li>Reviens ici et clique « Vérifier ».</li>
+          </ol>
+          <div class="ai-connect-status" id="ai-cc-status">Statut : —</div>
+          <button type="button" class="btn" id="ai-connect-recheck">↻ Vérifier</button>
+          <div class="ai-connect-hint">
+            <em>Note :</em> AMCx peut détecter le binaire, mais pas si ton
+            abonnement est actif dans Claude Code — il faut le lancer une
+            fois pour faire l'OAuth.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ai-current-preview" id="ai-current-preview"></div>
+    <div class="pm-modal-error" id="ai-error" hidden></div>
+    <div class="pm-modal-field">
+      <label for="ai-prompt">Demande à Claude <span class="ai-prompt-hint">(Entrée = envoyer · Shift+Entrée = saut de ligne)</span></label>
+      <textarea id="ai-prompt" rows="3"
+                placeholder="ex. Reformule l'énoncé pour qu'il soit plus clair, garde les mêmes réponses"></textarea>
+      <div class="ai-suggestions">
+        <button type="button" class="ai-suggest">Reformule plus clairement</button>
+        <button type="button" class="ai-suggest">Rends la question plus difficile</button>
+        <button type="button" class="ai-suggest">Ajoute 2 distracteurs plausibles</button>
+        <button type="button" class="ai-suggest">Convertis en single</button>
+        <button type="button" class="ai-suggest">Propose 1 question similaire en dessous</button>
+        <button type="button" class="ai-suggest">Propose 3 questions sur le même thème en dessous</button>
+      </div>
+    </div>
+    <div class="bank-modal-actions">
+      <button type="button" class="btn" data-close-ai="1">Annuler</button>
+      <button type="button" class="btn btn-primary" id="ai-go">Demander à Claude</button>
+    </div>
+    <div class="ai-result" id="ai-result" hidden>
+      <div class="ai-rationale" id="ai-rationale"></div>
+      <div class="ai-usage" id="ai-usage"></div>
+      <h3 class="ai-diff-title">Diff proposé</h3>
+      <div class="ai-diff" id="ai-diff"></div>
+      <div class="bank-modal-actions">
+        <button type="button" class="btn" id="ai-redo">↻ Reformuler la demande</button>
+        <button type="button" class="btn btn-primary" id="ai-apply">✓ Appliquer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Modale "Sauver dans la banque" (titre + tags). #}
+<div id="bankSaveModal" class="pm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="bankSaveModalTitle">
+  <div class="pm-modal-backdrop" data-close-bank-save="1"></div>
+  <div class="pm-modal-card" role="document">
+    <h2 id="bankSaveModalTitle">💾 Sauver dans la banque</h2>
+    <p class="pm-modal-help">
+      Donne un titre lisible et quelques tags (séparés par des virgules) pour
+      retrouver cette question plus tard.
+    </p>
+    <div class="pm-modal-error" id="bank-save-error" hidden></div>
+    <div class="pm-modal-field">
+      <label for="bank-save-title">Titre</label>
+      <input type="text" id="bank-save-title" autocomplete="off">
+    </div>
+    <div class="pm-modal-field">
+      <label for="bank-save-tags">Tags</label>
+      <input type="text" id="bank-save-tags" placeholder="proba, L2, facile…" autocomplete="off">
+      <span class="pm-modal-hint">Séparés par des virgules.</span>
+    </div>
+    <div class="pm-modal-field">
+      <label for="bank-save-author">Auteur</label>
+      <input type="text" id="bank-save-author" autocomplete="off">
+      <span class="pm-modal-hint">Préremplis avec l'auteur du sujet.</span>
+    </div>
+    <div class="bank-modal-actions">
+      <button type="button" class="btn" data-close-bank-save="1">Annuler</button>
+      <button type="button" class="btn btn-primary" id="bank-save-confirm">Sauver</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script>
+let PDF_V = '{{ pdf_mtime }}';
+const SUJET_MODE = '{{ mode }}';
+const IS_CANONICAL = SUJET_MODE === 'canonical';
+
+// === LaTeX → markdown (best-effort) ==========================================
+function balancedJS(s, i) {
+  let depth = 0;
+  for (let j = i; j < s.length; j++) {
+    if (s[j] === '{') depth++;
+    else if (s[j] === '}') { depth--; if (depth === 0) return [s.slice(i + 1, j), j + 1]; }
+  }
+  return [s.slice(i + 1), s.length];
+}
+function replaceCmd(t, name, fn) {
+  const needle = '\\' + name + '{';
+  let k;
+  while ((k = t.indexOf(needle)) !== -1) {
+    const [inner, after] = balancedJS(t, k + needle.length - 1);
+    t = t.slice(0, k) + fn(inner) + t.slice(after);
+  }
+  return t;
+}
+function textToMd(t) {
+  t = t.replace(/(^|[^\\])%.*/g, '$1');
+  t = replaceCmd(t, 'textbf', x => '**' + x + '**');
+  t = replaceCmd(t, 'textsc', x => x);
+  t = replaceCmd(t, 'emph', x => '*' + x + '*');
+  t = replaceCmd(t, 'textit', x => '*' + x + '*');
+  t = replaceCmd(t, 'text', x => x);
+  t = t.replace(/\\\\/g, '\n');
+  ['\\,', '\\;', '\\!', '\\ ', '\\quad', '\\qquad', '~'].forEach(sp => { t = t.split(sp).join(' '); });
+  t = t.split('\\dots').join('…').split('\\ldots').join('…');
+  t = t.split('\\%').join('%').split('\\&').join('&').split('\\_').join('_');
+  ['\\noindent', '\\smallskip', '\\medskip', '\\bigskip'].forEach(c => { t = t.split(c).join(''); });
+  return t;
+}
+function latexToMd(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    if (s[i] === '$') {
+      const delim = s.substr(i, 2) === '$$' ? '$$' : '$';
+      let j = s.indexOf(delim, i + delim.length);
+      if (j === -1) { out += s.slice(i); break; }
+      out += s.slice(i, j + delim.length);
+      i = j + delim.length;
+    } else {
+      let j = s.indexOf('$', i);
+      if (j === -1) j = s.length;
+      out += textToMd(s.slice(i, j));
+      i = j;
+    }
+  }
+  return out.replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n')
+            .replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// === markdown + maths → HTML ================================================
+function renderMd(src) {
+  const math = [];
+  const tok = i => '@@KX' + i + 'XK@@';
+  let s = (src || '')
+    .replace(/\$\$([\s\S]+?)\$\$/g, function (_, m) {
+      math.push({tex: m, display: true});  return tok(math.length - 1); })
+    .replace(/\$([^\$\n]+?)\$/g, function (_, m) {
+      math.push({tex: m, display: false}); return tok(math.length - 1); });
+  let html;
+  try { html = marked.parse(s); } catch (e) { html = s; }
+  return html.replace(/@@KX(\d+)XK@@/g, function (_, i) {
+    const it = math[+i];
+    try { return katex.renderToString(it.tex, {displayMode: it.display, throwOnError: false}); }
+    catch (e) { return '<code>$' + it.tex + '$</code>'; }
+  });
+}
+function renderPreview(ta) {
+  const pair = ta.closest('.md-pair');
+  if (pair) pair.querySelector('.md-view').innerHTML = renderMd(latexToMd(ta.value));
+}
+
+// === barème (QCM uniquement) ================================================
+function frac(s) {
+  s = String(s == null ? '' : s).trim();
+  if (!s) return 0;
+  if (s.indexOf('/') !== -1) { const p = s.split('/'); return parseFloat(p[0]) / parseFloat(p[1]); }
+  return parseFloat(s) || 0;
+}
+function fmtScore(x) { const r = Math.round(x * 1000) / 1000; return (r > 0 ? '+' : '') + r; }
+function mode(arr) {
+  const c = {}; let best = arr[0], bn = -1;
+  arr.forEach(v => { c[v] = (c[v] || 0) + 1; if (c[v] > bn) { bn = c[v]; best = v; } });
+  return best;
+}
+function qType(qEl) {
+  const sel = qEl.querySelector('.q-type-select');
+  return sel ? sel.value : qEl.dataset.type;
+}
+function deriveGlobals(qEl) {
+  if (qType(qEl) !== 'mult') return;
+  const bonnes = [].map.call(qEl.querySelectorAll('.md-answer.is-correct .ans-bareme'), i => i.value);
+  const mauv   = [].map.call(qEl.querySelectorAll('.md-answer.is-wrong .ans-bareme'), i => i.value);
+  const gb = qEl.querySelector('.bar-global-b'), gm = qEl.querySelector('.bar-global-m');
+  if (gb && bonnes.length) gb.value = mode(bonnes);
+  if (gm && mauv.length)   gm.value = mode(mauv);
+}
+function applyGlobal(qEl, cls, value) {
+  qEl.querySelectorAll('.md-answer.' + cls + ' .ans-bareme').forEach(function (i) { i.value = value; });
+}
+function refreshOverrides(qEl) {
+  const gbEl = qEl.querySelector('.bar-global-b'), gmEl = qEl.querySelector('.bar-global-m');
+  if (!gbEl || !gmEl) return;
+  const gb = (gbEl.value || '').trim(), gm = (gmEl.value || '').trim();
+  qEl.querySelectorAll('.md-answer').forEach(function (row) {
+    const inp = row.querySelector('.ans-bareme'); if (!inp) return;
+    const g = row.dataset.correct === '1' ? gb : gm;
+    inp.classList.toggle('is-override', inp.value.trim() !== g);
+  });
+}
+function refreshScores(qEl) {
+  if (qType(qEl) === 'single') {
+    const ve = qEl.querySelector('.bar-value');
+    const v = ve ? frac(ve.value) : 1;
+    qEl.querySelectorAll('.md-answer').forEach(function (row) {
+      const s = row.dataset.correct === '1' ? v : 0;
+      const sp = row.querySelector('.ans-score');
+      if (sp) { sp.textContent = fmtScore(s); sp.className = 'ans-score ' + (s > 0 ? 'sc-pos' : (s < 0 ? 'sc-neg' : 'sc-zero')); }
+    });
+  } else {
+    qEl.querySelectorAll('.ans-bareme').forEach(function (inp) {
+      const s = frac(inp.value);
+      inp.classList.remove('sc-pos', 'sc-neg', 'sc-zero');
+      inp.classList.add(s > 0 ? 'sc-pos' : (s < 0 ? 'sc-neg' : 'sc-zero'));
+    });
+  }
+  let mx = 0;
+  if (qType(qEl) === 'single') {
+    const ve = qEl.querySelector('.bar-value'); mx = ve ? frac(ve.value) : 1;
+  } else {
+    qEl.querySelectorAll('.md-answer.is-correct .ans-bareme').forEach(function (i) { mx += frac(i.value); });
+  }
+  const el = qEl.querySelector('.q-max-val');
+  if (el) el.textContent = (Math.round(mx * 100) / 100).toFixed(2);
+  let tot = 0;
+  document.querySelectorAll('.q-max-val').forEach(function (e) { tot += parseFloat(e.textContent) || 0; });
+  document.getElementById('total-max').textContent = tot.toFixed(2);
+}
+
+// === état dirty =============================================================
+function markDirty(el) { el.classList.add('dirty'); updateSaveBtn(); }
+function clearDirty(el) { el.classList.remove('dirty'); updateSaveBtn(); }
+function dirtyBlocks() { return [].slice.call(document.querySelectorAll('.sujet-block.dirty')); }
+function updateSaveBtn() {
+  const n = dirtyBlocks().length;
+  const btn = document.getElementById('save-btn');
+  btn.textContent = n ? ('💾 Sauvegarder (' + n + ')') : '💾 Sauvegarder';
+  btn.classList.toggle('has-dirty', n > 0);
+}
+
+// === collecte & sauvegarde des blocs ========================================
+function collectQcmData(blk) {
+  const envCb = blk.querySelector('.q-env-horiz');
+  const valEl = blk.querySelector('.bar-value');
+  const answers = [].map.call(blk.querySelectorAll('.md-answer'), function (row) {
+    const bar = row.querySelector('.ans-bareme');
+    return {text: row.querySelector('.ans-src').value,
+            correct: row.dataset.correct === '1',
+            bareme: bar ? bar.value : ''};
+  });
+  return {tag: blk.querySelector('.q-tag-input').value.trim(),
+          qtype: qType(blk),
+          env: (envCb && envCb.checked) ? 'reponseshoriz' : 'reponses',
+          statement: blk.querySelector('.stmt-src').value,
+          answers: answers,
+          value: valEl ? valEl.value : '1'};
+}
+function collectOpenData(blk) {
+  const cases = [].map.call(blk.querySelectorAll('.grading-case'), function (gc) {
+    return {label: gc.querySelector('.grading-label').value,
+            value: parseFloat(gc.querySelector('.grading-value').value) || 0};
+  });
+  return {tag: blk.querySelector('.q-tag-input').value.trim(),
+          statement: blk.querySelector('.stmt-src').value,
+          lines: parseInt(blk.querySelector('.open-lines').value) || 4,
+          points: parseFloat(blk.querySelector('.open-points').value) || 0,
+          grading_cases: cases};
+}
+function collectTextData(blk) {
+  return {tex: blk.querySelector('.text-src').value};
+}
+function collectAnswerboxData(blk) {
+  // Tolérance : champs vides → valeurs par défaut côté serveur.
+  return {
+    height: (blk.querySelector('.ab-height')?.value || '5cm').trim() || '5cm',
+    placement: blk.querySelector('.ab-placement')?.value || 'inline',
+    title: (blk.querySelector('.ab-title')?.value || '').trim(),
+    instructions: blk.querySelector('.ab-instructions')?.value || '',
+    bareme_max: parseFloat(blk.querySelector('.ab-bareme-max')?.value) || 0,
+    bareme_step: parseFloat(blk.querySelector('.ab-bareme-step')?.value) || 1,
+  };
+}
+function collectFreeformData(blk) {
+  // Si l'utilisateur sépare par " | ", on stocke un tableau d'alternatives,
+  // sinon une simple string (sérialisé tel quel dans %%QCM-FREEFORM-DATA).
+  let exp = (blk.querySelector('.ff-expected')?.value || '').trim();
+  if (exp.includes('|')) {
+    exp = exp.split('|').map(s => s.trim()).filter(Boolean);
+  }
+  return {
+    tag: blk.querySelector('.q-tag-input').value.trim(),
+    statement: blk.querySelector('.stmt-src').value,
+    expected_answer: exp,
+    match_mode: blk.querySelector('.ff-match-mode').value || 'exact',
+    numeric_tol: parseFloat(blk.querySelector('.ff-numeric-tol').value) || 0.01,
+    lines: parseInt(blk.querySelector('.ff-lines').value) || 2,
+    points: parseFloat(blk.querySelector('.ff-points').value) || 1.0,
+  };
+}
+function collectBlockData(blk) {
+  const k = blk.dataset.kind;
+  if (k === 'text') return collectTextData(blk);
+  if (k === 'question_qcm') return collectQcmData(blk);
+  if (k === 'question_open') return collectOpenData(blk);
+  if (k === 'question_freeform') return collectFreeformData(blk);
+  if (k === 'answerbox') return collectAnswerboxData(blk);
+  return {};
+}
+
+function setStatus(msg, cls, log) {
+  const el = document.getElementById('compile-status');
+  el.textContent = msg;
+  el.className = 'compile-status ' + (cls || '');
+  const logEl = document.getElementById('compile-log');
+  if (log) { logEl.textContent = log; logEl.hidden = false; }
+  else { logEl.hidden = true; logEl.textContent = ''; }
+}
+
+async function saveOneBlock(blk) {
+  const kind = blk.dataset.kind;
+  const data = collectBlockData(blk);
+  // Mode legacy + question_qcm : on passe par /api/sujet/save (multi-question batch).
+  // Canonique OU mise à jour d'un text/open : on passe par /api/sujet/blocks/update.
+  if (!IS_CANONICAL && kind === 'question_qcm') {
+    const q = parseInt(blk.dataset.q);
+    const r = await fetch('/api/sujet/save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({questions: [{q: q,
+        tag: data.tag, type: data.qtype, env: data.env,
+        statement: data.statement, answers: data.answers, value: data.value}]})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return false; }
+    const sel = blk.querySelector('.q-type-select');
+    if (sel && sel.value !== blk.dataset.type) { location.reload(); return true; }
+    document.getElementById('total-max').textContent = Number(j.total_max).toFixed(2);
+    Object.keys(j.max || {}).forEach(function (q) {
+      const el = document.querySelector('.sujet-block[data-q="' + q + '"] .q-max-val');
+      if (el) el.textContent = Number(j.max[q]).toFixed(2);
+    });
+    return true;
+  }
+  // Mode canonique : update_block (gère tous les kinds).
+  const r = await fetch('/api/sujet/blocks/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bid: blk.dataset.bid, data: data})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return false; }
+  // Changement de type → reload pour rafraîchir le rendu (toggle mult ↔ single).
+  const sel = blk.querySelector('.q-type-select');
+  if (sel && sel.value !== blk.dataset.type) { location.reload(); return true; }
+  return true;
+}
+
+async function saveBlocks(blks) {
+  if (!blks.length) { setStatus('Rien à sauvegarder.', ''); return true; }
+  setStatus('Sauvegarde…', 'pending');
+  let ok = true;
+  let outlineDirty = false;
+  for (const blk of blks) {
+    if (!(await saveOneBlock(blk))) { ok = false; break; }
+    clearDirty(blk);
+    if (blk.dataset.kind === 'question_qcm') {
+      deriveGlobals(blk); refreshOverrides(blk); refreshScores(blk);
+    }
+    // Si on a édité un answerbox (titre, placement…), l'outline peut changer
+    // de regroupement : on rebuild à la fin.
+    if (blk.dataset.kind === 'answerbox') outlineDirty = true;
+  }
+  if (outlineDirty) buildOutline();
+  if (ok) setStatus(blks.length + ' bloc(s) sauvegardé(s) dans exam.tex ✓', 'ok');
+  return ok;
+}
+
+async function doCompile() {
+  setStatus('Compilation en cours…', 'pending');
+  const r = await fetch('/api/sujet/compile', {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (j.ok) {
+    if (j.pdf_mtime) PDF_V = String(j.pdf_mtime);
+    refreshPreview();
+    setStatus('PDF recompilé ✓ — aperçus à jour.', 'ok');
+  } else {
+    setStatus('Échec de compilation.', 'err', j.log || '(pas de log)');
+  }
+}
+async function compileWithGuard() {
+  const dirty = dirtyBlocks();
+  if (dirty.length) {
+    if (!confirm(dirty.length + ' bloc(s) non sauvegardé(s).\n\nSauvegarder puis compiler ?')) return;
+    if (!await saveBlocks(dirty)) return;
+  }
+  doCompile();
+}
+
+// === aperçu PDF (panneau droit) =============================================
+const previewTitle = document.getElementById('preview-title');
+const previewBody = document.getElementById('preview-body');
+let previewQ = null;
+// État du preview courant : numéro AMC q + métadonnées de la région (page +
+// ratio vertical) pour pouvoir ré-afficher et ouvrir le lightbox à la bonne page.
+let previewInfo = null;
+
+function _setPreviewActiveBlock(blk) {
+  // Cadre bleu sur le bloc en cours d'aperçu (relie visuellement la colonne
+  // d'édition et le panneau droit). Retire la classe sur tous les autres.
+  document.querySelectorAll('.sujet-block.is-preview-active').forEach(b => {
+    if (b !== blk) b.classList.remove('is-preview-active');
+  });
+  if (blk) blk.classList.add('is-preview-active');
+}
+
+function showPreview(blk) {
+  // `data-preview-q` (numéro AMC global) est posé par le serveur sur tous les
+  // blocs qui registrent une `\question{}` AMC : question_qcm, question_open,
+  // answerbox AVEC un barème. Les blocs text et les answerbox sans barème n'ont
+  // rien dans `.xy` à montrer.
+  _setPreviewActiveBlock(blk);
+  const q = blk.dataset.previewQ;
+  if (!q) {
+    previewQ = null; previewInfo = null;
+    previewTitle.textContent = 'Aperçu PDF';
+    previewBody.innerHTML = '<p class="preview-hint">Pas d\'aperçu pour ce bloc '
+      + '(pas de zone AMC enregistrée).</p>';
+    return;
+  }
+  if (q === previewQ) return;
+  previewQ = q;
+  const kind = blk.dataset.kind;
+  const label = (kind === 'question_qcm') ? 'Q' + (blk.dataset.q || q)
+              : (kind === 'question_open') ? 'Question ouverte (AMC Q' + q + ')'
+              : (kind === 'answerbox')     ? 'Zone réponse + barème (AMC Q' + q + ')'
+              :                              'AMC Q' + q;
+  previewTitle.textContent = 'Aperçu PDF — ' + label;
+  if (!PDF_V) {
+    previewBody.innerHTML = '<p class="preview-hint">Compilez le sujet '
+      + '(bouton ⚙ Compiler) pour afficher l\'aperçu PDF.</p>';
+    return;
+  }
+  // Affiche la page PDF entière contenant la question, scrollée à la zone.
+  // Le ratio vertical de la question (y_top/page_h) sert à scroller le
+  // conteneur `.preview-body` une fois l'image chargée.
+  fetch('/sujet/region/' + q + '.json?v=' + PDF_V, {cache: 'no-store'})
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (q !== previewQ) return;  // changé de bloc pendant le fetch
+      if (!info) {
+        previewBody.innerHTML = '<p class="preview-hint">Région introuvable.</p>';
+        return;
+      }
+      previewInfo = info;
+      previewInfo.label = label;
+      previewBody.innerHTML = '';
+      const img = document.createElement('img');
+      img.alt = 'page ' + info.page + ' (' + label + ')';
+      img.src = '/sujet/page/' + info.page + '.png?v=' + PDF_V;
+      previewBody.appendChild(img);
+      // Scroll au chargement : on cible le HAUT de la question avec une
+      // marge ~20px pour le voir avec du contexte au-dessus.
+      img.addEventListener('load', function () {
+        const h = img.clientHeight;
+        const y = Math.max(0, info.y_top * h - 20);
+        previewBody.scrollTop = y;
+      }, {once: true});
+    })
+    .catch(() => {
+      previewBody.innerHTML = '<p class="preview-hint">Erreur de chargement.</p>';
+    });
+}
+function refreshPreview() {
+  if (!previewQ) return;
+  const blk = document.querySelector('.sujet-block[data-preview-q="' + previewQ + '"]');
+  previewQ = null;
+  if (blk) showPreview(blk);
+}
+
+// === Lightbox PDF complet (clic sur l'image du panneau droit) ==============
+// Embed du PDF natif avec `#page=N` → navigation entre pages, zoom et scroll
+// gérés par le navigateur. Ouvre directement à la page de la question.
+(function () {
+  const overlay = document.getElementById('previewZoom');
+  const body    = document.getElementById('previewZoomBody');
+  const titleEl = document.getElementById('previewZoomTitle');
+  const closeBtn= document.getElementById('previewZoomClose');
+  const previewPanel = document.getElementById('preview-body');
+  if (!overlay || !previewPanel) return;
+
+  function openZoom() {
+    if (!previewInfo) return;
+    titleEl.textContent = 'PDF complet — ' + previewInfo.label
+                        + '  (page ' + previewInfo.page
+                        + '/' + previewInfo.total_pages + ')';
+    // `#page=N&view=FitH` : navigation native PDF.js / Acrobat / Edge.
+    const url = '/sujet/pdf?v=' + PDF_V + '#page=' + previewInfo.page + '&view=FitH';
+    body.innerHTML = '<embed type="application/pdf" src="' + url + '">';
+    overlay.hidden = false;
+  }
+  function closeZoom() { overlay.hidden = true; body.innerHTML = ''; }
+
+  previewPanel.addEventListener('click', function (e) {
+    if (!e.target.closest('img')) return;
+    openZoom();
+  });
+  closeBtn.addEventListener('click', closeZoom);
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeZoom();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !overlay.hidden) closeZoom();
+  });
+})();
+
+// === toggle bonne / mauvaise ================================================
+function toggleCorrect(qEl, row) {
+  const nowCorrect = row.dataset.correct !== '1';
+  row.dataset.correct = nowCorrect ? '1' : '0';
+  row.classList.toggle('is-correct', nowCorrect);
+  row.classList.toggle('is-wrong', !nowCorrect);
+  row.querySelector('.ans-badge').textContent = nowCorrect ? '✔ bonne' : '✗ mauvaise';
+  if (nowCorrect && qType(qEl) === 'single') {
+    qEl.querySelectorAll('.md-answer').forEach(function (other) {
+      if (other !== row && other.dataset.correct === '1') {
+        other.dataset.correct = '0';
+        other.classList.remove('is-correct'); other.classList.add('is-wrong');
+        other.querySelector('.ans-badge').textContent = '✗ mauvaise';
+      }
+    });
+  }
+  markDirty(qEl); refreshOverrides(qEl); refreshScores(qEl);
+}
+
+// === initialisation par bloc ================================================
+function initBlock(blk) {
+  // textareas avec preview (text, qcm statement, qcm answers, open statement)
+  blk.querySelectorAll('.md-src').forEach(function (ta) {
+    renderPreview(ta);
+    let t;
+    ta.addEventListener('input', function () {
+      markDirty(blk);
+      clearTimeout(t); t = setTimeout(function () { renderPreview(ta); }, 200);
+    });
+  });
+
+  // marquage dirty sur les inputs
+  blk.querySelectorAll('input, select').forEach(function (el) {
+    el.addEventListener('input', function () { markDirty(blk); });
+    el.addEventListener('change', function () { markDirty(blk); });
+  });
+
+  if (blk.dataset.kind === 'question_qcm') {
+    deriveGlobals(blk); refreshOverrides(blk); refreshScores(blk);
+    blk.querySelectorAll('.bar-global-b').forEach(function (g) {
+      g.addEventListener('input', function () {
+        applyGlobal(blk, 'is-correct', g.value);
+        markDirty(blk); refreshOverrides(blk); refreshScores(blk);
+      });
+    });
+    blk.querySelectorAll('.bar-global-m').forEach(function (g) {
+      g.addEventListener('input', function () {
+        applyGlobal(blk, 'is-wrong', g.value);
+        markDirty(blk); refreshOverrides(blk); refreshScores(blk);
+      });
+    });
+    blk.querySelectorAll('.ans-bareme').forEach(function (inp) {
+      inp.addEventListener('input', function () {
+        markDirty(blk); refreshOverrides(blk); refreshScores(blk);
+      });
+    });
+    blk.querySelectorAll('.bar-value').forEach(function (v) {
+      v.addEventListener('input', function () { markDirty(blk); refreshScores(blk); });
+    });
+    blk.querySelectorAll('.ans-badge').forEach(function (b) {
+      b.addEventListener('click', function () { toggleCorrect(blk, b.closest('.md-answer')); });
+    });
+    if (IS_CANONICAL) {
+      blk.querySelectorAll('.ans-add').forEach(function (b) {
+        b.addEventListener('click', function () { addAnswer(blk); });
+      });
+      blk.querySelectorAll('.ans-remove').forEach(function (b) {
+        b.addEventListener('click', function () { removeAnswer(blk, b.closest('.md-answer')); });
+      });
+    }
+  }
+
+  if (blk.dataset.kind === 'question_open' && IS_CANONICAL) {
+    blk.querySelectorAll('.grading-add').forEach(function (b) {
+      b.addEventListener('click', function () { addGradingCase(blk); });
+    });
+    blk.querySelectorAll('.grading-remove').forEach(function (b) {
+      b.addEventListener('click', function () { b.closest('.grading-case').remove(); markDirty(blk); });
+    });
+  }
+
+  // raccourcis clavier
+  blk.querySelectorAll('input, textarea, select').forEach(function (field) {
+    field.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      if (e.altKey) { e.preventDefault(); compileWithGuard(); }
+      else if (e.ctrlKey || e.metaKey) { e.preventDefault(); saveBlocks([blk]); }
+      else if (field.tagName === 'INPUT') { e.preventDefault(); saveBlocks([blk]); }
+    });
+  });
+
+  // aperçu PDF au survol
+  blk.addEventListener('mouseenter', function () { showPreview(blk); });
+  blk.addEventListener('focusin', function () { showPreview(blk); });
+
+  // CRUD canonique : up/down/duplicate/delete
+  if (IS_CANONICAL) {
+    const up = blk.querySelector('.block-move-up');
+    if (up) up.addEventListener('click', async () => moveBlock(blk, -1));
+    const down = blk.querySelector('.block-move-down');
+    if (down) down.addEventListener('click', async () => moveBlock(blk, +1));
+    const dup = blk.querySelector('.block-duplicate');
+    if (dup) dup.addEventListener('click', async () => duplicateBlock(blk));
+    const del = blk.querySelector('.block-delete');
+    if (del) del.addEventListener('click', async () => deleteBlock(blk));
+    const ai = blk.querySelector('.block-ai');
+    if (ai) ai.addEventListener('click', () => openAiEditModal(blk));
+  }
+}
+
+// === CRUD canonique =========================================================
+function _defaultDataFor(kind, qtype) {
+  // Le serveur a aussi des defaults (`_default_block_data`) ; on ne les
+  // surcharge que pour distinguer QCM single vs mult, et answerbox
+  // inline vs end, au moment de l'insertion.
+  if (kind === 'answerbox') {
+    // qtype sert ici à transporter le placement souhaité ('inline' | 'end').
+    const placement = (qtype === 'end') ? 'end' : 'inline';
+    return {
+      height: '5cm', placement: placement,
+      title: placement === 'end' ? 'Réponse à rédiger' : '',
+      instructions: '',
+    };
+  }
+  if (kind !== 'question_qcm' || !qtype || qtype === 'single') return null;
+  // qtype === 'mult'
+  return {
+    tag: 'q_' + Math.random().toString(36).slice(2, 6),
+    qtype: 'mult', env: 'reponses',
+    statement: 'Énoncé de la question…',
+    answers: [
+      {text: 'Réponse A (bonne)', correct: true, bareme: '1/2'},
+      {text: 'Réponse B (bonne)', correct: true, bareme: '1/2'},
+      {text: 'Réponse C (mauvaise)', correct: false, bareme: '1/2'},
+      {text: 'Réponse D (mauvaise)', correct: false, bareme: '1/2'},
+    ],
+    value: '1',
+  };
+}
+async function addBlock(kind, qtype) {
+  const data = _defaultDataFor(kind, qtype);
+  const r = await fetch('/api/sujet/blocks/add', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({kind: kind, after_bid: null, data: data})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    setStatus('Échec ajout : ' + (j.error || 'erreur'), 'err'); return;
+  }
+  setStatus('Bloc ajouté ✓ — rechargement…', 'ok');
+  setTimeout(() => location.reload(), 300);
+}
+
+async function deleteBlock(blk) {
+  if (!confirm('Supprimer ce bloc ?\n\n(le sujet est sauvegardé immédiatement)')) return;
+  const r = await fetch('/api/sujet/blocks/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bid: blk.dataset.bid})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return; }
+  blk.remove();
+  buildOutline();
+  setStatus('Bloc supprimé ✓', 'ok');
+}
+
+async function duplicateBlock(blk) {
+  const r = await fetch('/api/sujet/blocks/duplicate', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bid: blk.dataset.bid})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { setStatus('Échec duplication : ' + (j.error || 'erreur'), 'err'); return; }
+  setStatus('Bloc dupliqué ✓ — rechargement…', 'ok');
+  setTimeout(() => location.reload(), 300);
+}
+
+async function moveBlock(blk, direction) {
+  // direction = -1 (monter) ou +1 (descendre)
+  const blocks = [].slice.call(document.querySelectorAll('.sujet-block'));
+  const idx = blocks.indexOf(blk);
+  const newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= blocks.length) return;
+  // after_bid = bid du bloc devant lequel on veut être ; null = en première position
+  let afterBid = null;
+  if (direction < 0) {
+    afterBid = newIdx > 0 ? blocks[newIdx - 1].dataset.bid : null;
+  } else {
+    afterBid = blocks[newIdx].dataset.bid;
+  }
+  const r = await fetch('/api/sujet/blocks/move', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bid: blk.dataset.bid, after_bid: afterBid})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { setStatus('Échec déplacement : ' + (j.error || 'erreur'), 'err'); return; }
+  // Déplacer dans le DOM aussi
+  const list = document.getElementById('blocks-list');
+  if (direction < 0) blk.parentNode.insertBefore(blk, blocks[newIdx]);
+  else blk.parentNode.insertBefore(blocks[newIdx], blk);
+  buildOutline();
+  setStatus('Bloc déplacé ✓', 'ok');
+}
+
+function addAnswer(blk) {
+  const list = blk.querySelector('.sujet-answers');
+  const isMult = qType(blk) === 'mult';
+  const div = document.createElement('div');
+  div.className = 'md-answer is-wrong';
+  div.dataset.correct = '0';
+  div.innerHTML = '<div class="ans-mark">'
+    + '<button type="button" class="ans-badge" title="cliquer pour basculer">✗ mauvaise</button>'
+    + (isMult
+        ? '<input type="text" class="ans-bareme" spellcheck="false" value="0">'
+        : '<span class="ans-score"></span>')
+    + '<button type="button" class="btn-mini ans-remove" title="supprimer">✕</button>'
+    + '</div>'
+    + '<div class="md-pair">'
+    + '<textarea class="md-src ans-src" rows="2" spellcheck="false">Nouvelle réponse</textarea>'
+    + '<div class="md-view"></div></div>';
+  list.appendChild(div);
+  // Rebind handlers sur les nouveaux éléments
+  div.querySelector('.ans-badge').addEventListener('click', function () { toggleCorrect(blk, div); });
+  div.querySelector('.ans-remove').addEventListener('click', function () { removeAnswer(blk, div); });
+  const ta = div.querySelector('.ans-src');
+  renderPreview(ta);
+  let t;
+  ta.addEventListener('input', function () {
+    markDirty(blk);
+    clearTimeout(t); t = setTimeout(function () { renderPreview(ta); }, 200);
+  });
+  const bar = div.querySelector('.ans-bareme');
+  if (bar) bar.addEventListener('input', function () {
+    markDirty(blk); refreshOverrides(blk); refreshScores(blk);
+  });
+  markDirty(blk); refreshScores(blk);
+}
+
+function removeAnswer(blk, row) {
+  row.remove();
+  markDirty(blk);
+  if (qType(blk) === 'mult') { deriveGlobals(blk); refreshOverrides(blk); refreshScores(blk); }
+  else refreshScores(blk);
+}
+
+function addGradingCase(blk) {
+  const list = blk.querySelector('.open-grading-cases');
+  const div = document.createElement('div');
+  div.className = 'grading-case';
+  const n = list.querySelectorAll('.grading-case').length;
+  div.innerHTML = '<label>label <input type="text" class="grading-label" value="' + n + '" spellcheck="false"></label>'
+    + '<label>valeur <input type="number" class="grading-value" step="0.5" value="' + n + '"></label>'
+    + '<button type="button" class="btn-mini grading-remove" title="supprimer">✕</button>';
+  list.appendChild(div);
+  div.querySelector('.grading-remove').addEventListener('click', function () {
+    div.remove(); markDirty(blk);
+  });
+  div.querySelectorAll('input').forEach(function (i) {
+    i.addEventListener('input', function () { markDirty(blk); });
+  });
+  markDirty(blk);
+}
+
+// === Drag & drop (HTML5 natif) =============================================
+// Seule la poignée `☰` est draggable — sinon `draggable="true"` sur la section
+// entière empêche de positionner le curseur en cliquant dans les textareas.
+let dragSrc = null;
+document.querySelectorAll('.sujet-block').forEach(function (blk) {
+  if (!IS_CANONICAL) return;
+  const handle = blk.querySelector('.block-handle');
+  if (handle) {
+    handle.addEventListener('dragstart', function (e) {
+      dragSrc = blk;
+      blk.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', blk.dataset.bid);
+    });
+    handle.addEventListener('dragend', function () {
+      blk.classList.remove('dragging');
+      document.querySelectorAll('.drop-target').forEach(b => b.classList.remove('drop-target'));
+      dragSrc = null;
+    });
+  }
+  blk.addEventListener('dragover', function (e) {
+    if (!dragSrc || dragSrc === blk) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    blk.classList.add('drop-target');
+  });
+  blk.addEventListener('dragleave', function () { blk.classList.remove('drop-target'); });
+  blk.addEventListener('drop', async function (e) {
+    e.preventDefault();
+    blk.classList.remove('drop-target');
+    // Capture local : `dragend` est dans la queue, va s'exécuter pendant le
+    // `await` ci-dessous et mettre `dragSrc = null`. Sans cette capture, le
+    // `insertBefore(null, blk)` ferait TypeError silencieux et le DOM
+    // ne serait pas réordonné (alors que l'API a bien fait son boulot).
+    const src = dragSrc;
+    if (!src || src === blk) return;
+    // Calculer if drop au-dessus ou en-dessous selon Y
+    const rect = blk.getBoundingClientRect();
+    const above = (e.clientY - rect.top) < rect.height / 2;
+    const blocks = [].slice.call(document.querySelectorAll('.sujet-block'));
+    const targetIdx = blocks.indexOf(blk);
+    const afterBid = above
+      ? (targetIdx > 0 ? blocks[targetIdx - 1].dataset.bid : null)
+      : blk.dataset.bid;
+    // Édge case : si le bloc déplacé est juste avant la cible et qu'on drop au-dessus, no-op
+    const r = await fetch('/api/sujet/blocks/move', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bid: src.dataset.bid, after_bid: afterBid})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { setStatus('Échec déplacement : ' + (j.error || 'erreur'), 'err'); return; }
+    // DOM update
+    if (above) blk.parentNode.insertBefore(src, blk);
+    else if (blk.nextSibling) blk.parentNode.insertBefore(src, blk.nextSibling);
+    else blk.parentNode.appendChild(src);
+    buildOutline();
+    setStatus('Bloc déplacé ✓', 'ok');
+  });
+});
+
+// === Bandeau global : config / header / answer sheet ========================
+function debounce(fn, ms) {
+  let t; return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+}
+async function patchConfig(patch) {
+  const r = await fetch('/api/sujet/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(patch)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) setStatus('Échec config : ' + (j.error || 'erreur'), 'err');
+  else setStatus('Config mise à jour ✓', 'ok');
+}
+async function patchHeader(patch) {
+  const r = await fetch('/api/sujet/header', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(patch)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) setStatus('Échec en-tête : ' + (j.error || 'erreur'), 'err');
+  else setStatus('En-tête mis à jour ✓', 'ok');
+}
+async function patchAnswerSheet(patch) {
+  const r = await fetch('/api/sujet/answer-sheet', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(patch)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) setStatus('Échec feuille rép. : ' + (j.error || 'erreur'), 'err');
+  else setStatus('Feuille de réponses mise à jour ✓', 'ok');
+}
+
+// Cfg
+const _cfgSave = debounce(function () {
+  patchConfig({
+    num_copies: parseInt(document.getElementById('cfg-num-copies').value) || 1,
+    random_seed: parseInt(document.getElementById('cfg-random-seed').value) || 0,
+    shuffle_answers: document.getElementById('cfg-shuffle-answers').checked,
+    shuffle_questions: document.getElementById('cfg-shuffle-questions').checked,
+  });
+}, 400);
+['cfg-num-copies', 'cfg-random-seed', 'cfg-shuffle-answers', 'cfg-shuffle-questions']
+  .forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', _cfgSave);
+  });
+
+// Régénération seed
+const seedBtn = document.getElementById('seed-regen-btn');
+if (seedBtn) seedBtn.addEventListener('click', async function () {
+  const r = await fetch('/api/sujet/regenerate-seed', {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (j.ok && j.seed) {
+    document.getElementById('cfg-random-seed').value = j.seed;
+    setStatus('Nouveau seed : ' + j.seed + ' ✓', 'ok');
+  } else setStatus('Échec seed : ' + (j.error || 'erreur'), 'err');
+});
+
+// Danger zone : migration legacy → canonique
+const migrateBtn = document.getElementById('migrate-btn');
+if (migrateBtn) migrateBtn.addEventListener('click', async function () {
+  const msg = "MIGRATION LEGACY → CANONIQUE\n\n"
+    + "L'UI va ajouter des marqueurs %%QCM-... à exam.tex pour activer "
+    + "tout le CRUD (ajout/suppression/réorganisation de blocs).\n\n"
+    + "Le préambule et la feuille de réponses originaux sont préservés intacts.\n"
+    + "Un backup est créé : sujet/exam.tex.legacy-backup\n\n"
+    + "⚠ Si ce sujet a déjà été imprimé/scanné/corrigé, NE PAS continuer : "
+    + "ré-éditer ensuite peut désaligner les copies.\n\n"
+    + "Continuer ?";
+  if (!confirm(msg)) return;
+  setStatus('Migration en cours…', 'pending');
+  const r = await fetch('/api/sujet/migrate-to-canonical', {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    setStatus('Échec migration : ' + (j.error || 'erreur'), 'err');
+    return;
+  }
+  setStatus(j.log + ' — rechargement…', 'ok');
+  setTimeout(() => location.reload(), 800);
+});
+
+// Header (canonique seul, sinon les inputs sont disabled)
+if (IS_CANONICAL) {
+  function _readHdrFields() {
+    const get = id => {
+      const el = document.getElementById(id);
+      return el ? el.value : '';
+    };
+    return {
+      establishment: get('hdr-establishment'),
+      year: get('hdr-year'),
+      author: get('hdr-author'),
+      title: get('hdr-title'),
+      duration: get('hdr-duration'),
+      subtitle: get('hdr-subtitle'),
+      instructions: get('hdr-instructions'),
+      raw_tex: get('hdr-raw-tex'),
+    };
+  }
+  const _hdrSave = debounce(function () { patchHeader(_readHdrFields()); }, 500);
+  ['hdr-establishment', 'hdr-year', 'hdr-author', 'hdr-title',
+   'hdr-duration', 'hdr-subtitle', 'hdr-instructions', 'hdr-raw-tex'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', _hdrSave);
+  });
+
+  const _asSave = debounce(function () {
+    patchAnswerSheet({
+      id_grid_digits: parseInt(document.getElementById('as-id-grid-digits').value) || 4,
+      name_field: document.getElementById('as-name-field').checked,
+      columns: parseInt(document.getElementById('as-columns').value) || 2,
+    });
+  }, 400);
+  ['as-id-grid-digits', 'as-name-field', 'as-columns'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', _asSave);
+  });
+
+  // LaTeX brut de la feuille de réponses : sauvegardé en debounce 600ms.
+  // Recharge la page si on passe de "rempli" à "vide" (ou inversement) pour
+  // que les `disabled` des champs structurés se mettent à jour.
+  const asRaw = document.getElementById('as-raw-tex');
+  if (asRaw) {
+    const wasFilled = !!asRaw.value.trim();
+    const _asRawSave = debounce(async function () {
+      await patchAnswerSheet({answer_sheet_tex: asRaw.value});
+      const nowFilled = !!asRaw.value.trim();
+      if (wasFilled !== nowFilled) location.reload();
+    }, 600);
+    asRaw.addEventListener('input', _asRawSave);
+  }
+
+  // Toolbar : ajout de blocs
+  document.querySelectorAll('.btn-add').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      addBlock(btn.dataset.addKind, btn.dataset.qtype);
+    });
+  });
+}
+
+// === Panel outline (structure du sujet) ====================================
+// Construit la navigation pliable à gauche, dérivée des blocs DOM :
+//   - les blocs `text` contenant `\section{X}` deviennent des nœuds de section
+//   - les autres blocs sont des entrées (text, qcm, open)
+//   - les blocs depuis une section et jusqu'à la suivante deviennent ses enfants
+//   - tout est cliquable → scrollIntoView vers le bloc cible
+function _sectionTitle(blk) {
+  // Un bloc text est considéré comme une « section » s'il a un titre fourni
+  // par le server (data-title posé en mode legacy) OU s'il contient une
+  // commande \section / \chapter / \subsection dans son tex (mode canonique).
+  if (blk.dataset.kind !== 'text') return null;
+  if (blk.dataset.title) return blk.dataset.title;
+  const ta = blk.querySelector('.text-src');
+  if (!ta) return null;
+  const m = ta.value.match(/\\(?:section|chapter|subsection)\*?\{([^}]+)\}/);
+  return m ? m[1].trim() : null;
+}
+function _blockTitle(blk) {
+  const kind = blk.dataset.kind;
+  if (kind === 'text') {
+    const sec = _sectionTitle(blk);
+    if (sec) return sec;
+    const ta = blk.querySelector('.text-src');
+    const t = (ta ? ta.value : '').replace(/\s+/g, ' ').trim();
+    return t ? (t.length > 36 ? t.slice(0, 35) + '…' : t) : 'Texte libre';
+  }
+  if (kind === 'question_qcm') {
+    const tag = blk.querySelector('.q-tag-input');
+    return 'Q' + (blk.dataset.q || '?') + ' — ' + (tag ? tag.value : '');
+  }
+  if (kind === 'question_open') {
+    const tag = blk.querySelector('.q-tag-input');
+    return 'OPEN — ' + (tag ? tag.value : 'question ouverte');
+  }
+  if (kind === 'answerbox') {
+    const title = blk.querySelector('.ab-title');
+    const h = blk.querySelector('.ab-height');
+    const t = (title ? title.value.trim() : '') || 'Zone réponse';
+    return t + (h ? ' (' + h.value + ')' : '');
+  }
+  return blk.dataset.bid || '?';
+}
+function _iconFor(blk) {
+  const k = blk.dataset.kind;
+  if (k === 'text') return ['§', 'outline-icon-text'];
+  if (k === 'question_qcm') return ['Q' + (blk.dataset.q || ''), 'outline-icon-qcm'];
+  if (k === 'question_open') return ['◰', 'outline-icon-open'];
+  if (k === 'answerbox') return ['✎', 'outline-icon-answer'];
+  return ['?', ''];
+}
+function _isAnswerEndBlock(blk) {
+  if (blk.dataset.kind !== 'answerbox') return false;
+  const sel = blk.querySelector('.ab-placement');
+  return sel ? sel.value === 'end' : false;
+}
+function _outlineItem(blk) {
+  const li = document.createElement('li');
+  li.className = 'outline-item';
+  li.dataset.targetBid = blk.dataset.bid;
+  const [icon, iconCls] = _iconFor(blk);
+  const sp = document.createElement('span');
+  sp.className = 'outline-icon ' + iconCls;
+  sp.textContent = icon;
+  li.appendChild(sp);
+  const lbl = document.createElement('span');
+  lbl.className = 'outline-label';
+  lbl.textContent = _blockTitle(blk);
+  li.appendChild(lbl);
+  li.title = (IS_CANONICAL ? 'Clic : aller au bloc · double-clic : renommer · drag : déplacer\n\n' : '')
+             + lbl.textContent;
+  li.addEventListener('click', function (e) {
+    // Évite la navigation si on est en train d'éditer le label inline.
+    if (e.target.classList.contains('outline-rename-input')) return;
+    scrollToBlock(blk.dataset.bid);
+  });
+  _outlineDragSetup(li, blk);
+  _setupOutlineRename(lbl, blk);
+  return li;
+}
+
+// === Outline : drag&drop (canonique seulement) ==============================
+function _outlineDragSetup(li, blk) {
+  if (!IS_CANONICAL || !blk) return;
+  li.draggable = true;
+  li.addEventListener('dragstart', function (e) {
+    dragSrc = blk;
+    li.classList.add('outline-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', blk.dataset.bid);
+    e.stopPropagation();
+  });
+  li.addEventListener('dragend', function () {
+    li.classList.remove('outline-dragging');
+    document.querySelectorAll('.outline-drop-above, .outline-drop-below')
+      .forEach(e => e.classList.remove('outline-drop-above', 'outline-drop-below'));
+    dragSrc = null;
+  });
+  li.addEventListener('dragover', function (e) {
+    if (!dragSrc || dragSrc.dataset.bid === blk.dataset.bid) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = li.getBoundingClientRect();
+    const above = (e.clientY - rect.top) < rect.height / 2;
+    li.classList.toggle('outline-drop-above', above);
+    li.classList.toggle('outline-drop-below', !above);
+  });
+  li.addEventListener('dragleave', function () {
+    li.classList.remove('outline-drop-above', 'outline-drop-below');
+  });
+  li.addEventListener('drop', async function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    li.classList.remove('outline-drop-above', 'outline-drop-below');
+    // Capture local : `dragend` va nuller `dragSrc` pendant le `await` fetch
+    // (file d'événements). Sans cette capture, le DOM ne serait pas réordonné
+    // côté client alors que l'API a réussi.
+    const src = dragSrc;
+    if (!src || src === blk) return;
+    const rect = li.getBoundingClientRect();
+    const above = (e.clientY - rect.top) < rect.height / 2;
+    const list = [].slice.call(document.querySelectorAll('.sujet-block'));
+    const targetIdx = list.indexOf(blk);
+    const afterBid = above
+      ? (targetIdx > 0 ? list[targetIdx - 1].dataset.bid : null)
+      : blk.dataset.bid;
+    const r = await fetch('/api/sujet/blocks/move', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bid: src.dataset.bid, after_bid: afterBid})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { setStatus('Échec déplacement : ' + (j.error || 'erreur'), 'err'); return; }
+    if (above) blk.parentNode.insertBefore(src, blk);
+    else if (blk.nextSibling) blk.parentNode.insertBefore(src, blk.nextSibling);
+    else blk.parentNode.appendChild(src);
+    buildOutline();
+    setStatus('Bloc déplacé ✓', 'ok');
+  });
+}
+
+// === Outline : renommage inline du label par double-clic (canonique seul) ===
+function _setupOutlineRename(labelEl, blk) {
+  if (!IS_CANONICAL || !blk) return;
+  // Seuls les blocs renommables : question_qcm (tag), text avec data-title
+  // (sections \section{X}). Les blocs text sans titre structuré ne sont pas
+  // renommables (leur "titre" est juste un aperçu).
+  const kind = blk.dataset.kind;
+  if (kind === 'question_qcm') {
+    /* OK : on édite le tag */
+  } else if (kind === 'text' && blk.dataset.title) {
+    /* OK : on édite le titre \section{X} */
+  } else {
+    return;
+  }
+  labelEl.title = 'double-clic pour renommer';
+  labelEl.addEventListener('dblclick', function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const original = labelEl.textContent;
+    const parent = labelEl.parentNode;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'outline-rename-input';
+    input.value = (kind === 'question_qcm'
+                    ? (blk.querySelector('.q-tag-input')?.value || original)
+                    : (blk.dataset.title || original));
+    parent.insertBefore(input, labelEl);
+    labelEl.style.display = 'none';
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finalize = async (commit) => {
+      if (done) return;
+      done = true;
+      const newVal = input.value.trim();
+      input.remove();
+      labelEl.style.display = '';
+      if (commit && newVal && newVal !== input.defaultValue) {
+        try {
+          await _renameBlock(blk, newVal);
+          labelEl.textContent = _blockTitle(blk);
+        } catch (err) {
+          setStatus('Échec renommage : ' + err, 'err');
+        }
+      }
+    };
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); finalize(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finalize(false); }
+    });
+    input.addEventListener('blur', () => finalize(true));
+  });
+}
+
+async function _renameBlock(blk, newLabel) {
+  const kind = blk.dataset.kind;
+  if (kind === 'question_qcm') {
+    // Renommer le tag LaTeX de la question via l'input central + save.
+    const tagInput = blk.querySelector('.q-tag-input');
+    if (!tagInput) throw new Error('tag input introuvable');
+    tagInput.value = newLabel;
+    markDirty(blk);
+    const ok = await saveOneBlock(blk);
+    if (!ok) throw new Error('save échoué');
+    clearDirty(blk);
+  } else if (kind === 'text') {
+    // Modifier le titre \section{X} dans le tex du bloc + save.
+    const ta = blk.querySelector('.text-src');
+    if (!ta) throw new Error('text-src introuvable');
+    const re = /\\(section|subsection|chapter|part)\*?\{[^}]+\}/;
+    if (!re.test(ta.value)) throw new Error('aucune commande \\section* trouvée à renommer');
+    ta.value = ta.value.replace(re, m =>
+      m.replace(/\{[^}]+\}/, '{' + newLabel + '}'));
+    blk.dataset.title = newLabel;
+    markDirty(blk);
+    const ok = await saveOneBlock(blk);
+    if (!ok) throw new Error('save échoué');
+    clearDirty(blk);
+  }
+  buildOutline();
+}
+function buildOutline() {
+  const nav = document.getElementById('outline-nav');
+  if (!nav) return;
+  // Préserver l'état (sections ouvertes ou fermées) avant rebuild.
+  const openSecs = new Set();
+  nav.querySelectorAll('.outline-section > details[open]').forEach(d => {
+    const k = d.dataset.sectionKey;
+    if (k) openSecs.add(k);
+  });
+  nav.innerHTML = '';
+  const rootUl = document.createElement('ul');
+  // Lien vers le bandeau global (toujours en haut)
+  const li0 = document.createElement('li');
+  li0.className = 'outline-item';
+  li0.dataset.targetBid = '__bandeau__';
+  li0.innerHTML = '<span class="outline-icon outline-icon-header">⚙</span>'
+                + '<span class="outline-label">Réglages globaux</span>';
+  li0.title = 'Réglages globaux du sujet';
+  li0.addEventListener('click', function () {
+    document.querySelector('.sujet-bandeau')
+        .scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+  rootUl.appendChild(li0);
+
+  const allBlocks = [].slice.call(document.querySelectorAll('.sujet-block'));
+  // Les blocs `answerbox` avec `placement=end` sont sortis du flux principal
+  // de l'outline et regroupés dans une section virtuelle « Réponses (en fin) »
+  // en bas du panel (cohérent avec leur position réelle dans le .tex rendu).
+  const endBlocks = allBlocks.filter(_isAnswerEndBlock);
+  const blocks = allBlocks.filter(b => !_isAnswerEndBlock(b));
+  // Premier passage : regrouper par sections (blocs text avec \section)
+  let currentSection = null;   // {title, summaryLi, ul} ou null = top-level
+  let topUl = rootUl;
+  // Si aucune section explicite n'est présente (cas du mode legacy, ou
+  // d'un sujet canonique sans \section), on génère un wrapper virtuel
+  // « Questions » pliable pour que la liste reste compacte.
+  const hasExplicitSection = blocks.some(b => _sectionTitle(b));
+  if (!hasExplicitSection && blocks.length >= 3) {
+    const li = document.createElement('li');
+    li.className = 'outline-section';
+    const det = document.createElement('details');
+    det.dataset.sectionKey = '__virtual_questions__';
+    det.open = !nav.dataset.everBuilt || openSecs.has('__virtual_questions__');
+    const sum = document.createElement('summary');
+    sum.title = 'Toutes les questions';
+    sum.innerHTML =
+        '<span class="outline-caret" title="plier/déplier">▸</span>'
+      + '<span class="outline-icon outline-icon-qcm">≡</span>'
+      + '<span class="outline-label">Questions</span>';
+    // Pas de scroll cible : c'est un groupe virtuel. On laisse le toggle
+    // natif faire son travail, sans intercepter le clic.
+    det.appendChild(sum);
+    const ul = document.createElement('ul');
+    det.appendChild(ul);
+    li.appendChild(det);
+    rootUl.appendChild(li);
+    topUl = ul;
+  }
+  blocks.forEach(function (blk) {
+    const secTitle = _sectionTitle(blk);
+    if (secTitle) {
+      // Ce bloc est lui-même un séparateur de section : on crée un nouveau
+      // groupe pliable dont le summary représente ce bloc.
+      const li = document.createElement('li');
+      li.className = 'outline-section';
+      const key = blk.dataset.bid;
+      const det = document.createElement('details');
+      det.dataset.sectionKey = key;
+      // Ouvert par défaut OU si déjà ouvert avant le rebuild.
+      det.open = !nav.dataset.everBuilt || openSecs.has(key);
+      const sum = document.createElement('summary');
+      sum.title = 'Clic sur ▸ : plier/déplier — clic sur le titre : aller au bloc';
+      sum.innerHTML =
+          '<span class="outline-caret" title="plier/déplier cette section">▸</span>'
+        + '<span class="outline-icon outline-icon-text">§</span>'
+        + '<span class="outline-label"></span>';
+      sum.querySelector('.outline-label').textContent = secTitle;
+      sum.dataset.targetBid = blk.dataset.bid;
+      sum.addEventListener('click', function (e) {
+        // Click sur le caret → on laisse le toggle natif <details> faire,
+        // sans scroller. Click ailleurs (label/icône) → on empêche le toggle
+        // et on scroll vers le bloc. Pliage et navigation sont ainsi séparés.
+        if (e.target.closest('.outline-caret')) return;
+        e.preventDefault();
+        scrollToBlock(blk.dataset.bid);
+      });
+      det.appendChild(sum);
+      const ul = document.createElement('ul');
+      det.appendChild(ul);
+      li.appendChild(det);
+      rootUl.appendChild(li);
+      // Drag&drop ET renommage inline sur les sections aussi (canonique seul).
+      _outlineDragSetup(li, blk);
+      _setupOutlineRename(sum.querySelector('.outline-label'), blk);
+      currentSection = {title: secTitle, ul: ul, li: li};
+      topUl = ul;
+    } else {
+      // Bloc « normal » : entrée simple sous la section courante (ou top-level)
+      topUl.appendChild(_outlineItem(blk));
+    }
+  });
+
+  // Section virtuelle « Réponses (en fin) » pour les answerbox placement=end.
+  if (endBlocks.length) {
+    const li = document.createElement('li');
+    li.className = 'outline-section outline-section-answer-end';
+    const det = document.createElement('details');
+    det.dataset.sectionKey = '__virtual_answer_end__';
+    det.open = !nav.dataset.everBuilt || openSecs.has('__virtual_answer_end__');
+    const sum = document.createElement('summary');
+    sum.title = 'Zones de réponse écrite rendues sur la feuille de réponses';
+    sum.innerHTML =
+        '<span class="outline-caret" title="plier/déplier">▸</span>'
+      + '<span class="outline-icon outline-icon-answer">✎</span>'
+      + '<span class="outline-label">Réponses (en fin)</span>';
+    det.appendChild(sum);
+    const ul = document.createElement('ul');
+    endBlocks.forEach(blk => ul.appendChild(_outlineItem(blk)));
+    det.appendChild(ul);
+    li.appendChild(det);
+    rootUl.appendChild(li);
+  }
+
+  nav.appendChild(rootUl);
+  nav.dataset.everBuilt = '1';
+  updateOutlineActive();
+}
+function scrollToBlock(bid) {
+  const blk = document.querySelector('.sujet-block[data-bid="' + bid + '"]');
+  if (!blk) return;
+  blk.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+// --- Highlight : marque l'item actif (= bloc le plus visible) ---
+let _activeBid = null;
+function updateOutlineActive(bid) {
+  if (bid !== undefined) _activeBid = bid;
+  document.querySelectorAll('.outline-item.outline-active, .outline-section.outline-active')
+    .forEach(e => e.classList.remove('outline-active'));
+  if (!_activeBid) return;
+  const item = document.querySelector('.outline-item[data-target-bid="' + _activeBid + '"]');
+  if (item) item.classList.add('outline-active');
+  // Si le bloc actif est dans une section, on highlight aussi le summary parent
+  const sum = document.querySelector('.outline-section > details > summary[data-target-bid="' + _activeBid + '"]');
+  if (sum) sum.closest('.outline-section').classList.add('outline-active');
+  // Si l'item actif est dans une section refermée, on l'ouvre.
+  const parentDetails = item && item.closest('details');
+  if (parentDetails) parentDetails.open = true;
+}
+
+// IntersectionObserver pour suivre quel bloc est le plus visible (debug-friendly).
+const _outlineObserver = new IntersectionObserver(function (entries) {
+  // Prend l'entry la plus visible (ratio max) parmi les blocs actuellement intersectés.
+  let best = null, bestRatio = 0;
+  entries.forEach(function (e) {
+    if (e.isIntersecting && e.intersectionRatio > bestRatio) {
+      best = e.target; bestRatio = e.intersectionRatio;
+    }
+  });
+  if (best) updateOutlineActive(best.dataset.bid);
+}, {rootMargin: '-100px 0px -50% 0px', threshold: [0.1, 0.5, 1.0]});
+function observeBlocksForOutline() {
+  document.querySelectorAll('.sujet-block').forEach(b => _outlineObserver.observe(b));
+}
+
+// Refresh outline quand les inputs de titre/section changent (debounced).
+const _outlineRefresh = debounce(buildOutline, 250);
+
+// Bouton « tout plier / tout déplier »
+const collapseAllBtn = document.getElementById('outline-collapse-all');
+if (collapseAllBtn) collapseAllBtn.addEventListener('click', function () {
+  const dets = document.querySelectorAll('.outline-section > details');
+  const anyClosed = [].some.call(dets, d => !d.open);
+  dets.forEach(d => { d.open = anyClosed; });
+});
+
+// === Mode legacy : verrouiller toute édition (lecture seule complète) =======
+// Seuls restent fonctionnels : Compiler (voir le PDF), Migration vers
+// canonique (zone dangereuse), navigation (outline + sélecteur copie).
+if (!IS_CANONICAL) {
+  document.querySelectorAll('.sujet-page input, .sujet-page textarea').forEach(el => {
+    if (el.id === 'copy-picker') return;
+    if (el.type === 'checkbox' || el.type === 'radio') { el.disabled = true; return; }
+    el.readOnly = true;
+  });
+  document.querySelectorAll('.sujet-page select').forEach(el => {
+    if (el.id === 'copy-picker') return;
+    el.disabled = true;
+  });
+  document.querySelectorAll('.sujet-page button').forEach(el => {
+    // Boutons qui restent actifs : Compiler, Migration vers canonique,
+    // les carets/poignées de navigation (qui sont des spans/boutons sans action serveur).
+    const KEEP = new Set(['compile-btn', 'migrate-btn']);
+    if (KEEP.has(el.id)) return;
+    if (el.classList.contains('outline-caret') ||
+        el.classList.contains('outline-collapse-all') ||
+        el.classList.contains('block-handle')) return;
+    el.disabled = true;
+  });
+}
+
+document.querySelectorAll('.sujet-block').forEach(initBlock);
+// Re-render outline quand un text (section) ou un tag de question change.
+document.querySelectorAll('.text-src, .q-tag-input').forEach(function (el) {
+  el.addEventListener('input', _outlineRefresh);
+});
+buildOutline();
+observeBlocksForOutline();
+// Aperçu initial : 1er bloc qui registre une zone AMC (préfère un QCM, sinon
+// n'importe quel bloc avec `data-preview-q` — open, answerbox-avec-barème).
+const firstQ = document.querySelector('.sujet-block[data-kind="question_qcm"][data-preview-q]')
+           || document.querySelector('.sujet-block[data-preview-q]');
+if (firstQ) showPreview(firstQ);
+document.getElementById('save-btn').addEventListener('click', function () {
+  saveBlocks(dirtyBlocks());
+});
+document.getElementById('compile-btn').addEventListener('click', compileWithGuard);
+updateSaveBtn();
+
+// === Outline : menu contextuel (clic droit) ===============================
+// Canonique seul. Clic droit sur un item ou une section → menu pour insérer
+// section / question / texte AU-DESSOUS du bloc visé, ou le supprimer.
+(function () {
+  if (!IS_CANONICAL) return;
+  const menu = document.getElementById('outlineContextMenu');
+  const outline = document.querySelector('.sujet-outline');
+  if (!menu || !outline) return;
+  let ctxTargetBid = null;
+
+  outline.addEventListener('contextmenu', function (e) {
+    let bid = null;
+    const item = e.target.closest('.outline-item[data-target-bid]');
+    if (item && item.dataset.targetBid && item.dataset.targetBid !== '__bandeau__') {
+      bid = item.dataset.targetBid;
+    } else {
+      const sec = e.target.closest('.outline-section');
+      if (sec) {
+        const sum = sec.querySelector(':scope > details > summary[data-target-bid]');
+        if (sum) bid = sum.dataset.targetBid;
+      }
+    }
+    if (!bid) return;
+    e.preventDefault();
+    ctxTargetBid = bid;
+    _showCtxMenu(e.clientX, e.clientY);
+  });
+
+  function _showCtxMenu(x, y) {
+    menu.hidden = false;
+    menu.style.left = '0px'; menu.style.top = '0px';
+    const r = menu.getBoundingClientRect();
+    const W = window.innerWidth, H = window.innerHeight;
+    menu.style.left = Math.max(4, Math.min(x, W - r.width - 4)) + 'px';
+    menu.style.top  = Math.max(4, Math.min(y, H - r.height - 4)) + 'px';
+  }
+  function _hideCtxMenu() {
+    menu.hidden = true;
+    ctxTargetBid = null;
+  }
+
+  document.addEventListener('click', function (e) {
+    if (menu.hidden) return;
+    if (e.target.closest('#outlineContextMenu')) return;
+    _hideCtxMenu();
+  });
+  document.addEventListener('contextmenu', function (e) {
+    // Clic droit ailleurs que sur l'outline → fermer le menu (laisser passer
+    // le menu natif du navigateur).
+    if (!menu.hidden && !e.target.closest('.sujet-outline')) _hideCtxMenu();
+  });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') _hideCtxMenu();
+  });
+  window.addEventListener('scroll', _hideCtxMenu, true);
+  window.addEventListener('resize', _hideCtxMenu);
+
+  menu.addEventListener('click', async function (e) {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const bid = ctxTargetBid;
+    _hideCtxMenu();
+    if (!bid) return;
+
+    if (action === 'delete') {
+      const blk = document.querySelector('.sujet-block[data-bid="' + bid + '"]');
+      if (blk) deleteBlock(blk);
+      return;
+    }
+
+    if (action === 'save-to-bank') {
+      openBankSaveModal(bid);
+      return;
+    }
+
+    let kind, qtype = null, dataOverride = null;
+    let afterBid = bid;  // par défaut : insère après le bloc cliqué
+    if (action === 'add-section') {
+      kind = 'text';
+      dataOverride = {tex: '\\section*{Nouvelle section}'};
+    } else if (action === 'add-text') {
+      kind = 'text';
+      dataOverride = {tex: 'Texte libre — édite ce contenu en LaTeX.'};
+    } else if (action === 'add-qcm-single') {
+      kind = 'question_qcm'; qtype = 'single';
+    } else if (action === 'add-qcm-mult') {
+      kind = 'question_qcm'; qtype = 'mult';
+    } else if (action === 'add-open') {
+      kind = 'question_open';
+    } else if (action === 'add-answerbox-inline') {
+      kind = 'answerbox'; qtype = 'inline';  // qtype = placement souhaité
+    } else if (action === 'add-answerbox-end') {
+      kind = 'answerbox'; qtype = 'end';
+      // Les blocs answerbox-end sont rendus tous ensemble en fin du .tex,
+      // dans l'ordre où ils apparaissent dans la liste interne. Insérer après
+      // le clic n'a pas de sens visuel — on ajoute à la fin.
+      afterBid = null;
+    } else { return; }
+
+    const data = dataOverride || _defaultDataFor(kind, qtype);
+    const r = await fetch('/api/sujet/blocks/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kind: kind, after_bid: afterBid, data: data})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      setStatus('Échec ajout : ' + (j.error || 'erreur'), 'err');
+      return;
+    }
+    setStatus('Bloc ajouté ✓ — rechargement…', 'ok');
+    setTimeout(() => location.reload(), 300);
+  });
+})();
+
+// === Banque de questions =================================================
+// Canonique seul. Modale plein écran ouverte via le bouton 📚 Banque, +
+// modale rapide « 💾 Sauver dans la banque » depuis le clic droit.
+(function () {
+  if (!IS_CANONICAL) return;
+  const bankModal = document.getElementById('bankModal');
+  const saveModal = document.getElementById('bankSaveModal');
+  const openBtn = document.getElementById('openBankBtn');
+  if (!bankModal || !openBtn) return;
+
+  let bankItems = [];          // dernière liste reçue (items légers d'index)
+  let activeTags = new Set();  // tags actuellement sélectionnés (any-match)
+  let allTags = [];
+  let previewCache = {};       // bank_id -> question complète
+
+  // --- Ouvrir / fermer la modale principale -------------------------------
+  function openBankModal() {
+    bankModal.hidden = false;
+    document.getElementById('bank-search').value = '';
+    const r = bankModal.querySelector('input[name="bank-kind"][value=""]');
+    if (r) r.checked = true;
+    activeTags.clear();
+    reloadBankList();
+    setTimeout(() => document.getElementById('bank-search').focus(), 30);
+  }
+  function closeBankModal() { bankModal.hidden = true; }
+
+  openBtn.addEventListener('click', openBankModal);
+  bankModal.addEventListener('click', function (e) {
+    if (e.target.dataset.closeBank) closeBankModal();
+  });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !bankModal.hidden) closeBankModal();
+  });
+
+  // --- Filtres ------------------------------------------------------------
+  document.getElementById('bank-search').addEventListener('input', _debounce(reloadBankList, 200));
+  bankModal.querySelectorAll('input[name="bank-kind"]').forEach(el => {
+    el.addEventListener('change', reloadBankList);
+  });
+
+  function _debounce(fn, ms) {
+    let t;
+    return function (...a) { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  }
+
+  async function reloadBankList() {
+    const q = document.getElementById('bank-search').value.trim();
+    const kind = (bankModal.querySelector('input[name="bank-kind"]:checked') || {}).value || '';
+    const tags = [...activeTags];
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (kind) params.set('kind', kind);
+    if (tags.length) params.set('tags', tags.join(','));
+    let r;
+    try { r = await fetch('/api/bank?' + params.toString()); }
+    catch (e) { renderBankList([], 'Erreur réseau : ' + e); return; }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { renderBankList([], j.error || 'Erreur'); return; }
+    bankItems = j.items || [];
+    allTags = j.all_tags || [];
+    renderTagsList();
+    renderBankList(bankItems, null);
+  }
+
+  function renderTagsList() {
+    const host = document.getElementById('bank-tags-list');
+    if (!host) return;
+    if (!allTags.length) {
+      host.innerHTML = '<span class="bank-empty-tags">Aucun tag pour le moment.</span>';
+      return;
+    }
+    host.innerHTML = '';
+    allTags.forEach(t => {
+      const lab = document.createElement('label');
+      lab.className = 'bank-radio';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = t;
+      cb.checked = activeTags.has(t);
+      cb.addEventListener('change', () => {
+        if (cb.checked) activeTags.add(t); else activeTags.delete(t);
+        reloadBankList();
+      });
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(' ' + t));
+      host.appendChild(lab);
+    });
+  }
+
+  function renderBankList(items, err) {
+    const host = document.getElementById('bank-list');
+    const cnt = document.getElementById('bank-count');
+    if (err) { host.innerHTML = '<p class="bank-empty bank-err">' + err + '</p>'; cnt.textContent = ''; return; }
+    cnt.textContent = items.length + ' question(s)';
+    if (!items.length) {
+      host.innerHTML = '<p class="bank-empty">Aucune question dans la banque (ou aucun filtre ne correspond).</p>';
+      return;
+    }
+    host.innerHTML = '';
+    items.forEach(it => {
+      const card = document.createElement('div');
+      card.className = 'bank-card bank-card-' + (it.kind || 'text');
+      card.dataset.bankId = it.bank_id;
+
+      const head = document.createElement('div');
+      head.className = 'bank-card-head';
+
+      const icon = document.createElement('span');
+      icon.className = 'bank-kind-icon';
+      icon.textContent = _kindIcon(it.kind);
+      head.appendChild(icon);
+
+      const ttl = document.createElement('div');
+      ttl.className = 'bank-card-title';
+      ttl.textContent = it.title || '(sans titre)';
+      head.appendChild(ttl);
+
+      const ins = document.createElement('button');
+      ins.type = 'button';
+      ins.className = 'btn btn-add bank-card-insert';
+      ins.textContent = '+ Insérer';
+      ins.addEventListener('click', (e) => { e.stopPropagation(); importFromBank(it.bank_id); });
+      head.appendChild(ins);
+
+      card.appendChild(head);
+
+      const meta = document.createElement('div');
+      meta.className = 'bank-card-meta';
+      (it.tags || []).forEach(t => {
+        const b = document.createElement('span');
+        b.className = 'bank-tag-badge';
+        b.textContent = t;
+        meta.appendChild(b);
+      });
+      const stats = it.stats || {};
+      if ((stats.n_eval || 0) > 0) {
+        const sp = document.createElement('span');
+        sp.className = 'bank-stats-pill';
+        const ratio = stats.mean_normalized != null ? stats.mean_normalized : null;
+        const pct = ratio != null ? Math.round(ratio * 100) + '%' : '—';
+        sp.innerHTML = '<span class="bank-stats-icon">📊</span> ' +
+                       stats.n_eval + ' éval · ' + pct;
+        sp.title = stats.n_perfect + ' note max sur ' + stats.n_eval +
+                   ' · taux moyen ' + (ratio != null ? ratio.toFixed(3) : '—') +
+                   ' · ' + (stats.projects || 0) + ' projet(s)';
+        meta.appendChild(sp);
+      }
+      if (it.author) {
+        const a = document.createElement('span');
+        a.className = 'bank-author';
+        a.textContent = it.author;
+        meta.appendChild(a);
+      }
+      card.appendChild(meta);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'bank-card-delete';
+      del.title = 'Supprimer définitivement de la banque';
+      del.textContent = '✕';
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteFromBank(it.bank_id, it.title); });
+      card.appendChild(del);
+
+      card.addEventListener('mouseenter', () => previewBankCard(it.bank_id));
+      card.addEventListener('focus', () => previewBankCard(it.bank_id));
+
+      host.appendChild(card);
+    });
+  }
+
+  function _kindIcon(k) {
+    if (k === 'question_qcm') return '▢';
+    if (k === 'question_open') return '◰';
+    if (k === 'answerbox') return '✎';
+    return '¶';
+  }
+
+  async function previewBankCard(bank_id) {
+    const host = document.getElementById('bank-preview');
+    if (!host) return;
+    let q = previewCache[bank_id];
+    if (!q) {
+      try {
+        const r = await fetch('/api/bank/' + encodeURIComponent(bank_id));
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) { host.innerHTML = '<p class="bank-empty">Aperçu indisponible.</p>'; return; }
+        q = j.question;
+        previewCache[bank_id] = q;
+      } catch (e) {
+        host.innerHTML = '<p class="bank-empty">Aperçu indisponible.</p>'; return;
+      }
+    }
+    renderBankPreview(q);
+  }
+
+  function renderBankPreview(q) {
+    const host = document.getElementById('bank-preview');
+    const d = q.data || {};
+    let html = '<div class="bank-prev-head">' +
+               '<span class="bank-kind-icon">' + _kindIcon(q.kind) + '</span> ' +
+               escapeHtml(q.title || '(sans titre)') +
+               '</div>';
+    if (q.kind === 'question_qcm') {
+      html += '<div class="bank-prev-body" data-render="1"></div>';
+      host.innerHTML = html;
+      const body = host.querySelector('.bank-prev-body');
+      body.innerHTML = mdToHtmlSafe(latexToMd(d.statement || ''));
+      const ul = document.createElement('ol');
+      ul.className = 'bank-prev-answers';
+      (d.answers || []).forEach(a => {
+        const li = document.createElement('li');
+        li.className = a.correct ? 'is-correct' : 'is-wrong';
+        li.innerHTML = (a.correct ? '✓ ' : '· ') + mdToHtmlSafe(latexToMd(a.text || ''));
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+      renderMathInElement(body);
+    } else if (q.kind === 'question_open') {
+      html += '<div class="bank-prev-body"></div>';
+      html += '<p class="bank-prev-meta"><em>' + (d.lines || 4) + ' lignes · ' +
+              (d.points != null ? d.points : '?') + ' pts</em></p>';
+      host.innerHTML = html;
+      const body = host.querySelector('.bank-prev-body');
+      body.innerHTML = mdToHtmlSafe(latexToMd(d.statement || ''));
+      renderMathInElement(body);
+    } else if (q.kind === 'answerbox') {
+      html += '<div class="bank-prev-body"><strong>' + escapeHtml(d.title || '') + '</strong><br>' +
+              '<em>' + escapeHtml(d.instructions || '') + '</em></div>' +
+              '<p class="bank-prev-meta">cadre <code>' + escapeHtml(d.height || '5cm') + '</code> · ' +
+              'placement <code>' + escapeHtml(d.placement || 'inline') + '</code></p>';
+      host.innerHTML = html;
+    } else {
+      html += '<pre class="bank-prev-body"><code>' + escapeHtml(d.tex || '') + '</code></pre>';
+      host.innerHTML = html;
+    }
+    const tags = (q.tags || []).map(t => '<span class="bank-tag-badge">' + escapeHtml(t) + '</span>').join('');
+    if (tags) host.insertAdjacentHTML('beforeend', '<div class="bank-prev-tags">' + tags + '</div>');
+
+    // Stats par projet + agrégat
+    const stats = (q.stats || {}).by_project || {};
+    const projs = Object.keys(stats);
+    if (projs.length) {
+      let agg_n = 0, agg_p = 0, agg_sum = 0;
+      let rows = '';
+      projs.sort().forEach(p => {
+        const s = stats[p];
+        const n = s.n_eval || 0;
+        const r = n > 0 ? (s.sum_normalized || 0) / n : null;
+        agg_n += n;
+        agg_p += s.n_perfect || 0;
+        agg_sum += s.sum_normalized || 0;
+        const pct = r != null ? (r * 100).toFixed(1) + '%' : '—';
+        rows += '<tr><td>' + escapeHtml(p) + '</td><td>' + n + '</td>' +
+                '<td>' + (s.n_perfect || 0) + '</td><td>' + pct + '</td></tr>';
+      });
+      const meanAll = agg_n > 0 ? (agg_sum / agg_n) : null;
+      const pctAll = meanAll != null ? (meanAll * 100).toFixed(1) + '%' : '—';
+      host.insertAdjacentHTML('beforeend',
+        '<details class="bank-prev-stats" open>' +
+        '<summary>📊 Stats · ' + agg_n + ' éval · taux moyen ' + pctAll +
+        ' · ' + agg_p + ' max sur ' + agg_n + '</summary>' +
+        '<table class="bank-stats-table">' +
+        '<thead><tr><th>Projet</th><th>n_eval</th><th>n_perfect</th><th>taux moyen</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></details>');
+    }
+  }
+
+  function mdToHtmlSafe(md) {
+    try { return window.marked ? window.marked.parse(md) : escapeHtml(md); }
+    catch (e) { return escapeHtml(md); }
+  }
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function renderMathInElement(root) {
+    if (!window.katex) return;
+    root.querySelectorAll('code, pre code').forEach(() => {});
+    // Détection paresseuse $…$ / $$…$$ — on s'appuie sur latexToMd qui passe
+    // les math en backticks ; sinon laisser tel quel.
+  }
+
+  async function importFromBank(bank_id) {
+    setStatus('Insertion depuis la banque…', 'pending');
+    try {
+      const r = await fetch('/api/bank/' + encodeURIComponent(bank_id) + '/import',
+                            {method: 'POST'});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) { setStatus('Échec import : ' + (j.error || 'erreur'), 'err'); return; }
+      closeBankModal();
+      setStatus('Question importée ✓ — rechargement…', 'ok');
+      setTimeout(() => location.reload(), 300);
+    } catch (e) {
+      setStatus('Erreur réseau : ' + e, 'err');
+    }
+  }
+
+  async function deleteFromBank(bank_id, title) {
+    if (!confirm('Supprimer définitivement « ' + (title || bank_id) + ' » de la banque ?\n\n' +
+                 'Cette opération ne touche pas les sujets où la question a déjà été importée.')) return;
+    const r = await fetch('/api/bank/' + encodeURIComponent(bank_id), {method: 'DELETE'});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { alert('Échec : ' + (j.error || 'erreur')); return; }
+    delete previewCache[bank_id];
+    reloadBankList();
+  }
+
+  // --- Modale rapide « Sauver dans la banque » ----------------------------
+  let saveTargetBid = null;
+  function openBankSaveModal(bid) {
+    saveTargetBid = bid;
+    const blk = document.querySelector('.sujet-block[data-bid="' + bid + '"]');
+    const titleInput = document.getElementById('bank-save-title');
+    titleInput.value = _suggestedTitle(blk);
+    document.getElementById('bank-save-tags').value = '';
+    document.getElementById('bank-save-author').value = '';
+    document.getElementById('bank-save-error').hidden = true;
+    saveModal.hidden = false;
+    setTimeout(() => titleInput.focus(), 30);
+  }
+  function closeBankSaveModal() { saveModal.hidden = true; saveTargetBid = null; }
+
+  saveModal.addEventListener('click', function (e) {
+    if (e.target.dataset.closeBankSave) closeBankSaveModal();
+  });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !saveModal.hidden) closeBankSaveModal();
+  });
+
+  function _suggestedTitle(blk) {
+    if (!blk) return '';
+    const kind = blk.dataset.kind;
+    if (kind === 'question_qcm') {
+      const s = (blk.querySelector('.q-statement') || {}).value || '';
+      const tag = (blk.querySelector('.q-tag-input') || {}).value || '';
+      return _shorten(s) || tag || 'QCM';
+    }
+    if (kind === 'question_open') {
+      const s = (blk.querySelector('.q-statement') || {}).value || '';
+      return _shorten(s) || 'Question ouverte';
+    }
+    if (kind === 'answerbox') {
+      const t = (blk.querySelector('.ab-title') || {}).value || '';
+      return t || 'Zone de réponse';
+    }
+    if (kind === 'text') {
+      const t = (blk.querySelector('.text-src') || {}).value || '';
+      return _shorten(t) || 'Bloc texte';
+    }
+    return '';
+  }
+  function _shorten(s) {
+    s = (s || '').replace(/\\\\?[a-zA-Z]+\{?/g, '').replace(/\s+/g, ' ').trim();
+    return s.length > 60 ? s.slice(0, 60) + '…' : s;
+  }
+
+  // (handler "bank-save-confirm" plus bas)
+
+  // === Modale d'édition IA ===============================================
+  // Ouvrir/fermer + soumettre, afficher le diff puis Apply via /api/sujet/blocks/update.
+  let AI_CURRENT_BID = null;
+  let AI_LAST_RESULT = null;
+  const aiModal = document.getElementById('aiEditModal');
+
+  window.openAiEditModal = async function (blk) {
+    AI_CURRENT_BID = blk.dataset.bid;
+    AI_LAST_RESULT = null;
+    document.getElementById('ai-prompt').value = '';
+    document.getElementById('ai-error').hidden = true;
+    document.getElementById('ai-result').hidden = true;
+    // Aperçu de l'énoncé courant
+    const statement = (blk.querySelector('.q-statement') || {}).value || '';
+    const ans = [].slice.call(blk.querySelectorAll('.ans-text'))
+                  .map(el => el.value || '');
+    const cur = document.getElementById('ai-current-preview');
+    cur.innerHTML = '<strong>Énoncé actuel :</strong><div class="ai-cur-statement">' +
+                    _escapeForHtml(statement) + '</div>' +
+                    '<ul class="ai-cur-answers">' +
+                    ans.map(a => '<li>' + _escapeForHtml(a) + '</li>').join('') +
+                    '</ul>';
+    aiModal.hidden = false;
+    await _refreshAiAuthState();
+    setTimeout(() => {
+      const focusEl = aiModal.querySelector('#ai-connect:not([hidden]) #ai-connect-key')
+                  || document.getElementById('ai-prompt');
+      if (focusEl) focusEl.focus();
+    }, 30);
+  };
+
+  async function _refreshAiAuthState() {
+    let s = {};
+    try {
+      const r = await fetch('/api/ai/auth-status');
+      s = await r.json();
+    } catch (e) { s = {has_api_key: false, cc_binary_path: ''}; }
+    const connect = document.getElementById('ai-connect');
+    const promptField = document.getElementById('ai-prompt').closest('.pm-modal-field');
+    const actions = aiModal.querySelector('.bank-modal-actions');
+    const preview = document.getElementById('ai-current-preview');
+    // Si une clé API OU Claude Code est dispo, on cache le panneau Connect.
+    const ready = s.has_api_key || !!s.cc_binary_path;
+    if (ready) {
+      connect.hidden = true;
+      if (promptField) promptField.hidden = false;
+      if (actions)     actions.hidden = false;
+      if (preview)     preview.hidden = false;
+      // Bandeau au-dessus du prompt indiquant le backend
+      let banner = document.getElementById('ai-backend-banner');
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'ai-backend-banner';
+        banner.className = 'ai-backend-banner';
+        promptField.parentNode.insertBefore(banner, promptField);
+      }
+      const modelLabel = {
+        'claude-sonnet-4-6': 'Sonnet 4.6',
+        'claude-opus-4-7':   'Opus 4.7',
+        'claude-haiku-4-5':  'Haiku 4.5',
+      }[s.ai_model] || s.ai_model || 'Sonnet 4.6';
+      banner.innerHTML = s.has_api_key
+        ? '🔑 Mode : clé API · ' + modelLabel + ' · ~1-3¢ par modif (Sonnet) / 0.3¢ (Haiku) / 5¢ (Opus)'
+        : '📦 Mode : Claude Code (abonnement) · ' + modelLabel +
+          ' · ~$0.05/édit sur quota Sonnet (1¢ Haiku, 13¢ Opus) — pas de cash. ' +
+          '<a href="/" class="ai-change-model">Changer de modèle dans Réglages</a>';
+    } else {
+      connect.hidden = false;
+      if (promptField) promptField.hidden = true;
+      if (actions)     actions.hidden = true;
+      if (preview)     preview.hidden = true;
+      const ccStatus = document.getElementById('ai-cc-status');
+      if (s.cc_binary_path) {
+        ccStatus.innerHTML = '✓ Claude Code détecté : <code>' +
+          _escapeForHtml(s.cc_binary_path) + '</code>';
+      } else {
+        ccStatus.innerHTML = '✘ Claude Code non détecté. Installe-le pour utiliser ton abonnement.';
+      }
+    }
+  }
+
+  document.getElementById('ai-connect-save').addEventListener('click', async () => {
+    const key = document.getElementById('ai-connect-key').value.trim();
+    const status = document.getElementById('ai-connect-save-status');
+    if (!key) {
+      status.innerHTML = '<span class="ai-err">Colle ta clé avant de cliquer.</span>';
+      return;
+    }
+    if (!key.startsWith('sk-ant-')) {
+      status.innerHTML = '<span class="ai-err">Une clé Anthropic commence par <code>sk-ant-</code>. Vérifie.</span>';
+      return;
+    }
+    status.textContent = 'Enregistrement…';
+    const r = await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({anthropic_api_key: key})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      status.innerHTML = '<span class="ai-err">' + _escapeForHtml(j.error || 'erreur') + '</span>';
+      return;
+    }
+    status.innerHTML = '<span class="ai-ok-msg">✓ Enregistrée — tu peux prompter Claude</span>';
+    await _refreshAiAuthState();
+    document.getElementById('ai-prompt').focus();
+  });
+
+  document.getElementById('ai-connect-recheck').addEventListener('click', _refreshAiAuthState);
+  function _closeAi() { aiModal.hidden = true; AI_CURRENT_BID = null; AI_LAST_RESULT = null; }
+  aiModal.addEventListener('click', function (e) {
+    if (e.target.dataset.closeAi) _closeAi();
+  });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !aiModal.hidden) _closeAi();
+  });
+
+  document.querySelectorAll('.ai-suggest').forEach(b => {
+    b.addEventListener('click', () => {
+      document.getElementById('ai-prompt').value = b.textContent;
+      document.getElementById('ai-prompt').focus();
+    });
+  });
+
+  async function _runAi() {
+    if (!AI_CURRENT_BID) return;
+    const prompt = document.getElementById('ai-prompt').value.trim();
+    const err = document.getElementById('ai-error');
+    err.hidden = true;
+    if (!prompt) {
+      err.textContent = 'Tape une demande avant de proposer.';
+      err.hidden = false;
+      return;
+    }
+    const btn = document.getElementById('ai-go');
+    btn.disabled = true;
+    btn.textContent = 'Claude réfléchit…';
+    try {
+      const r = await fetch('/api/ai/edit-block', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({bid: AI_CURRENT_BID, prompt: prompt})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        err.textContent = j.error || ('Erreur HTTP ' + r.status);
+        err.hidden = false;
+        return;
+      }
+      AI_LAST_RESULT = j;
+      _renderAiDiff(j);
+    } catch (e) {
+      err.textContent = 'Erreur réseau : ' + e;
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Demander à Claude';
+    }
+  }
+  document.getElementById('ai-go').addEventListener('click', _runAi);
+  document.getElementById('ai-prompt').addEventListener('keydown', function (e) {
+    // Convention chat : Entrée = envoyer, Shift+Entrée = saut de ligne.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      _runAi();
+    }
+  });
+
+  function _renderAiDiff(j) {
+    const host = document.getElementById('ai-result');
+    document.getElementById('ai-rationale').textContent = j.rationale || '';
+    const u = j.usage || {};
+    let line;
+    if (j.backend === 'claude_code') {
+      const cache = u.cache_creation_input_tokens || 0;
+      const cost = j.cost_usd != null ? ` · ≈ $${j.cost_usd.toFixed(4)} sur quota abo` : '';
+      line = `📦 ${j.model} (Claude Code) · ${cache} cache + ${u.input_tokens || '?'} input → ${u.output_tokens || '?'} output` + cost;
+    } else {
+      const apiCost = j.cost_usd != null
+        ? ` (≈ ${(j.cost_usd * 100).toFixed(2)}¢)`
+        : ((u.input_tokens && u.output_tokens)
+            ? ` (≈ ${((u.input_tokens * 3 + u.output_tokens * 15) / 1e6 * 100).toFixed(2)}¢)`
+            : '');
+      line = `🔑 ${j.model} (clé API) · ${u.input_tokens || '?'} input → ${u.output_tokens || '?'} output` + apiCost;
+    }
+    // Cumul session (depuis le démarrage du server)
+    const t = j.total || {};
+    if (t.n_calls) {
+      const totalCost = (t.cost_usd != null) ? ' · cumul $' + t.cost_usd.toFixed(4) : '';
+      line += ' · session : ' + t.n_calls + ' appels' + totalCost +
+              ' · ' + (t.input_tokens + t.cache_creation + t.cache_read) +
+              ' in / ' + t.output_tokens + ' out';
+    }
+    document.getElementById('ai-usage').textContent = line;
+
+    let html = '';
+    if (j.action === 'add_after' && j.proposed && j.proposed.blocks) {
+      // Mode "ajout" : afficher chaque nouveau bloc avec un fond vert
+      const blocks = j.proposed.blocks;
+      html += '<div class="ai-action-tag">➕ Ajouter ' + blocks.length +
+              ' question(s) après ce bloc</div>';
+      blocks.forEach((b, idx) => {
+        html += '<div class="ai-new-block">' +
+                '<div class="ai-new-block-head">Q' + (idx + 1) +
+                ' · <code>' + _escapeForHtml(b.tag) + '</code> · ' + b.qtype + '</div>' +
+                '<div class="ai-new-block-statement">' + _escapeForHtml(b.statement) + '</div>' +
+                '<ul class="ai-new-block-answers">';
+        b.answers.forEach(a => {
+          html += '<li class="' + (a.correct ? 'is-correct' : '') + '">' +
+                  (a.correct ? '✓' : '·') + ' ' + _escapeForHtml(a.text) +
+                  (a.bareme ? ' <span class="ai-bareme">' + _escapeForHtml(a.bareme) + '</span>' : '') +
+                  '</li>';
+        });
+        html += '</ul></div>';
+      });
+    } else {
+      // Mode "édition" : diff side-by-side
+      const cur = j.current, prop = j.proposed;
+      html += '<div class="ai-action-tag">✎ Modifier la question courante</div>';
+      if (cur.qtype !== prop.qtype) {
+        html += '<div class="ai-diff-row"><span class="ai-diff-label">Type</span>' +
+                '<div class="ai-diff-pair"><div class="ai-old">' + _escapeForHtml(cur.qtype) +
+                '</div><div class="ai-new">' + _escapeForHtml(prop.qtype) + '</div></div></div>';
+      }
+      if (cur.statement !== prop.statement) {
+        html += '<div class="ai-diff-row"><span class="ai-diff-label">Énoncé</span>' +
+                '<div class="ai-diff-pair"><div class="ai-old">' + _escapeForHtml(cur.statement) +
+                '</div><div class="ai-new">' + _escapeForHtml(prop.statement) + '</div></div></div>';
+      }
+      const maxN = Math.max(cur.answers.length, prop.answers.length);
+      let anyDiff = cur.answers.length !== prop.answers.length;
+      if (!anyDiff) {
+        for (let i = 0; i < maxN; i++) {
+          const a = cur.answers[i] || {}, b = prop.answers[i] || {};
+          if (a.text !== b.text || a.correct !== b.correct || a.bareme !== b.bareme) { anyDiff = true; break; }
+        }
+      }
+      if (anyDiff) {
+        let rows = '';
+        for (let i = 0; i < maxN; i++) {
+          const a = cur.answers[i] || null, b = prop.answers[i] || null;
+          rows += '<div class="ai-ans-row">' +
+                  '<div class="ai-old">' + _renderAns(a) + '</div>' +
+                  '<div class="ai-new">' + _renderAns(b) + '</div></div>';
+        }
+        html += '<div class="ai-diff-row"><span class="ai-diff-label">Réponses</span>' +
+                '<div class="ai-ans-pairs">' +
+                '<div class="ai-ans-head"><div>Avant</div><div>Après</div></div>' +
+                rows + '</div></div>';
+      }
+      if (html.indexOf('ai-diff-row') === -1) {
+        html += '<div class="ai-no-diff">Claude n\'a rien proposé de différent.</div>';
+      }
+    }
+    document.getElementById('ai-diff').innerHTML = html;
+    host.hidden = false;
+  }
+  function _renderAns(a) {
+    if (!a) return '<em class="ai-ans-missing">— (absente)</em>';
+    const marker = a.correct ? '<span class="ai-ok">✓</span>' : '<span class="ai-no">·</span>';
+    const bareme = a.bareme ? '<span class="ai-bareme">' + _escapeForHtml(a.bareme) + '</span>' : '';
+    return marker + ' ' + _escapeForHtml(a.text || '') + ' ' + bareme;
+  }
+  function _escapeForHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  document.getElementById('ai-redo').addEventListener('click', () => {
+    document.getElementById('ai-result').hidden = true;
+    AI_LAST_RESULT = null;
+    document.getElementById('ai-prompt').focus();
+  });
+
+  document.getElementById('ai-apply').addEventListener('click', async () => {
+    if (!AI_LAST_RESULT || !AI_CURRENT_BID) return;
+    const btn = document.getElementById('ai-apply');
+    const errEl = document.getElementById('ai-error');
+    errEl.hidden = true;
+    btn.disabled = true;
+    btn.textContent = 'Application…';
+    try {
+      if (AI_LAST_RESULT.action === 'add_after') {
+        // Insère chaque bloc à la suite, après le bloc cliqué.
+        const blocks = (AI_LAST_RESULT.proposed || {}).blocks || [];
+        let prevBid = AI_LAST_RESULT.after_bid;
+        for (const b of blocks) {
+          const data = {
+            tag: b.tag,
+            qtype: b.qtype,
+            env: b.qtype === 'mult' ? 'reponses' : 'reponses',
+            statement: b.statement,
+            answers: b.answers,
+            value: '1',
+          };
+          const r = await fetch('/api/sujet/blocks/add', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({kind: 'question_qcm', after_bid: prevBid, data: data})
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok) {
+            errEl.textContent = '✘ ' + (j.error || 'erreur insertion');
+            errEl.hidden = false;
+            return;
+          }
+          prevBid = j.bid;
+        }
+        _closeAi();
+        setStatus(blocks.length + ' question(s) ajoutée(s) ✓ — rechargement…', 'ok');
+        setTimeout(() => location.reload(), 250);
+      } else {
+        // action=edit : remplace via /api/sujet/blocks/update
+        const r = await fetch('/api/sujet/blocks/update', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({bid: AI_CURRENT_BID, data: AI_LAST_RESULT.new_data})
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          errEl.textContent = '✘ ' + (j.error || 'erreur');
+          errEl.hidden = false;
+          return;
+        }
+        _closeAi();
+        setStatus('Modification appliquée ✓ — rechargement…', 'ok');
+        setTimeout(() => location.reload(), 250);
+      }
+    } catch (e) {
+      errEl.textContent = '✘ ' + e;
+      errEl.hidden = false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '✓ Appliquer';
+    }
+  });
+
+  // Stub pour réutiliser le handler bank-save plus bas.
+  document.getElementById('bank-save-confirm').addEventListener('click', async function () {
+    if (!saveTargetBid) return;
+    const title = document.getElementById('bank-save-title').value.trim();
+    const tagsStr = document.getElementById('bank-save-tags').value.trim();
+    const author = document.getElementById('bank-save-author').value.trim();
+    const errEl = document.getElementById('bank-save-error');
+    errEl.hidden = true;
+    if (!title) {
+      errEl.textContent = 'Le titre est obligatoire.';
+      errEl.hidden = false;
+      return;
+    }
+    const tags = tagsStr.split(',').map(t => t.trim()).filter(Boolean);
+    const r = await fetch('/api/bank', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bid: saveTargetBid, title: title, tags: tags, author: author})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      errEl.textContent = 'Échec : ' + (j.error || 'erreur');
+      errEl.hidden = false;
+      return;
+    }
+    closeBankSaveModal();
+    setStatus('« ' + title + ' » sauvée dans la banque ✓', 'ok');
+  });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}Cases flaggées — review rapide{% endblock %}
+{% block content %}
+<header class="sticky">
+  <h1>Review rapide — cases flaggées</h1>
+  <div class="filters">
+    <a class="btn-filter {% if filter_mode == 'all' %}active{% endif %}" href="/flagged">Tous ({{ counts.all }})</a>
+    <a class="btn-filter {% if filter_mode == 'not_validated' %}active{% endif %}" href="/flagged?status=not_validated">Non validés ({{ counts.not_validated }})</a>
+    <a class="btn-filter {% if filter_mode == 'validated' %}active{% endif %}" href="/flagged?status=validated">Validés ({{ counts.validated }})</a>
+  </div>
+  <div class="meta">
+    <span><b>{{ students|length }}</b> copies affichées</span>
+    <span><b>{{ total_cells }}</b> cases au total</span>
+  </div>
+  <p class="legend">
+    Cases dans la zone <span class="legend-filled">Positifs</span> = cochées, <span class="legend-empty">Négatifs</span> = non.
+    Click sur une case pour la déplacer (sauvegarde auto).
+    <span class="legend-diff">orange ⚠</span> = CV ≠ AMC,
+    <span class="legend-doubtful">magenta ?</span> = case douteuse (estimateurs divergent),
+    <span class="legend-ambig">jaune</span> = ambigu (legacy).
+    <span id="status" class="status">prêt</span>
+  </p>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="reponses">Réponses</button>
+    <button class="tab-btn" data-tab="identite">Identité</button>
+  </div>
+</header>
+
+<div class="tab-panel" id="tab-reponses">
+<div class="flagged-list">
+{% for s in students %}
+  <div class="flagged-row clickable"
+       data-stem="{{ s.batch }}_page_{{ "%03d"|format(s.page) }}"
+       data-copie-href="/student/{{ s.batch }}/{{ s.page }}"
+       {% if s.validated %}data-validated="1"{% endif %}>
+    <div class="flagged-student">
+      <a href="/student/{{ s.batch }}/{{ s.page }}" class="student-link">
+        <b>{{ s.canonical_name }}</b>
+      </a>
+      <span class="small">({{ s.canonical_id }} — {{ s.batch }}/p.{{ s.page }})</span>
+      <span class="cell-count">{{ s.n_cells }} cases</span>
+      {% for f in s.flags %}{% if f.startswith('cv_differs_amc') or f.startswith('amc_unvalidated') or f.startswith('ambiguous') or f.startswith('no_mires') or f.startswith('id_incomplet') %}<span class="badge badge-{{ f.split('(')[0] }}">{{ f }}</span>{% endif %}{% endfor %}
+      <button class="btn btn-small mark-validated">{% if s.validated %}✓ Validé{% else %}Marquer validé{% endif %}</button>
+    </div>
+    <div class="cases-row cases-row-small">
+      <div class="cases-zone cases-positifs">
+        <span class="cases-zone-label">Positifs</span>
+        <div class="cases-zone-grid">
+          {% for c in s.cells if c.selected %}
+            <div class="case-wrap flagged-case" data-char="{{ c.q }}_{{ c.char }}"
+                 title="{% if c.reason == 'diff' %}CV={{ c.cv }} AMC={{ c.amc }}{% elif c.reason == 'doubtful' %}{{ c.reasons|join(', ') }} — r={{ c.ratio }} m={{ c.masked }} p={{ c.proba }}{% else %}ratio CV={{ c.ratio }}{% endif %}">
+              <img class="case selected {% if c.reason == 'diff' %}diff{% elif c.reason == 'doubtful' %}doubtful{% else %}ambig{% endif %}"
+                   src="/zoom_img/{{ s.batch }}/{{ s.page }}/{{ c.q }}_{{ c.char }}.jpg"
+                   data-batch="{{ s.batch }}" data-page="{{ s.page }}" data-q="{{ c.q }}" data-char="{{ c.char }}"
+                   loading="lazy">
+              <div class="case-label">
+                <span class="ch">Q{{ c.q }}-{{ c.char }}</span>
+                {% if c.reason == 'diff' %}<span class="diff-mark">⚠</span>
+                {% elif c.reason == 'doubtful' %}<span class="doubt-mark">?</span>
+                {% else %}<span class="amb-mark">?</span>{% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="cases-zone cases-negatifs">
+        <span class="cases-zone-label">Négatifs</span>
+        <div class="cases-zone-grid">
+          {% for c in s.cells if not c.selected %}
+            <div class="case-wrap flagged-case" data-char="{{ c.q }}_{{ c.char }}"
+                 title="{% if c.reason == 'diff' %}CV={{ c.cv }} AMC={{ c.amc }}{% elif c.reason == 'doubtful' %}{{ c.reasons|join(', ') }} — r={{ c.ratio }} m={{ c.masked }} p={{ c.proba }}{% else %}ratio CV={{ c.ratio }}{% endif %}">
+              <img class="case {% if c.reason == 'diff' %}diff{% elif c.reason == 'doubtful' %}doubtful{% else %}ambig{% endif %}"
+                   src="/zoom_img/{{ s.batch }}/{{ s.page }}/{{ c.q }}_{{ c.char }}.jpg"
+                   data-batch="{{ s.batch }}" data-page="{{ s.page }}" data-q="{{ c.q }}" data-char="{{ c.char }}"
+                   loading="lazy">
+              <div class="case-label">
+                <span class="ch">Q{{ c.q }}-{{ c.char }}</span>
+                {% if c.reason == 'diff' %}<span class="diff-mark">⚠</span>
+                {% elif c.reason == 'doubtful' %}<span class="doubt-mark">?</span>
+                {% else %}<span class="amb-mark">?</span>{% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endfor %}
+</div>
+</div>
+
+<div class="tab-panel" id="tab-identite" style="display:none">
+<div class="identite-list">
+{% for s in students %}
+  <div class="identite-row">
+    <div class="identite-head">
+      <a href="/student/{{ s.batch }}/{{ s.page }}" class="student-link"><b>{{ s.canonical_name }}</b></a>
+      <span class="small">({{ s.canonical_id }} — {{ s.batch }}/p.{{ s.page }} · id lu {{ s.student_id }})</span>
+    </div>
+    {% set batch = s.batch %}{% set page = s.page %}{% set id_questions = s.id_questions %}
+    {% include "_id_grid.html" %}
+  </div>
+{% endfor %}
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const status = document.getElementById('status');
+
+// Déplace la case-wrap dans la zone opposée (positifs ↔ négatifs) en triant par data-char.
+function moveCaseToOtherZone(wrap) {
+  const block = wrap.closest('.flagged-row, .q-block');
+  const fromZone = wrap.closest('.cases-zone');
+  const targetClass = fromZone.classList.contains('cases-positifs') ? 'cases-negatifs' : 'cases-positifs';
+  const targetGrid = block.querySelector('.' + targetClass + ' .cases-zone-grid');
+  const ch = wrap.dataset.char;
+  let inserted = false;
+  for (const sib of targetGrid.querySelectorAll(':scope > .case-wrap')) {
+    if (sib.dataset.char > ch) { targetGrid.insertBefore(wrap, sib); inserted = true; break; }
+  }
+  if (!inserted) targetGrid.appendChild(wrap);
+}
+
+document.querySelectorAll('#tab-reponses img.case').forEach(img => {
+  img.addEventListener('click', async (ev) => {
+    ev.stopPropagation();  // ne pas déclencher la navigation de la ligne
+    const {batch, page, q, char} = img.dataset;
+    status.textContent = '...';
+    const r = await fetch('/api/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch: batch, page: parseInt(page), q: q, char: char})
+    });
+    if (r.ok) {
+      img.classList.toggle('selected');
+      moveCaseToOtherZone(img.closest('.case-wrap'));
+      status.textContent = '✓ ' + batch + '/p.' + page + ' Q' + q + char;
+    } else {
+      status.textContent = '✘ erreur';
+    }
+  });
+});
+
+document.querySelectorAll('.mark-validated').forEach(btn => {
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const row = e.target.closest('.flagged-row');
+    const page = parseInt(row.dataset.stem.split('_page_')[1]);
+    const batch = row.dataset.stem.split('_page_')[0];
+    const r = await fetch('/api/mark_validated', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch: batch, page: page})
+    });
+    if (r.ok) {
+      row.style.opacity = '0.45';
+      row.dataset.validated = '1';
+      e.target.textContent = '✓ Validé';
+      e.target.disabled = true;
+      status.textContent = '✓ validé ' + row.dataset.stem;
+    }
+  });
+});
+
+// Click sur la ligne (en dehors des éléments interactifs) → ouvre la vue copie
+document.querySelectorAll('.flagged-row.clickable').forEach(row => {
+  row.addEventListener('click', (e) => {
+    // ignorer si la cible est interactive
+    if (e.target.closest('a, button, img.case')) return;
+    window.location.href = row.dataset.copieHref;
+  });
+});
+
+// Les liens explicites (nom étudiant) ne doivent pas propager au row
+document.querySelectorAll('.student-link').forEach(a => {
+  a.addEventListener('click', (e) => e.stopPropagation());
+});
+
+// bascule d'onglets Réponses / Identité
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('tab-' + btn.dataset.tab).style.display = '';
+  });
+});
+</script>
+{% endblock %}

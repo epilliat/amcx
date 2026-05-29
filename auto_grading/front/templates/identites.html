@@ -1,0 +1,579 @@
+{% extends "base.html" %}
+{% block title %}Review finale — identités{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Review finale — assignation des identités</h1>
+  <div class="meta">
+    <span><b id="remaining">{{ total }}</b> copie(s) à relier</span>
+    <span class="small"><b id="n-assigned">{{ n_assigned }}</b> / {{ n_total }} étudiants assignés</span>
+  </div>
+  <div class="meta small" style="margin-top:6px;">
+    💡 <b>Clic copie</b> (gauche, encadrée bleu) puis <b>clic nom</b> (droite) = assigne.
+    <b>Clic nom assigné</b> seul (sans copie sélectionnée) = désassigne.
+    Drag&amp;drop : alternative.
+  </div>
+  <div id="htr-bar" class="htr-bar" hidden>
+    <span id="htr-status" class="htr-status"></span>
+    <button id="htr-propose" class="nav-btn" type="button" disabled
+            title="Demande à Claude vision le nom de chaque copie non résolue (liste restreinte par le student_id partiel).">🪄 Proposer les non-matchés</button>
+    <button id="htr-verify" class="nav-btn" type="button" disabled
+            title="Vérifie via Claude vision l'identité de TOUTES les copies (y compris déjà assignées). Long.">🔍 Vérifier toutes</button>
+    <span id="htr-progress" class="htr-progress small" hidden></span>
+  </div>
+  <div id="verify-panel" class="verify-panel" hidden>
+    <div class="verify-head">
+      <b>🔍 Résultats de la vérification</b>
+      <button type="button" class="btn-tiny verify-close" title="fermer">✕</button>
+    </div>
+    <div id="verify-content"></div>
+  </div>
+</header>
+
+<div class="rf-layout">
+  <div class="rf-images">
+    {% set ns = namespace(last_group=None) %}
+    {% for c in copies %}
+      {% if c.group != ns.last_group %}
+        <h3 class="rf-group-head rf-group-head-{{ c.group }}">
+          {% if c.group == 'unresolved' %}🟠 À résoudre <span class="small">({{ counts.unresolved }})</span>
+          {% elif c.group == 'manual' %}🔵 Assignés à la main <span class="small">({{ counts.manual }})</span>
+          {% else %}🟢 Auto-détectés par la grille ID <span class="small">({{ counts.auto }})</span>
+          {% endif %}
+        </h3>
+        {% set ns.last_group = c.group %}
+      {% endif %}
+      <div class="rf-card rf-group-{{ c.group }} {% if c.assigned %}rf-assigned{% endif %}"
+           data-batch="{{ c.batch }}" data-page="{{ c.page }}" data-group="{{ c.group }}">
+        <div class="rf-card-head">
+          <b>{{ c.batch }}/page_{{ "%03d"|format(c.page) }}</b>
+          <span class="small">ID lu&nbsp;: <code>{{ c.student_id }}</code></span>
+          {% if c.dup_of %}<span class="badge badge-dup" title="ID lu identique à une autre copie">doublon · lu {{ c.dup_of }}</span>{% endif %}
+          <button type="button" class="rf-htr-btn btn-tiny" title="Lire le nom avec Claude vision" disabled>🪄</button>
+          <a href="/student/{{ c.batch }}/{{ c.page }}" class="nav-btn btn-tiny">copie</a>
+        </div>
+        <img class="name-crop" src="/name_img/{{ c.batch }}/{{ c.page }}.jpg"
+             alt="nom manuscrit" loading="lazy">
+        <div class="rf-htr-suggestions" hidden></div>
+        <div class="rf-drop">
+          {% if c.assigned %}
+            <button type="button" class="rf-chip assigned rf-card-assigned-chip"
+                    data-sid="{{ c.assigned.sid }}"
+                    title="Cliquer pour désassigner — le chip retournera dans le pool à droite">
+              <span class="rf-chip-name">✓ {{ c.assigned.full }}</span>
+              <span class="rf-chip-id">{{ c.assigned.sid }}</span>
+            </button>
+          {% else %}
+            <span class="rf-drop-hint">cliquer la carte puis un nom à droite (ou glisser un nom ici)</span>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+
+  <div class="rf-pool-wrap">
+    <div class="rf-pool-title">
+      Tous les étudiants
+      (<span class="rf-pool-legend rf-pool-legend-assigned">●</span> assignés <span id="n-assigned-2">{{ n_assigned }}</span>,
+       <span class="rf-pool-legend rf-pool-legend-unassigned">●</span> libres <span id="n-unassigned">{{ n_total - n_assigned }}</span>)
+    </div>
+    <div class="rf-pool" id="rf-pool">
+      {% for s in students %}
+        <button type="button"
+                class="rf-chip {% if s.assigned_to %}assigned{% else %}unassigned{% endif %}"
+                data-sid="{{ s.id }}"
+                {% if s.assigned_to %}data-assigned-batch="{{ s.assigned_to.batch }}" data-assigned-page="{{ s.assigned_to.page }}"{% endif %}
+                draggable="{% if s.assigned_to %}false{% else %}true{% endif %}">
+          <span class="rf-chip-name">{{ s.full }}</span>
+          <span class="rf-chip-id">{{ s.id }}</span>
+          {% if s.assigned_to %}
+            <span class="rf-chip-target small">→ {{ s.assigned_to.batch }}/p{{ "%03d"|format(s.assigned_to.page) }}</span>
+          {% endif %}
+        </button>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const remainingEl = document.getElementById('remaining');
+const nAssignedEl = document.getElementById('n-assigned');
+const nAssigned2El = document.getElementById('n-assigned-2');
+const nUnassignedEl = document.getElementById('n-unassigned');
+const pool = document.getElementById('rf-pool');
+let selectedCard = null;
+
+function recountStats() {
+  remainingEl.textContent = document.querySelectorAll('.rf-card:not(.rf-assigned)').length;
+  const a = pool.querySelectorAll('.rf-chip.assigned').length;
+  const u = pool.querySelectorAll('.rf-chip.unassigned').length;
+  nAssignedEl.textContent = a;
+  nAssigned2El.textContent = a;
+  nUnassignedEl.textContent = u;
+}
+
+// ----- Server calls -----------------------------------------------------
+
+async function callAssign(batch, page, sid) {
+  const r = await fetch('/api/assign-student', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({batch, page: parseInt(page), student_id: sid || ''})
+  });
+  const j = await r.json();
+  return [r.ok, j];
+}
+
+// ----- Mutate UI after a successful assign/unassign --------------------
+
+function flash(chip) {
+  chip.classList.add('flash');
+  setTimeout(() => chip.classList.remove('flash'), 350);
+}
+
+function chipMarkAssigned(chip, batch, page) {
+  chip.classList.remove('unassigned');
+  chip.classList.add('assigned');
+  chip.draggable = false;
+  chip.dataset.assignedBatch = batch;
+  chip.dataset.assignedPage = page;
+  let tgt = chip.querySelector('.rf-chip-target');
+  if (!tgt) {
+    tgt = document.createElement('span');
+    tgt.className = 'rf-chip-target small';
+    chip.appendChild(tgt);
+  }
+  tgt.textContent = '→ ' + batch + '/p' + String(page).padStart(3, '0');
+  flash(chip);
+  reorderPool();
+}
+
+function chipMarkUnassigned(chip) {
+  chip.classList.remove('assigned');
+  chip.classList.add('unassigned');
+  chip.draggable = true;
+  delete chip.dataset.assignedBatch;
+  delete chip.dataset.assignedPage;
+  const tgt = chip.querySelector('.rf-chip-target');
+  if (tgt) tgt.remove();
+  flash(chip);
+  reorderPool();
+}
+
+function reorderPool() {
+  // Re-trie : tous les .unassigned d'abord (alpha), puis les .assigned (alpha).
+  // CSS-only via flex `order` serait plus fluide mais demande de tracker
+  // l'ordre lexico ; on fait un sort + appendChild simple (préserve l'identité
+  // des éléments donc les transitions CSS du chip continuent).
+  const chips = Array.from(pool.querySelectorAll('.rf-chip'));
+  chips.sort((a, b) => {
+    const aAss = a.classList.contains('assigned');
+    const bAss = b.classList.contains('assigned');
+    if (aAss !== bAss) return aAss ? 1 : -1;     // non-assignés d'abord
+    const an = a.querySelector('.rf-chip-name').textContent.trim().toLowerCase();
+    const bn = b.querySelector('.rf-chip-name').textContent.trim().toLowerCase();
+    return an < bn ? -1 : (an > bn ? 1 : 0);
+  });
+  chips.forEach(c => pool.appendChild(c));
+}
+
+function cardMarkAssigned(card, sid, fullName) {
+  // Carte gauche : remplace le drop hint par un chip vert embarqué.
+  // Toute assignation via l'UI (click, drag, HTR) compte comme « manuel » →
+  // groupe bleu (distinct du vert « auto par grille ID »).
+  card.classList.add('rf-assigned');
+  card.classList.remove('rf-group-unresolved', 'rf-group-auto');
+  card.classList.add('rf-group-manual');
+  card.dataset.group = 'manual';
+  const drop = card.querySelector('.rf-drop');
+  drop.innerHTML = '';
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'rf-chip assigned rf-card-assigned-chip';
+  chip.dataset.sid = sid;
+  chip.title = 'Cliquer pour désassigner';
+  chip.innerHTML = `<span class="rf-chip-name">✓ ${fullName}</span><span class="rf-chip-id">${sid}</span>`;
+  chip.addEventListener('click', e => { e.stopPropagation(); embeddedChipOnClick(chip); });
+  drop.appendChild(chip);
+}
+
+function cardMarkUnresolved(card) {
+  // Carte gauche : remet le drop hint à la place du chip embarqué.
+  card.classList.remove('rf-assigned', 'selected', 'rf-group-manual', 'rf-group-auto');
+  card.classList.add('rf-group-unresolved');
+  card.dataset.group = 'unresolved';
+  if (selectedCard === card) selectedCard = null;
+  const drop = card.querySelector('.rf-drop');
+  drop.innerHTML = '<span class="rf-drop-hint">cliquer la carte puis un nom à droite (ou glisser un nom ici)</span>';
+}
+
+window.addEventListener('load', () => {
+  const sc = sessionStorage.getItem('rf-scroll');
+  if (sc) { window.scrollTo(0, parseInt(sc)); sessionStorage.removeItem('rf-scroll'); }
+});
+
+// ----- Click-to-select on .rf-card --------------------------------------
+
+document.querySelectorAll('.rf-card').forEach(card => {
+  card.addEventListener('click', e => {
+    // Ignore clicks inside the toolbar buttons (zoom, htr, drop)
+    if (e.target.closest('a, button, .rf-htr-suggestions')) return;
+    if (selectedCard === card) {
+      card.classList.remove('selected');
+      selectedCard = null;
+    } else {
+      document.querySelectorAll('.rf-card.selected').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedCard = card;
+    }
+  });
+});
+
+// ----- Click on chip (right pool) ---------------------------------------
+
+async function chipOnClick(chip) {
+  const sid = chip.dataset.sid;
+  const fullName = chip.querySelector('.rf-chip-name').textContent.replace(/^✓\s*/, '');
+  const isAssigned = chip.classList.contains('assigned');
+  if (selectedCard) {
+    // mode assign : copie selected + click chip
+    const batch = selectedCard.dataset.batch;
+    const page = selectedCard.dataset.page;
+    if (isAssigned) {
+      const cur = (chip.dataset.assignedBatch || '?') + '/p' + String(chip.dataset.assignedPage || '?').padStart(3, '0');
+      if (!confirm(`${fullName} est déjà assigné à ${cur}. Réassigner à ${batch}/page ${page} ?\n\n(${cur} reviendra à résoudre)`)) return;
+    }
+    const [ok, j] = await callAssign(batch, page, sid);
+    if (!ok) { alert(j.error || 'erreur'); return; }
+    if (isAssigned) {
+      // Réassignation : ancienne copie va revenir → on remet aussi son card.
+      const oldCard = document.querySelector(
+        `.rf-card[data-batch="${chip.dataset.assignedBatch}"][data-page="${chip.dataset.assignedPage}"]`);
+      if (oldCard) cardMarkUnresolved(oldCard);
+    }
+    // Met à jour le chip dans le pool (transition couleur) + le card cible (chip embarqué).
+    chipMarkAssigned(chip, batch, page);
+    cardMarkAssigned(selectedCard, sid, fullName);
+    selectedCard.classList.remove('selected');
+    selectedCard = null;
+    recountStats();
+  } else if (isAssigned) {
+    // mode désassign : pas de copie selected, click sur chip assigné
+    const cur = (chip.dataset.assignedBatch || '?') + '/p' + String(chip.dataset.assignedPage || '?').padStart(3, '0');
+    if (!confirm(`Désassigner ${fullName} de ${cur} ? (la copie ${cur} reviendra à résoudre)`)) return;
+    const [ok, j] = await callAssign(chip.dataset.assignedBatch, chip.dataset.assignedPage, '');
+    if (!ok) { alert(j.error || 'erreur'); return; }
+    // 1. Carte gauche : retire le chip embarqué
+    const oldCard = document.querySelector(
+      `.rf-card[data-batch="${chip.dataset.assignedBatch}"][data-page="${chip.dataset.assignedPage}"]`);
+    if (oldCard) cardMarkUnresolved(oldCard);
+    // 2. Chip du pool : transition vert→orange + bouge en tête de la section
+    chipMarkUnassigned(chip);
+    recountStats();
+  }
+  // Sinon : pas de copie selected + chip libre → no-op silencieux.
+}
+
+// Click sur un chip vert EMBARQUÉ dans une carte gauche = désassigner.
+async function embeddedChipOnClick(chip) {
+  const card = chip.closest('.rf-card');
+  if (!card) return;
+  const batch = card.dataset.batch, page = card.dataset.page;
+  const sid = chip.dataset.sid;
+  const fullName = chip.querySelector('.rf-chip-name').textContent.replace(/^✓\s*/, '');
+  if (!confirm(`Désassigner ${fullName} de ${batch}/page ${page} ?`)) return;
+  const [ok, j] = await callAssign(batch, page, '');
+  if (!ok) { alert(j.error || 'erreur'); return; }
+  cardMarkUnresolved(card);
+  // Le chip correspondant dans le pool : vert → orange + reorder.
+  const poolChip = pool.querySelector(`.rf-chip[data-sid="${sid}"]`);
+  if (poolChip) chipMarkUnassigned(poolChip);
+  recountStats();
+}
+
+document.querySelectorAll('#rf-pool .rf-chip').forEach(chip => {
+  chip.addEventListener('click', () => chipOnClick(chip));
+});
+document.querySelectorAll('.rf-card-assigned-chip').forEach(chip => {
+  chip.addEventListener('click', e => { e.stopPropagation(); embeddedChipOnClick(chip); });
+});
+
+// ----- Drag & drop (préservé en alternative) ----------------------------
+
+let draggedChip = null;
+function wireDrag(chip) {
+  chip.addEventListener('dragstart', () => {
+    if (chip.classList.contains('assigned')) return;
+    draggedChip = chip;
+    chip.classList.add('dragging');
+  });
+  chip.addEventListener('dragend', () => {
+    chip.classList.remove('dragging');
+    draggedChip = null;
+  });
+}
+document.querySelectorAll('.rf-chip').forEach(wireDrag);
+
+document.querySelectorAll('.rf-card').forEach(card => {
+  card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
+  card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+  card.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    card.classList.remove('drag-over');
+    if (!draggedChip || card.classList.contains('rf-assigned')) return;
+    const chip = draggedChip;
+    const sid = chip.dataset.sid;
+    const fullName = chip.querySelector('.rf-chip-name').textContent.replace(/^✓\s*/, '');
+    const [ok, j] = await callAssign(card.dataset.batch, card.dataset.page, sid);
+    if (!ok) { alert(j.error || 'erreur'); return; }
+    chipMarkAssigned(chip, card.dataset.batch, card.dataset.page);
+    cardMarkAssigned(card, sid, fullName);
+    recountStats();
+  });
+});
+
+// ----- HTR (Claude vision auto-detect) ----------------------------------
+
+function renderHtrSuggestion(card, suggestion) {
+  const box = card.querySelector('.rf-htr-suggestions');
+  if (!box) return;
+  box.innerHTML = '';
+  box.hidden = false;
+  if (!suggestion.best_id) {
+    // « Pas trouvé » UX : message + bouton « réessayer avec toute la liste »
+    // ssi on n'a pas déjà élargi (sinon, dernier recours = drag&drop).
+    const usedFull = suggestion.used_full_list;
+    const wrap = document.createElement('div');
+    wrap.className = 'rf-htr-empty';
+    if (usedFull) {
+      wrap.innerHTML = `🤖 Claude n'a pas identifié l'étudiant même sur la liste complète. ` +
+                       `<i>Réponse : ${suggestion.raw_text || 'vide'}</i><br>` +
+                       `→ utilise le drag&amp;drop, ou la sélection click-to-assign.`;
+    } else {
+      wrap.innerHTML = `🤖 Claude n'a pas trouvé (réponse : <i>${suggestion.raw_text || 'vide'}</i>). ` +
+                       `La grille ID a peut-être été mal lue.<br>`;
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn-tiny rf-htr-retry';
+      retry.textContent = '🔄 Réessayer sur toute la liste (174)';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true; retry.textContent = '…';
+        await htrOne(card, true);
+      });
+      wrap.appendChild(retry);
+    }
+    box.appendChild(wrap);
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rf-htr-chip';
+  btn.dataset.sid = suggestion.best_id;
+  const wideMark = suggestion.used_full_list ? ' (liste complète)' : '';
+  btn.innerHTML = `<span>🪄 ${suggestion.best_full}${wideMark}</span><span class="rf-htr-score">${suggestion.best_id}</span>`;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = '…';
+    const [ok, j] = await callAssign(card.dataset.batch, card.dataset.page, suggestion.best_id);
+    if (!ok) { alert(j.error || 'erreur'); btn.disabled = false; return; }
+    const chip = pool.querySelector(`.rf-chip[data-sid="${suggestion.best_id}"]`);
+    if (chip && chip.classList.contains('assigned')) {
+      // Réassignation : l'ancienne carte revient à résoudre.
+      const oldCard = document.querySelector(
+        `.rf-card[data-batch="${chip.dataset.assignedBatch}"][data-page="${chip.dataset.assignedPage}"]`);
+      if (oldCard) cardMarkUnresolved(oldCard);
+    }
+    if (chip) chipMarkAssigned(chip, card.dataset.batch, card.dataset.page);
+    cardMarkAssigned(card, suggestion.best_id, suggestion.best_full);
+    // Cache le panel suggestion (la carte est maintenant résolue)
+    const box = card.querySelector('.rf-htr-suggestions');
+    if (box) { box.hidden = true; box.innerHTML = ''; }
+    recountStats();
+  });
+  box.appendChild(btn);
+}
+
+async function htrOne(card, wide = false) {
+  const btn = card.querySelector('.rf-htr-btn');
+  if (btn && !wide) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await fetch('/api/htr/recognize-name', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({batch: card.dataset.batch,
+                            page: parseInt(card.dataset.page),
+                            wide: wide})
+    });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'erreur HTR'); return; }
+    renderHtrSuggestion(card, j);
+  } finally {
+    if (btn && !wide) { btn.disabled = false; btn.textContent = '🪄'; }
+  }
+}
+
+// ----- Bouton 2 : Vérifier toutes les copies (assignées comprises) -----
+
+const verifyPanel = document.getElementById('verify-panel');
+const verifyContent = document.getElementById('verify-content');
+
+function renderVerifyResults(state) {
+  verifyPanel.hidden = false;
+  const mm = state.mismatches || [];
+  const uk = state.unknowns || [];
+  let html = '';
+  if (state.status === 'running') {
+    html += `<div class="small">Vérification en cours : ${state.done}/${state.total} (${state.progress}%)…</div>`;
+  } else {
+    html += `<div class="small">Terminé : ${mm.length} désaccord(s), ${uk.length} non identifié(s) par Claude.</div>`;
+  }
+  if (mm.length) {
+    html += '<div class="verify-list">';
+    mm.forEach((m, idx) => {
+      const isReassign = !!m.current_id;
+      html += `<div class="verify-row" data-batch="${m.batch}" data-page="${m.page}" data-claude-id="${m.claude_id}">
+        <a href="/student/${m.batch}/${m.page}" class="nav-btn btn-tiny">${m.batch}/p${String(m.page).padStart(3, '0')}</a>
+        <img class="verify-crop" src="/name_img/${m.batch}/${m.page}.jpg" loading="lazy">
+        <div class="verify-info">
+          ${isReassign
+            ? `<div class="small">assigné : <b>${m.current_full}</b></div>`
+            : `<div class="small">non assigné</div>`}
+          <div>🤖 Claude propose : <b>${m.claude_full}</b> <code>${m.claude_id}</code></div>
+        </div>
+        <button type="button" class="nav-btn verify-accept">${isReassign ? 'Réassigner à Claude' : 'Assigner Claude'}</button>
+        ${isReassign ? `<button type="button" class="nav-btn btn-tiny verify-keep">Garder ${m.current_full.split(' ')[0]}</button>` : ''}
+      </div>`;
+    });
+    html += '</div>';
+  }
+  if (uk.length) {
+    html += `<details class="verify-unknowns"><summary>${uk.length} non identifié(s) par Claude (clic pour voir)</summary><div class="verify-list">`;
+    uk.forEach(u => {
+      html += `<div class="verify-row">
+        <a href="/student/${u.batch}/${u.page}" class="nav-btn btn-tiny">${u.batch}/p${String(u.page).padStart(3, '0')}</a>
+        <img class="verify-crop" src="/name_img/${u.batch}/${u.page}.jpg" loading="lazy">
+        <div class="verify-info">
+          <div class="small">assigné : <b>${u.current_full || '(rien)'}</b></div>
+          <div class="small">Claude n'a pas pu identifier (réponse <i>${u.raw_text || 'vide'}</i>)</div>
+        </div>
+      </div>`;
+    });
+    html += '</div></details>';
+  }
+  verifyContent.innerHTML = html;
+
+  // Aussi : highlight les chips correspondants dans le pool droit
+  pool.querySelectorAll('.rf-chip.mismatch').forEach(c => c.classList.remove('mismatch'));
+  mm.forEach(m => {
+    if (m.current_id) {
+      const chip = pool.querySelector(`.rf-chip[data-sid="${m.current_id}"]`);
+      if (chip) chip.classList.add('mismatch');
+    }
+  });
+
+  // Click handlers (re-bind à chaque render)
+  verifyContent.querySelectorAll('.verify-accept').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('.verify-row');
+      const batch = row.dataset.batch;
+      const page = row.dataset.page;
+      const claudeId = row.dataset.claudeId;
+      btn.disabled = true; btn.textContent = '…';
+      const [ok, j] = await callAssign(batch, page, claudeId);
+      if (!ok) { alert(j.error || 'erreur'); btn.disabled = false; return; }
+      // Reload pour resync tous les chips + cartes (mismatch peut cascade)
+      sessionStorage.setItem('rf-scroll', window.scrollY);
+      location.reload();
+    });
+  });
+  verifyContent.querySelectorAll('.verify-keep').forEach(btn => {
+    btn.addEventListener('click', () => btn.closest('.verify-row').remove());
+  });
+  verifyPanel.querySelector('.verify-close').addEventListener('click', () => {
+    verifyPanel.hidden = true;
+  });
+}
+
+(async function initHtr() {
+  const r = await fetch('/api/htr/status');
+  const j = await r.json();
+  const bar = document.getElementById('htr-bar');
+  const status = document.getElementById('htr-status');
+  const proposeBtn = document.getElementById('htr-propose');
+  const verifyBtn = document.getElementById('htr-verify');
+  bar.hidden = false;
+  if (!j.available) {
+    status.innerHTML = `🚫 HTR indisponible — ${j.install_hint}`;
+    proposeBtn.title = j.install_hint;
+    verifyBtn.title = j.install_hint;
+    return;
+  }
+  const backendLabel = j.backend === 'api' ? 'clé API' : 'Claude Code (abonnement)';
+  status.innerHTML = `✓ Claude vision prêt via <b>${backendLabel}</b> — <code>${j.model_id}</code>`;
+  proposeBtn.disabled = false;
+  verifyBtn.disabled = false;
+
+  // Boutons HTR par carte (propose pour 1 copie)
+  document.querySelectorAll('.rf-htr-btn').forEach(btn => {
+    btn.disabled = false;
+    const card = btn.closest('.rf-card');
+    btn.addEventListener('click', e => { e.stopPropagation(); htrOne(card); });
+  });
+
+  // Bouton 1 — Propose (non-matchés, liste restreinte)
+  proposeBtn.addEventListener('click', async () => {
+    const n = document.querySelectorAll('.rf-card:not(.rf-assigned)').length;
+    if (!n) { alert('Aucune copie à résoudre.'); return; }
+    if (!confirm(`Demander à Claude ${n} prédictions (liste restreinte par student_id partiel) ?\n\n~5-10s/copie via Claude Code, gratuit sur quota.`)) return;
+    proposeBtn.disabled = true;
+    const r = await fetch('/api/htr/recognize-names-all', {method: 'POST'});
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'erreur'); proposeBtn.disabled = false; return; }
+    const tid = j.task_id;
+    const prog = document.getElementById('htr-progress');
+    prog.hidden = false;
+    const seen = new Set();
+    const poll = setInterval(async () => {
+      const s = await (await fetch(`/api/htr/recognize-names-all/${tid}`)).json();
+      prog.textContent = `propose ${s.done || 0}/${s.total} (${s.progress || 0}%)`;
+      Object.values(s.suggestions || {}).forEach(sug => {
+        const key = sug.batch + ':' + sug.page;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const card = document.querySelector(`.rf-card[data-batch="${sug.batch}"][data-page="${sug.page}"]`);
+        if (card && card.querySelector('.rf-htr-suggestions').hidden) {
+          renderHtrSuggestion(card, sug);
+        }
+      });
+      if (s.status !== 'running') {
+        clearInterval(poll);
+        proposeBtn.disabled = false;
+        if (s.status === 'error') alert(`HTR: ${s.error}`);
+      }
+    }, 1500);
+  });
+
+  // Bouton 2 — Vérifier (toutes les copies, liste complète)
+  verifyBtn.addEventListener('click', async () => {
+    const totalCopies = {{ n_total }};
+    if (!confirm(`Vérifier les identités de ${totalCopies} copies via Claude vision ?\n\nLong (~5-10s/copie) — comptez ${Math.ceil(totalCopies*8/60)} min. Gratuit sur quota Pro/Max.`)) return;
+    verifyBtn.disabled = true;
+    const r = await fetch('/api/htr/verify-all', {method: 'POST'});
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'erreur'); verifyBtn.disabled = false; return; }
+    const tid = j.task_id;
+    const prog = document.getElementById('htr-progress');
+    prog.hidden = false;
+    const poll = setInterval(async () => {
+      const s = await (await fetch(`/api/htr/verify-all/${tid}`)).json();
+      prog.textContent = `vérification ${s.done || 0}/${s.total} (${s.progress || 0}%) · ${s.mismatches?.length || 0} désaccords`;
+      renderVerifyResults(s);
+      if (s.status !== 'running') {
+        clearInterval(poll);
+        verifyBtn.disabled = false;
+        if (s.status === 'error') alert(`Vérif: ${s.error}`);
+      }
+    }, 2000);
+  });
+})();
+</script>
+{% endblock %}
