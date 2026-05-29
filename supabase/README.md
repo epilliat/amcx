@@ -34,13 +34,54 @@ Row-Level Security. Idempotent : peut être re-run.
 ## 4. Configurer l'auth
 
 Dashboard → **Authentication → Providers** :
-- **Email** doit être activé par défaut (magic link OK).
-- Optionnel : activer GitHub / Google (clic + suivre la doc).
+- **Email** doit être activé par défaut (magic link / OTP OK).
 
 Dashboard → **Authentication → URL Configuration** :
 - **Site URL** : `http://localhost:5050`
 - **Redirect URLs** : ajouter `http://localhost:5050/api/bank/auth/callback`
   (+ d'autres si tu prévois différents ports).
+
+### 4.a) (Optionnel mais recommandé) Whitelist email académique
+
+Pour bloquer les signups Gmail/Yahoo/mailinator et garder une communauté
+de profs uniquement :
+1. Ouvrir [schema.sql](schema.sql), section `0)`.
+2. **Décommenter** le bloc `check_academic_email()` + trigger.
+3. **Éditer la regex** pour ajouter/retirer des domaines selon ta cible
+   (par défaut : `@ensai.fr`, `@univ-rennes*.fr`, `@inrae.fr`, `@cnrs.fr`,
+   `@inria.fr`, `*.ac-XXX.fr`, `*.edu`).
+4. Re-run le SQL dans le SQL editor → le trigger est activé.
+
+Test : essaie de t'inscrire avec un email Gmail → tu reçois `Email académique
+requis` dans AMCx. Avec un email autorisé → ça passe.
+
+### 4.b) (Optionnel) OAuth Google — login 1-clic pour Google Workspace
+
+Si ton institution est sous Google Workspace académique
+(`prenom.nom@ton-institution.fr` hébergé chez Google), tu peux activer
+OAuth Google :
+
+1. **Google Cloud Console** ([console.cloud.google.com](https://console.cloud.google.com))
+   → créer un projet (gratuit) → APIs & Services → Credentials
+   → Create Credentials → OAuth client ID → Web application.
+2. **Authorized redirect URIs** : copier l'URL fournie par Supabase
+   (Dashboard → Authentication → Providers → Google → "Callback URL").
+3. **Restrict by hosted domain** (HD parameter) : pour limiter aux comptes
+   `@ton-institution.fr`, ajouter le `hd` param dans la config Supabase
+   (ou laisser ouvert si tu acceptes tous les Google Workspaces).
+4. **Supabase Dashboard** → Authentication → Providers → Google → activer
+   → coller Client ID + Client Secret.
+
+Côté AMCx (Phase A actuelle) : le bouton OAuth Google n'est pas encore dans
+l'UI — pour l'instant les profs utilisent le magic link OTP. L'OAuth Google
+sera ajouté en Phase B si demandé. **Ceci dit, dès maintenant ils peuvent
+utiliser leur email Google Workspace avec le magic link OTP.**
+
+> **OAuth Microsoft 365 / Azure AD** : même principe, suivre
+> [supabase.com/docs/guides/auth/social-login/auth-azure](https://supabase.com/docs/guides/auth/social-login/auth-azure).
+
+> **SSO RENATER / Shibboleth (ENT français)** : nécessite Supabase Pro
+> ($25/mois pour SAML) + démarches RENATER. Hors-scope MVP.
 
 ## 5. Configurer AMCx
 

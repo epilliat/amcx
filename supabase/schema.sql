@@ -6,6 +6,30 @@
 -- Idempotent : peut être re-run, ne perd aucune donnée existante.
 
 -- ============================================================================
+-- 0) (Optionnel) Whitelist email académique au signup
+-- ============================================================================
+-- DÉCOMMENTER + ÉDITER la regex pour restreindre l'inscription aux emails
+-- académiques. Bloque les signups Gmail/Yahoo/mailinator/etc. Le filtre est
+-- déclenché AVANT que la ligne n'arrive dans auth.users → l'user reçoit
+-- l'erreur dans son client (AMCx affichera "Email académique requis").
+--
+-- create or replace function check_academic_email()
+-- returns trigger language plpgsql security definer as $$
+-- begin
+--   -- À adapter : ajouter ou retirer des domaines selon ta communauté cible.
+--   if new.email !~* '@(ensai\.fr|univ-rennes.+\.fr|inrae\.fr|cnrs\.fr|inria\.fr|.+\.ac-.+\.fr|.+\.edu)$' then
+--     raise exception 'Email académique requis (.fr universitaire, .ac-XXX.fr, ou .edu).'
+--                     using errcode = 'P0001';
+--   end if;
+--   return new;
+-- end; $$;
+--
+-- drop trigger if exists enforce_academic_email on auth.users;
+-- create trigger enforce_academic_email
+--   before insert on auth.users
+--   for each row execute function check_academic_email();
+
+-- ============================================================================
 -- 1) Profils utilisateurs (extension de auth.users)
 -- ============================================================================
 
