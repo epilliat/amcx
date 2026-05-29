@@ -164,18 +164,21 @@ def _request(method: str, path: str, *, body: Any = None, params: dict | None = 
 # CRUD questions
 # --------------------------------------------------------------------------
 
+_SELECT_WITH_AUTHOR = "*,author_profile:profiles!author_id(display_name,institution)"
+
+
 def load(bank_id: str) -> dict:
     """Charge 1 question par UUID. Lève BankNotFoundError si absente.
 
+    JOIN avec profiles pour exposer `author` = display_name (compat UI).
     Greffe `stats.by_project` reconstruit depuis question_evals (mes propres
     évals seulement — RLS).
     """
     rows = _request("GET", "/rest/v1/bank_questions",
-                    params={"select": "*", "id": f"eq.{bank_id}"})
+                    params={"select": _SELECT_WITH_AUTHOR, "id": f"eq.{bank_id}"})
     if not rows:
         raise BankNotFoundError(bank_id)
-    q = rows[0]
-    q = _normalize_question(q)
+    q = _normalize_question(rows[0])
     q["stats"] = {"by_project": _load_user_evals(bank_id)}
     return q
 
@@ -220,7 +223,7 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     """
     filters = filters or {}
     params = {
-        "select": "*",
+        "select": _SELECT_WITH_AUTHOR,
         "order":  "modified_at.desc",
         "limit":  "500",
     }
@@ -320,12 +323,18 @@ def _eval_row_to_summary(row: dict) -> dict:
 def _normalize_question(row: dict) -> dict:
     """Convertit une ligne Supabase au format attendu par l'UI / bank.py.
 
-    Mapping `id` → `bank_id`. Le reste passe through. `stats.by_project` est
-    posé séparément par `load()` / `list_questions()` (req additionnelle).
+    - Mapping `id` → `bank_id`.
+    - Extrait le `display_name` du JOIN `author_profile` → champ `author`
+      (compat UI : la modale Banque affiche `author` comme texte).
+    - `stats.by_project` est posé séparément par `load()` / `list_questions()`.
     """
     out = dict(row)
     if "id" in out and "bank_id" not in out:
         out["bank_id"] = out["id"]
+    # JOIN profiles : extrait display_name + institution
+    prof = out.pop("author_profile", None) or {}
+    out["author"] = prof.get("display_name") or out.get("author") or ""
+    out["author_institution"] = prof.get("institution") or ""
     # L'UI attend `stats.by_project` ; si pas encore greffé, default vide.
     out.setdefault("stats", {"by_project": {}})
     return out
@@ -334,8 +343,46 @@ def _normalize_question(row: dict) -> dict:
 def _question_to_row(question: dict) -> dict:
     """Convertit une question (format bank.py) en payload PostgREST.
 
-    On retire `bank_id`/`id` (gérés par Supabase), `stats` (table dédiée),
-    `created_at`/`modified_at` (triggers serveur). Les autres champs passent.
+    On retire les champs non-colonnes : `bank_id`/`id` (gérés par Supabase),
+    `stats` (table dédiée), `created_at`/`modified_at` (triggers serveur),
+    `author`/`author_institution` (calculés via JOIN profiles), `author_profile`
+    (résultat de JOIN).
     """
-    skip = {"bank_id", "id", "stats", "created_at", "modified_at"}
+    skip = {"bank_id", "id", "stats", "created_at", "modified_at",
+            "author", "author_institution", "author_profile"}
     return {k: v for k, v in question.items() if k not in skip}
+
+
+# --------------------------------------------------------------------------
+# Profil utilisateur (display_name + institution)
+# --------------------------------------------------------------------------
+
+def get_my_profile() -> dict:
+    """Retourne mon profil `{user_id, display_name, institution}` ou {} si absent."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    rows = _request("GET", "/rest/v1/profiles",
+                    params={"select": "*", "user_id": f"eq.{uid}"})
+    return (rows or [{}])[0]
+
+
+def update_my_profile(updates: dict) -> dict:
+    """Met à jour mon profil (PATCH). Retourne le profil mis à jour."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    payload = {}
+    if "display_name" in updates:
+        v = (updates["display_name"] or "").strip()
+        if not v:
+            raise ValueError("display_name ne peut pas être vide")
+        payload["display_name"] = v
+    if "institution" in updates:
+        payload["institution"] = (updates["institution"] or "").strip()
+    if not payload:
+        return get_my_profile()
+    rows = _request("PATCH", f"/rest/v1/profiles?user_id=eq.{uid}",
+                    body=payload,
+                    extra_headers={"Prefer": "return=representation"})
+    return (rows or [{}])[0]

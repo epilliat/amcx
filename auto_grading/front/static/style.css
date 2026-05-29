@@ -2716,6 +2716,10 @@ img.case.correct + .case-label { font-weight: bold; }
 .bank-mode-badge.online  { background: #e7f6ec; color: #1e6b3a; }
 .bank-mode-badge.offline { background: #fff4e6; color: #aa4f00; }
 .bank-auth-warning { background: #fff4e6; color: #aa4f00; padding: 8px 12px; border-radius: 4px; margin: 8px 0; font-size: 12px; }
+
+.bank-profile-edit { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 6px 0 8px; border-top: 1px dashed #d8d8de; margin-top: 6px; }
+.bank-profile-edit label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #666; }
+.bank-profile-edit input { padding: 3px 6px; border: 1px solid #c8c8cf; border-radius: 4px; font: inherit; min-width: 200px; }
 .ai-usage-title {
   font-weight: 600;
   color: #1a4480;

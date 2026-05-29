@@ -2557,6 +2557,24 @@ def api_bank_logout():
     return jsonify({"ok": True})
 
 
+@app.route("/api/bank/profile", methods=["GET", "PATCH"])
+def api_bank_profile():
+    """GET → mon profil ; PATCH `{display_name, institution}` → update."""
+    try:
+        if request.method == "PATCH":
+            body = _json_body()
+            prof = bank_online.update_my_profile(body)
+        else:
+            prof = bank_online.get_my_profile()
+        return jsonify({"ok": True, "profile": prof})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # --------------------------------------------------------------------------
 # Édition assistée par IA (Sonnet/Opus) — un seul appel API par modif.
 # Pas de Claude Code, pas d'agent multi-tours : 1 prompt → tool_use →
