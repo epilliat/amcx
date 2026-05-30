@@ -66,6 +66,11 @@ def _post_auth(path: str, body: dict) -> dict:
             msg = err.get("error_description") or err.get("msg") or err.get("error") or str(err)
         except Exception:
             msg = f"HTTP {e.code}"
+        # Cas spécial : signup désactivé côté Supabase (mode invite-only)
+        low = msg.lower()
+        if "signup" in low and ("not allowed" in low or "disabled" in low):
+            msg = ("Cette banque est en mode invite-only. Demande à l'admin "
+                   "de t'inviter via le dashboard Supabase.")
         raise BankAuthError(f"Supabase auth : {msg}") from e
     except URLError as e:
         raise BankAuthError(f"Réseau injoignable : {e.reason}") from e
@@ -79,8 +84,11 @@ def send_otp(email: str) -> dict:
     """Envoie un code à 6 chiffres à `email`. Le user le saisit ensuite via
     `verify_otp()`.
 
-    Crée le compte si l'email n'existe pas (`shouldCreateUser: true` est le
-    défaut de l'endpoint /otp).
+    Crée le compte si l'email n'existe pas ET que le signup est autorisé
+    (Dashboard → Auth → Providers → Email → Enable email signups). Si
+    l'instance est en mode invite-only, seuls les emails déjà invités
+    (via Dashboard → Authentication → Users → Invite user) reçoivent un
+    code ; les autres reçoivent une erreur claire.
     """
     email = (email or "").strip().lower()
     if not email or "@" not in email:

@@ -41,10 +41,46 @@ Dashboard → **Authentication → URL Configuration** :
 - **Redirect URLs** : ajouter `http://localhost:5050/api/bank/auth/callback`
   (+ d'autres si tu prévois différents ports).
 
-### 4.a) (Optionnel mais recommandé) Whitelist email académique
+### ⚠ 4.0) Mode invite-only (FORTEMENT recommandé)
+
+**Pourquoi** : par défaut, n'importe qui avec un email valide peut s'inscrire
+— y compris tes étudiants — et lirait les questions `status='public'` AVEC
+leurs réponses correctes (le champ `data` jsonb contient `{correct: true}`
+sur chaque bonne réponse). Catastrophe pour la confidentialité des examens.
+
+**Solution la plus simple** : désactiver le signup public et inviter les
+profs un par un.
+
+1. **Désactiver le signup public** :
+   - Dashboard → Authentication → Providers → Email
+   - **Décocher "Enable email signups"**
+   - Save
+
+2. **Inviter un collègue** (chaque prof) :
+   - Dashboard → Authentication → Users
+   - Bouton **Invite user** → entrer son email pro → Supabase envoie un mail
+     avec un lien d'invitation
+   - Le prof clique → arrive sur une page de set-up (Supabase hosted) →
+     reçoit son magic link → peut se connecter à AMCx normalement
+
+3. **Effet sur AMCx** : un étudiant qui essaie `Recevoir un code` reçoit un
+   message d'erreur clair (`Signups not allowed for this instance`).
+
+→ Coût : 30 sec par invitation. Aucun code AMCx à modifier. Tu peux ouvrir
+le signup public plus tard si la communauté devient mature et que tu veux
+laisser grandir.
+
+### Alternatives (si invite-only ne convient pas)
+
+### 4.a) Whitelist email académique (alternative à invite-only)
+
+Si tu préfères ouvrir le signup à toute la communauté académique au lieu
+d'inviter un par un, tu peux filtrer par domaine. **Attention** : ne filtre
+pas si les profs ET les étudiants partagent le même domaine
+(ex. tous les deux `@ensai.fr`) — dans ce cas seul invite-only protège.
 
 Pour bloquer les signups Gmail/Yahoo/mailinator et garder une communauté
-de profs uniquement :
+académique :
 1. Ouvrir [schema.sql](schema.sql), section `0)`.
 2. **Décommenter** le bloc `check_academic_email()` + trigger.
 3. **Éditer la regex** pour ajouter/retirer des domaines selon ta cible

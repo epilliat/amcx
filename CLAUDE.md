@@ -645,6 +645,17 @@ un code 6 chiffres → user le saisit → `POST /api/bank/auth/verify-otp
 (`bank_user_token`, `bank_refresh_token`, `bank_user_id`, `bank_user_email`).
 Refresh transparent via `bank_auth.refresh_token_if_possible()` au 1er 401.
 
+**⚠ Mode invite-only (FORTEMENT recommandé)** : par défaut, n'importe qui
+peut signup avec son email — y compris tes étudiants — et lirait les
+questions `status='public'` AVEC les bonnes réponses (champ `data` jsonb
+contient `correct: true/false`). Catastrophe pour la confidentialité.
+Solution : Dashboard Supabase → Authentication → Providers → Email →
+**décocher "Enable email signups"** + inviter chaque prof via
+Authentication → Users → Invite user. Le message d'erreur côté AMCx est
+clair pour l'étudiant qui essaierait (`"Cette banque est en mode invite-only.
+Demande à l'admin de t'inviter."`). Voir
+[supabase/README.md § 4.0](supabase/README.md).
+
 **Routes additionnelles** :
 - `GET  /api/bank/auth-status` → `{mode, configured, logged_in, user_id, email}`
 - `POST /api/bank/auth/send-otp` `{email}` → code 6 chiffres par mail
