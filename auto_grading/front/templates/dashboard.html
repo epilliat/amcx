@@ -212,35 +212,6 @@
         <span class="settings-hint">↵ Entrée dans un champ = Appliquer</span>
       </div>
 
-      <details class="ai-settings">
-        <summary><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon" alt=""> IA — édition assistée des questions (clé API Anthropic)</summary>
-        <div class="ai-settings-body">
-          <label>Clé API
-            <input type="password" id="cfg-ai-key" autocomplete="off"
-                   placeholder="sk-ant-…"
-                   value="{{ cfg.anthropic_api_key|default('', true) }}"></label>
-          <label>Modèle
-            <select id="cfg-ai-model">
-              {% set sel = cfg.ai_model|default('claude-sonnet-4-6', true) %}
-              <option value="claude-sonnet-4-6" {% if sel == 'claude-sonnet-4-6' %}selected{% endif %}>Sonnet 4.6 (rapide, bon marché)</option>
-              <option value="claude-opus-4-7"   {% if sel == 'claude-opus-4-7'   %}selected{% endif %}>Opus 4.7 (qualité supérieure)</option>
-              <option value="claude-haiku-4-5"  {% if sel == 'claude-haiku-4-5'  %}selected{% endif %}>Haiku 4.5 (le moins cher)</option>
-            </select></label>
-          <button id="cfg-ai-save" class="btn btn-small">Enregistrer</button>
-          <span id="cfg-ai-status" class="settings-hint"></span>
-          <span class="settings-hint">
-            Crée une clé sur
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
-            Coût typique : ~1¢ par modification de question.
-          </span>
-          <div class="ai-usage-widget" id="ai-usage-widget">
-            <span class="ai-usage-title">📊 Consommation session</span>
-            <span id="ai-usage-line">aucun appel</span>
-            <button type="button" class="btn btn-tiny" id="ai-usage-reset">Reset</button>
-          </div>
-        </div>
-      </details>
-
       <details class="bank-settings">
         <summary>📚 Banque de questions — local vs en ligne (Supabase)</summary>
         <div class="bank-settings-body">
@@ -278,9 +249,9 @@
               </div>
 
               <div id="bank-verify-form" style="display:none">
-                <label>Code reçu (6 chiffres)
-                  <input type="text" id="bank-otp-code" maxlength="6"
-                         pattern="[0-9]{6}" placeholder="123456" inputmode="numeric"></label>
+                <label>Code reçu
+                  <input type="text" id="bank-otp-code" maxlength="10"
+                         pattern="[0-9]{4,10}" placeholder="123456" inputmode="numeric"></label>
                 <button id="bank-verify-otp" class="btn btn-primary btn-small">Se connecter</button>
                 <button id="bank-cancel-otp" class="btn btn-small">Annuler</button>
               </div>
@@ -798,48 +769,6 @@ document.getElementById('bank-sync').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
-
-// --- Réglages IA (clé Anthropic + modèle) ---
-document.getElementById('cfg-ai-save').addEventListener('click', async () => {
-  const key = document.getElementById('cfg-ai-key').value.trim();
-  const model = document.getElementById('cfg-ai-model').value;
-  const st = document.getElementById('cfg-ai-status');
-  st.textContent = 'Enregistrement…';
-  const r = await fetch('/api/config', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({anthropic_api_key: key, ai_model: model})
-  });
-  const j = await r.json().catch(() => ({}));
-  st.textContent = r.ok ? '✓ enregistré' : '✘ ' + (j.error || 'erreur');
-});
-
-// --- Compteur de tokens IA (session) ---
-async function refreshAiUsage() {
-  const line = document.getElementById('ai-usage-line');
-  try {
-    const r = await fetch('/api/ai/usage');
-    const u = await r.json();
-    if (!u.n_calls) {
-      line.textContent = 'aucun appel depuis le démarrage';
-      return;
-    }
-    const totalIn = (u.input_tokens || 0) + (u.cache_creation || 0) + (u.cache_read || 0);
-    const cost = u.cost_usd != null ? ' · $' + u.cost_usd.toFixed(4) : '';
-    const breakdown = Object.entries(u.by_model || {}).map(([m, n]) => m + '×' + n).join(', ');
-    line.innerHTML = `${u.n_calls} appel(s) · ${totalIn} input + ${u.output_tokens || 0} output` +
-                     cost + (breakdown ? ` · <em>${breakdown}</em>` : '') +
-                     (u.started_at ? ` · depuis ${u.started_at.slice(11, 16)}` : '');
-  } catch (e) {
-    line.textContent = 'indisponible';
-  }
-}
-document.getElementById('ai-usage-reset').addEventListener('click', async () => {
-  await fetch('/api/ai/usage/reset', {method: 'POST'});
-  refreshAiUsage();
-});
-// Auto-refresh quand on déplie le panel IA
-document.querySelector('.ai-settings')?.addEventListener('toggle', refreshAiUsage);
-refreshAiUsage();
 
 // === Réglages Banque (local / online Supabase) =============================
 
