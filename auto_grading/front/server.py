@@ -1971,6 +1971,24 @@ def zoom_img(batch, page, q, char):
 # Onglet « Sujet » : édition LaTeX d'exam.tex + compilation
 # --------------------------------------------------------------------------
 
+@app.route("/banque")
+def banque_page():
+    """Onglet Banque : gestion (local/online, login OTP, profil, sync stats)
+    + browse compact des questions de la banque active.
+
+    Le browse complet avec import reste dans la modale 📚 Banque de l'onglet
+    Sujet (workflow rapide pendant l'édition).
+    """
+    cfg = load_config()
+    return render_template(
+        "banque.html",
+        cfg=cfg,
+        active="banque",
+        app_name="AMCx",
+        active_project_name=project_state.display_name(config.project_root()),
+    )
+
+
 @app.route("/sujet")
 def sujet_page():
     """Onglet Sujet : édition LaTeX d'exam.tex + bandeau global de config.

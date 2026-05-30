@@ -2721,6 +2721,63 @@ img.case.correct + .case-label { font-weight: bold; }
 .bank-profile-edit label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #666; }
 .bank-profile-edit input { padding: 3px 6px; border: 1px solid #c8c8cf; border-radius: 4px; font: inherit; min-width: 200px; }
 
+/* ============================================================
+ * Onglet Banque (page dédiée)
+ * ============================================================ */
+.banque-header { margin: 16px 24px 8px; }
+.banque-header h1 { margin: 0 0 8px; font-size: 22px; }
+.banque-help { color: #666; font-size: 13px; margin: 0; }
+.banque-help code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+
+.banque-layout {
+  display: grid;
+  grid-template-columns: minmax(380px, 1fr) minmax(380px, 2fr);
+  gap: 16px;
+  margin: 16px 24px 24px;
+}
+.banque-pane {
+  background: #fff;
+  border: 1px solid #e3e4e8;
+  border-radius: 6px;
+  padding: 16px 18px;
+}
+.banque-pane h2 { margin: 0 0 12px; font-size: 16px; color: #333; border-bottom: 1px solid #ecedef; padding-bottom: 6px; }
+.banque-pane h2.banque-h2-sync { margin-top: 24px; }
+.banque-sync-desc { color: #666; font-size: 12px; margin: 0 0 8px; }
+.banque-sync-desc code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+
+.banque-pane-browse { display: flex; flex-direction: column; }
+.banque-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-bottom: 10px; border-bottom: 1px dashed #ecedef; margin-bottom: 10px; }
+.banque-filters input[type=text], .banque-filters select { padding: 4px 6px; border: 1px solid #c8c8cf; border-radius: 4px; font: inherit; font-size: 12px; }
+.banque-filters input[type=text] { flex: 1; min-width: 180px; }
+.banque-filters label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #555; }
+.banque-count { font-size: 11px; color: #888; margin-bottom: 8px; }
+.banque-list { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.banque-empty { color: #888; font-style: italic; padding: 20px; text-align: center; }
+.banque-err { color: #c33; }
+.banque-card {
+  padding: 8px 10px; border: 1px solid #e3e4e8; border-radius: 4px;
+  background: #fafbfc; transition: background .15s;
+}
+.banque-card:hover { background: #f0f3f7; }
+.banque-card-head { display: flex; align-items: center; gap: 8px; }
+.banque-kind-icon { font-size: 14px; color: #666; flex-shrink: 0; }
+.banque-card-title { font-weight: 600; color: #333; flex: 1; }
+.banque-card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; font-size: 11px; color: #777; align-items: center; }
+.banque-author { color: #1f4f9e; font-style: italic; }
+.banque-evals { color: #1e6b3a; }
+.banque-tag { background: #ecedef; color: #555; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+.banque-status-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 500; }
+.banque-status-draft { background: #e8e8ec; color: #555; }
+.banque-status-public { background: #e7f6ec; color: #1e6b3a; }
+.banque-status-archived { background: #f4d6d6; color: #872929; }
+.banque-mine-badge { background: #ffefc9; color: #aa4f00; font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 500; }
+
+/* Responsive : 1 colonne sur petits écrans */
+@media (max-width: 900px) {
+  .banque-layout { grid-template-columns: 1fr; }
+}
+
 /* Phase B — filters online seulement */
 .bank-filter-online-only { display: flex; flex-direction: column; gap: 8px; padding: 8px; background: #f7f8fa; border-left: 3px solid #69b97a; border-radius: 3px; }
 .bank-filter-online-only label { display: flex; align-items: center; gap: 4px; }

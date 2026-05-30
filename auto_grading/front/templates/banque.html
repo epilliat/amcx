@@ -1,0 +1,373 @@
+{% extends "base.html" %}
+{% block title %}Banque — AMCx{% endblock %}
+{% block content %}
+
+<header class="banque-header">
+  <h1>📚 Banque de questions</h1>
+  <p class="banque-help">
+    Gère la banque (locale ou en ligne Supabase) : connexion, profil, sync des stats.
+    Pour <strong>importer</strong> une question dans le sujet courant, va dans
+    <a href="/sujet">Sujet</a> → bouton <code>📚 Banque</code>.
+  </p>
+</header>
+
+<div class="banque-layout">
+
+<!-- =========================================================================
+     Colonne gauche : Connexion + config
+     ========================================================================= -->
+<section class="banque-pane banque-pane-config">
+  <h2>🌐 Connexion</h2>
+
+  <div class="bank-settings-body">
+    <label class="bank-mode-row">
+      <input type="radio" name="bank_mode" value="local"
+             {% if cfg.bank_mode != 'online' %}checked{% endif %}> Local
+      <span class="small">(~/Documents/AMCx-banque/)</span>
+    </label>
+    <label class="bank-mode-row">
+      <input type="radio" name="bank_mode" value="online"
+             {% if cfg.bank_mode == 'online' %}checked{% endif %}> En ligne
+      <span class="small">(Supabase — banque communautaire)</span>
+    </label>
+
+    <div id="bank-online-cfg" class="bank-online-cfg"
+         style="{% if cfg.bank_mode != 'online' %}display:none{% endif %}">
+      <label>URL Supabase
+        <input type="text" id="cfg-bank-url"
+               placeholder="https://abcdefgh.supabase.co"
+               value="{{ cfg.bank_supabase_url|default('', true) }}"></label>
+      <label>Clé anon (publique)
+        <input type="password" id="cfg-bank-anon" autocomplete="off"
+               placeholder="eyJ…"
+               value="{{ cfg.bank_supabase_anon_key|default('', true) }}"></label>
+      <button id="cfg-bank-save" class="btn btn-small">Enregistrer config</button>
+
+      <div class="bank-auth-block" id="bank-auth-block">
+        <div id="bank-auth-status" class="settings-hint">…</div>
+
+        <div id="bank-login-form" style="display:none">
+          <label>Email
+            <input type="email" id="bank-email" placeholder="ton@email.fr"></label>
+          <button id="bank-send-otp" class="btn btn-small">Recevoir un code</button>
+          <span id="bank-otp-status" class="settings-hint"></span>
+        </div>
+
+        <div id="bank-verify-form" style="display:none">
+          <label>Code reçu
+            <input type="text" id="bank-otp-code" maxlength="10"
+                   pattern="[0-9]{4,10}" placeholder="123456" inputmode="numeric"></label>
+          <button id="bank-verify-otp" class="btn btn-primary btn-small">Se connecter</button>
+          <button id="bank-cancel-otp" class="btn btn-small">Annuler</button>
+        </div>
+
+        <div id="bank-logout-form" style="display:none">
+          <div class="bank-profile-edit" id="bank-profile-edit">
+            <label>Nom affiché
+              <input type="text" id="bank-profile-name" autocomplete="off"
+                     placeholder="Prénom Nom"></label>
+            <label>Institution (optionnel)
+              <input type="text" id="bank-profile-inst" autocomplete="off"
+                     placeholder="ENSAI Rennes"></label>
+            <button id="bank-profile-save" class="btn btn-small">Enregistrer</button>
+            <span id="bank-profile-status" class="settings-hint"></span>
+          </div>
+          <button id="bank-logout" class="btn btn-small">Se déconnecter</button>
+        </div>
+      </div>
+
+      <span class="settings-hint">
+        Setup détaillé : <a href="https://github.com/epilliat/amcx/blob/main/supabase/README.md"
+                            target="_blank" rel="noopener">supabase/README.md</a>
+      </span>
+    </div>
+  </div>
+
+  <h2 class="banque-h2-sync">📊 Synchroniser les stats</h2>
+  <p class="banque-sync-desc">
+    Recalcule <code>n_eval</code>, <code>n_perfect</code>, taux de réussite des
+    questions importées dans le projet
+    <strong>{{ active_project_name }}</strong> depuis <code>raw_responses/</code>.
+    Idempotent (remplace l'entrée par projet).
+  </p>
+  <button id="banque-sync-btn" class="btn btn-primary"
+          title="Recalcule les stats des questions importées depuis la banque (depuis les copies du projet courant)">📚 Mettre à jour la banque</button>
+  <span id="banque-sync-status" class="settings-hint"></span>
+</section>
+
+<!-- =========================================================================
+     Colonne droite : Browse compact
+     ========================================================================= -->
+<section class="banque-pane banque-pane-browse">
+  <h2>📚 Questions visibles dans la banque active</h2>
+  <div class="banque-filters">
+    <input type="text" id="bq-search" placeholder="🔍 titre ou tag…" autocomplete="off">
+    <select id="bq-kind">
+      <option value="">Tous types</option>
+      <option value="question_qcm">QCM</option>
+      <option value="question_open">Ouverte</option>
+      <option value="answerbox">Zone réponse</option>
+      <option value="text">Texte</option>
+    </select>
+    <label class="bq-online-only"><input type="checkbox" id="bq-mine"> Mes questions seulement</label>
+    <label class="bq-online-only"><input type="checkbox" id="bq-fav"> ❤ Mes favoris</label>
+  </div>
+  <div class="banque-count" id="bq-count">—</div>
+  <div class="banque-list" id="bq-list">
+    <p class="banque-empty">Chargement…</p>
+  </div>
+</section>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// === Banque tab : config + login + sync + browse compact ====================
+
+const bankCfgEl    = document.getElementById('bank-online-cfg');
+const bankStatusEl = document.getElementById('bank-auth-status');
+const loginForm    = document.getElementById('bank-login-form');
+const verifyForm   = document.getElementById('bank-verify-form');
+const logoutForm   = document.getElementById('bank-logout-form');
+
+let bankMode   = '{{ cfg.bank_mode|default("local") }}';
+let bankUserId = '';
+
+// --- Switch mode local ↔ online ----------------------------------------
+document.querySelectorAll('input[name="bank_mode"]').forEach(r => {
+  r.addEventListener('change', async (e) => {
+    const mode = e.target.value;
+    bankMode = mode;
+    bankCfgEl.style.display = (mode === 'online') ? '' : 'none';
+    await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bank_mode: mode})
+    });
+    refreshAuthStatus();
+    reloadBrowse();
+  });
+});
+
+// --- Sauvegarde URL + clé anon -----------------------------------------
+document.getElementById('cfg-bank-save')?.addEventListener('click', async () => {
+  const url = document.getElementById('cfg-bank-url').value.trim();
+  const anon = document.getElementById('cfg-bank-anon').value.trim();
+  const r = await fetch('/api/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bank_supabase_url: url, bank_supabase_anon_key: anon})
+  });
+  if (r.ok) refreshAuthStatus();
+  else {
+    const j = await r.json().catch(() => ({}));
+    bankStatusEl.textContent = '✘ ' + (j.error || 'erreur');
+  }
+});
+
+// --- Auth status ------------------------------------------------------
+async function refreshAuthStatus() {
+  try {
+    const r = await fetch('/api/bank/auth-status');
+    const s = await r.json();
+    bankMode = s.mode || 'local';
+    bankUserId = s.user_id || '';
+    toggleOnlineOnly(bankMode === 'online' && s.logged_in);
+    if (!s.configured) {
+      bankStatusEl.textContent = '⚠ Configure d\'abord URL + clé anon Supabase ci-dessus.';
+      loginForm.style.display = 'none';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = 'none';
+      return;
+    }
+    if (s.logged_in) {
+      bankStatusEl.innerHTML = '✓ Connecté en tant que <b>' + (s.email || '?') + '</b>';
+      loginForm.style.display = 'none';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = '';
+      try {
+        const pr = await fetch('/api/bank/profile');
+        const pj = await pr.json();
+        if (pr.ok && pj.profile) {
+          document.getElementById('bank-profile-name').value = pj.profile.display_name || '';
+          document.getElementById('bank-profile-inst').value = pj.profile.institution || '';
+        }
+      } catch (e) {}
+    } else {
+      bankStatusEl.textContent = 'Pas connecté.';
+      loginForm.style.display = '';
+      verifyForm.style.display = 'none';
+      logoutForm.style.display = 'none';
+    }
+  } catch (e) {
+    bankStatusEl.textContent = '✘ statut indisponible';
+  }
+}
+
+function toggleOnlineOnly(show) {
+  document.querySelectorAll('.bq-online-only').forEach(el => {
+    el.style.display = show ? '' : 'none';
+  });
+}
+
+// --- Login OTP ---------------------------------------------------------
+document.getElementById('bank-send-otp')?.addEventListener('click', async () => {
+  const email = document.getElementById('bank-email').value.trim();
+  const st = document.getElementById('bank-otp-status');
+  st.textContent = 'Envoi…';
+  const r = await fetch('/api/bank/auth/send-otp', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({email})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    st.textContent = '✓ ' + j.msg;
+    loginForm.style.display = 'none';
+    verifyForm.style.display = '';
+  } else {
+    st.textContent = '✘ ' + (j.error || 'erreur');
+  }
+});
+
+document.getElementById('bank-verify-otp')?.addEventListener('click', async () => {
+  const email = document.getElementById('bank-email').value.trim();
+  const code = document.getElementById('bank-otp-code').value.trim();
+  const r = await fetch('/api/bank/auth/verify-otp', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({email, code})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    refreshAuthStatus();
+    reloadBrowse();
+  } else {
+    alert('Échec : ' + (j.error || 'erreur'));
+  }
+});
+
+document.getElementById('bank-cancel-otp')?.addEventListener('click', () => {
+  verifyForm.style.display = 'none';
+  loginForm.style.display = '';
+  document.getElementById('bank-otp-status').textContent = '';
+});
+
+document.getElementById('bank-logout')?.addEventListener('click', async () => {
+  await fetch('/api/bank/auth/logout', {method: 'POST'});
+  refreshAuthStatus();
+  reloadBrowse();
+});
+
+document.getElementById('bank-profile-save')?.addEventListener('click', async () => {
+  const st = document.getElementById('bank-profile-status');
+  const name = document.getElementById('bank-profile-name').value.trim();
+  const inst = document.getElementById('bank-profile-inst').value.trim();
+  if (!name) { st.textContent = '✘ Nom requis'; return; }
+  st.textContent = 'Enregistrement…';
+  const r = await fetch('/api/bank/profile', {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({display_name: name, institution: inst})
+  });
+  const j = await r.json().catch(() => ({}));
+  st.textContent = r.ok ? '✓ enregistré' : '✘ ' + (j.error || 'erreur');
+  if (r.ok) reloadBrowse();  // refresh author display
+});
+
+// --- Sync stats du projet courant -------------------------------------
+document.getElementById('banque-sync-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('banque-sync-btn');
+  const st = document.getElementById('banque-sync-status');
+  btn.disabled = true;
+  st.textContent = 'Synchro en cours…';
+  try {
+    const r = await fetch('/api/bank/sync', {method: 'POST'});
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) {
+      st.textContent = `✓ ${j.updated} mises à jour · ${j.skipped} skips · ${j.total_copies} copies scannées`;
+    } else {
+      st.textContent = '✘ ' + (j.error || 'erreur');
+    }
+  } catch (e) {
+    st.textContent = '✘ ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// --- Browse compact -----------------------------------------------------
+async function reloadBrowse() {
+  const q    = document.getElementById('bq-search').value.trim();
+  const kind = document.getElementById('bq-kind').value;
+  const fav  = document.getElementById('bq-fav').checked;
+  const mine = document.getElementById('bq-mine').checked;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (kind) params.set('kind', kind);
+  if (bankMode === 'online' && fav) params.set('mes_favoris', '1');
+  // "Mes questions seulement" : filtre client-side après load (on récupère author_id)
+  let r;
+  try { r = await fetch('/api/bank?' + params.toString()); }
+  catch (e) { renderList([], 'Erreur réseau : ' + e); return; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { renderList([], j.error || 'Erreur'); return; }
+  let items = j.items || [];
+  if (mine && bankUserId) items = items.filter(it => it.author_id === bankUserId);
+  renderList(items, null);
+}
+
+function renderList(items, err) {
+  const host = document.getElementById('bq-list');
+  const cnt  = document.getElementById('bq-count');
+  if (err) { host.innerHTML = '<p class="banque-empty banque-err">' + err + '</p>'; cnt.textContent = ''; return; }
+  cnt.textContent = items.length + ' question(s)';
+  if (!items.length) {
+    host.innerHTML = '<p class="banque-empty">Aucune question (ou aucun filtre ne correspond).</p>';
+    return;
+  }
+  host.innerHTML = '';
+  items.forEach(it => {
+    const card = document.createElement('div');
+    card.className = 'banque-card banque-card-' + (it.kind || 'text');
+    const stats = it.stats || {};
+    const summary = stats.by_project ?
+      Object.values(stats.by_project).reduce((a, s) => a + (s.n_eval || 0), 0) : 0;
+    const isMine = it.author_id === bankUserId;
+    const statusBadge = it.status ?
+      '<span class="banque-status-badge banque-status-' + it.status + '">' + it.status + '</span>' : '';
+    card.innerHTML =
+      '<div class="banque-card-head">' +
+        '<span class="banque-kind-icon">' + kindIcon(it.kind) + '</span>' +
+        '<span class="banque-card-title">' + escapeHtml(it.title || '(sans titre)') + '</span>' +
+        statusBadge +
+        (isMine ? '<span class="banque-mine-badge">★ moi</span>' : '') +
+      '</div>' +
+      '<div class="banque-card-meta">' +
+        (it.author ? '<span class="banque-author">par ' + escapeHtml(it.author) + '</span>' : '') +
+        (summary ? '<span class="banque-evals">📊 ' + summary + ' éval(s)</span>' : '') +
+        ((it.tags || []).map(t => '<span class="banque-tag">' + escapeHtml(t) + '</span>').join('')) +
+      '</div>';
+    host.appendChild(card);
+  });
+}
+
+function kindIcon(kind) {
+  return ({question_qcm: '☑', question_open: '✍', answerbox: '▭', text: '¶'})[kind] || '·';
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// --- Filter triggers ---------------------------------------------------
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+document.getElementById('bq-search').addEventListener('input', debounce(reloadBrowse, 200));
+document.getElementById('bq-kind').addEventListener('change', reloadBrowse);
+document.getElementById('bq-fav').addEventListener('change', reloadBrowse);
+document.getElementById('bq-mine').addEventListener('change', reloadBrowse);
+
+// --- Init -------------------------------------------------------------
+refreshAuthStatus().then(reloadBrowse);
+</script>
+{% endblock %}
