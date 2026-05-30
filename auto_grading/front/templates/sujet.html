@@ -234,6 +234,8 @@
       {% if mode == 'canonical' %}
       <button class="btn" id="openBankBtn" type="button" title="Importer une question depuis la banque">📚 Banque</button>
       {% endif %}
+      <button class="btn" id="sujet-preview-toggle" type="button"
+              title="Afficher/cacher le panneau d'aperçu PDF">👁 Aperçu</button>
       <button class="btn btn-primary" id="save-btn">💾 Sauvegarder</button>
       <button class="btn btn-compile" id="compile-btn">⚙ Compiler</button>
     </div>
@@ -823,75 +825,32 @@ let PDF_V = '{{ pdf_mtime }}';
 const SUJET_MODE = '{{ mode }}';
 const IS_CANONICAL = SUJET_MODE === 'canonical';
 
-// === LaTeX → markdown (best-effort) ==========================================
-function balancedJS(s, i) {
-  let depth = 0;
-  for (let j = i; j < s.length; j++) {
-    if (s[j] === '{') depth++;
-    else if (s[j] === '}') { depth--; if (depth === 0) return [s.slice(i + 1, j), j + 1]; }
-  }
-  return [s.slice(i + 1), s.length];
-}
-function replaceCmd(t, name, fn) {
-  const needle = '\\' + name + '{';
-  let k;
-  while ((k = t.indexOf(needle)) !== -1) {
-    const [inner, after] = balancedJS(t, k + needle.length - 1);
-    t = t.slice(0, k) + fn(inner) + t.slice(after);
-  }
-  return t;
-}
-function textToMd(t) {
-  t = t.replace(/(^|[^\\])%.*/g, '$1');
-  t = replaceCmd(t, 'textbf', x => '**' + x + '**');
-  t = replaceCmd(t, 'textsc', x => x);
-  t = replaceCmd(t, 'emph', x => '*' + x + '*');
-  t = replaceCmd(t, 'textit', x => '*' + x + '*');
-  t = replaceCmd(t, 'text', x => x);
-  t = t.replace(/\\\\/g, '\n');
-  ['\\,', '\\;', '\\!', '\\ ', '\\quad', '\\qquad', '~'].forEach(sp => { t = t.split(sp).join(' '); });
-  t = t.split('\\dots').join('…').split('\\ldots').join('…');
-  t = t.split('\\%').join('%').split('\\&').join('&').split('\\_').join('_');
-  ['\\noindent', '\\smallskip', '\\medskip', '\\bigskip'].forEach(c => { t = t.split(c).join(''); });
-  return t;
-}
-function latexToMd(s) {
-  let out = '', i = 0;
-  while (i < s.length) {
-    if (s[i] === '$') {
-      const delim = s.substr(i, 2) === '$$' ? '$$' : '$';
-      let j = s.indexOf(delim, i + delim.length);
-      if (j === -1) { out += s.slice(i); break; }
-      out += s.slice(i, j + delim.length);
-      i = j + delim.length;
+// === Toggle aperçu PDF (état persisté dans localStorage) ===================
+(function () {
+  const split = document.querySelector('.sujet-split');
+  const btn = document.getElementById('sujet-preview-toggle');
+  if (!split || !btn) return;
+  const KEY = 'sujet_preview';   // 'on' | 'off' (default 'off')
+  function apply(state) {
+    if (state === 'on') {
+      split.classList.remove('no-preview');
+      btn.classList.add('btn-toggle-on');
     } else {
-      let j = s.indexOf('$', i);
-      if (j === -1) j = s.length;
-      out += textToMd(s.slice(i, j));
-      i = j;
+      split.classList.add('no-preview');
+      btn.classList.remove('btn-toggle-on');
     }
   }
-  return out.replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n')
-            .replace(/\n{3,}/g, '\n\n').trim();
-}
-
-// === markdown + maths → HTML ================================================
-function renderMd(src) {
-  const math = [];
-  const tok = i => '@@KX' + i + 'XK@@';
-  let s = (src || '')
-    .replace(/\$\$([\s\S]+?)\$\$/g, function (_, m) {
-      math.push({tex: m, display: true});  return tok(math.length - 1); })
-    .replace(/\$([^\$\n]+?)\$/g, function (_, m) {
-      math.push({tex: m, display: false}); return tok(math.length - 1); });
-  let html;
-  try { html = marked.parse(s); } catch (e) { html = s; }
-  return html.replace(/@@KX(\d+)XK@@/g, function (_, i) {
-    const it = math[+i];
-    try { return katex.renderToString(it.tex, {displayMode: it.display, throwOnError: false}); }
-    catch (e) { return '<code>$' + it.tex + '$</code>'; }
+  apply(localStorage.getItem(KEY) || 'off');
+  btn.addEventListener('click', () => {
+    const next = (localStorage.getItem(KEY) || 'off') === 'on' ? 'off' : 'on';
+    localStorage.setItem(KEY, next);
+    apply(next);
   });
-}
+})();
+
+// === Renderer LaTeX → MD → KaTeX : fourni par static/render.js =============
+// (latexToMd, renderMd, escapeHtml, mdToHtmlSafe sont des globales injectées
+// par render.js chargé dans base.html. Anciennement définies ici.)
 function renderPreview(ta) {
   const pair = ta.closest('.md-pair');
   if (pair) pair.querySelector('.md-view').innerHTML = renderMd(latexToMd(ta.value));
@@ -2516,44 +2475,18 @@ updateSaveBtn();
 
   function renderBankPreview(q) {
     const host = document.getElementById('bank-preview');
-    const d = q.data || {};
-    let html = '<div class="bank-prev-head">' +
-               '<span class="bank-kind-icon">' + _kindIcon(q.kind) + '</span> ' +
-               escapeHtml(q.title || '(sans titre)') +
-               '</div>';
-    if (q.kind === 'question_qcm') {
-      html += '<div class="bank-prev-body" data-render="1"></div>';
-      host.innerHTML = html;
-      const body = host.querySelector('.bank-prev-body');
-      body.innerHTML = mdToHtmlSafe(latexToMd(d.statement || ''));
-      const ul = document.createElement('ol');
-      ul.className = 'bank-prev-answers';
-      (d.answers || []).forEach(a => {
-        const li = document.createElement('li');
-        li.className = a.correct ? 'is-correct' : 'is-wrong';
-        li.innerHTML = (a.correct ? '✓ ' : '· ') + mdToHtmlSafe(latexToMd(a.text || ''));
-        ul.appendChild(li);
-      });
-      body.appendChild(ul);
-      renderMathInElement(body);
-    } else if (q.kind === 'question_open') {
-      html += '<div class="bank-prev-body"></div>';
-      html += '<p class="bank-prev-meta"><em>' + (d.lines || 4) + ' lignes · ' +
-              (d.points != null ? d.points : '?') + ' pts</em></p>';
-      host.innerHTML = html;
-      const body = host.querySelector('.bank-prev-body');
-      body.innerHTML = mdToHtmlSafe(latexToMd(d.statement || ''));
-      renderMathInElement(body);
-    } else if (q.kind === 'answerbox') {
-      html += '<div class="bank-prev-body"><strong>' + escapeHtml(d.title || '') + '</strong><br>' +
-              '<em>' + escapeHtml(d.instructions || '') + '</em></div>' +
-              '<p class="bank-prev-meta">cadre <code>' + escapeHtml(d.height || '5cm') + '</code> · ' +
-              'placement <code>' + escapeHtml(d.placement || 'inline') + '</code></p>';
-      host.innerHTML = html;
-    } else {
-      html += '<pre class="bank-prev-body"><code>' + escapeHtml(d.tex || '') + '</code></pre>';
-      host.innerHTML = html;
-    }
+    // Header (titre + icône kind) + container pour le rendu de la question
+    host.innerHTML = '<div class="bank-prev-head">' +
+                     '<span class="bank-kind-icon">' + _kindIcon(q.kind) + '</span> ' +
+                     escapeHtml(q.title || '(sans titre)') +
+                     '</div>' +
+                     '<div class="bank-prev-body" data-render="1"></div>';
+    // Rendu via AMCxRender (partagé avec /sujet et /banque). KaTeX inclus.
+    AMCxRender.renderQuestion(
+      host.querySelector('.bank-prev-body'),
+      q.data || {},
+      {kind: q.kind, mode: 'view'}
+    );
     const tags = (q.tags || []).map(t => '<span class="bank-tag-badge">' + escapeHtml(t) + '</span>').join('');
     if (tags) host.insertAdjacentHTML('beforeend', '<div class="bank-prev-tags">' + tags + '</div>');
 
@@ -2770,20 +2703,8 @@ updateSaveBtn();
     });
   }
 
-  function mdToHtmlSafe(md) {
-    try { return window.marked ? window.marked.parse(md) : escapeHtml(md); }
-    catch (e) { return escapeHtml(md); }
-  }
-  function escapeHtml(s) {
-    return String(s || '').replace(/[&<>"']/g, c =>
-      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  }
-  function renderMathInElement(root) {
-    if (!window.katex) return;
-    root.querySelectorAll('code, pre code').forEach(() => {});
-    // Détection paresseuse $…$ / $$…$$ — on s'appuie sur latexToMd qui passe
-    // les math en backticks ; sinon laisser tel quel.
-  }
+  // mdToHtmlSafe, escapeHtml : maintenant fournis par static/render.js (globales).
+  // renderMathInElement : était un no-op legacy, retiré.
 
   async function importFromBank(bank_id) {
     setStatus('Insertion depuis la banque…', 'pending');

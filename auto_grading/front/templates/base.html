@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <title>{% block title %}AMCx{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<!-- Renderer partagé (LaTeX → MD → KaTeX) chargé avant tous les scripts de page.
+     Les libs marked + katex sont actuellement chargées par chaque page qui en
+     a besoin (sujet.html, banque.html…) ; render.js attend window.marked /
+     window.katex au moment de l'appel à renderMd, pas à l'init. Donc l'ordre
+     est : render.js (def) puis marked + katex (par page) puis usage. -->
+<script src="{{ url_for('static', filename='render.js') }}"></script>
 {% block head %}{% endblock %}
 </head>
 <body>

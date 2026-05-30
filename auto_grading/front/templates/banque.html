@@ -1,122 +1,151 @@
 {% extends "base.html" %}
 {% block title %}Banque — AMCx{% endblock %}
+
+{% block head %}
+<script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+{% endblock %}
+
 {% block content %}
 
-<header class="banque-header">
-  <h1>📚 Banque de questions</h1>
-  <p class="banque-help">
-    Gère la banque (locale ou en ligne Supabase) : connexion, profil, sync des stats.
-    Pour <strong>importer</strong> une question dans le sujet courant, va dans
-    <a href="/sujet">Sujet</a> → bouton <code>📚 Banque</code>.
-  </p>
-</header>
+<!-- ====================================================================
+     Topbar : titre + dropdown connexion + sync + toggle preview
+     ==================================================================== -->
+<div class="banque-topbar">
+  <h1 class="banque-title">📚 Banque</h1>
 
-<div class="banque-layout">
+  <div class="banque-topbar-actions">
+    <!-- Dropdown Connexion -->
+    <div class="banque-conn-wrap" id="conn-wrap">
+      <button type="button" class="btn" id="conn-toggle" title="Connexion / configuration">
+        🔐 <span id="conn-badge" class="conn-badge conn-badge-local">local</span>
+      </button>
+      <div class="banque-conn-dropdown" id="conn-dropdown" hidden>
+        <div class="bank-settings-body">
+          <label class="bank-mode-row">
+            <input type="radio" name="bank_mode" value="local"
+                   {% if cfg.bank_mode != 'online' %}checked{% endif %}> Local
+            <span class="small">(~/Documents/AMCx-banque/)</span>
+          </label>
+          <label class="bank-mode-row">
+            <input type="radio" name="bank_mode" value="online"
+                   {% if cfg.bank_mode == 'online' %}checked{% endif %}> En ligne
+            <span class="small">(Supabase — banque communautaire)</span>
+          </label>
 
-<!-- =========================================================================
-     Colonne gauche : Connexion + config
-     ========================================================================= -->
-<section class="banque-pane banque-pane-config">
-  <h2>🌐 Connexion</h2>
+          <div id="bank-online-cfg" class="bank-online-cfg"
+               style="{% if cfg.bank_mode != 'online' %}display:none{% endif %}">
+            <label>URL Supabase
+              <input type="text" id="cfg-bank-url"
+                     placeholder="https://abcdefgh.supabase.co"
+                     value="{{ cfg.bank_supabase_url|default('', true) }}"></label>
+            <label>Clé anon (publique)
+              <input type="password" id="cfg-bank-anon" autocomplete="off"
+                     placeholder="eyJ…"
+                     value="{{ cfg.bank_supabase_anon_key|default('', true) }}"></label>
+            <button id="cfg-bank-save" class="btn btn-small">Enregistrer config</button>
 
-  <div class="bank-settings-body">
-    <label class="bank-mode-row">
-      <input type="radio" name="bank_mode" value="local"
-             {% if cfg.bank_mode != 'online' %}checked{% endif %}> Local
-      <span class="small">(~/Documents/AMCx-banque/)</span>
-    </label>
-    <label class="bank-mode-row">
-      <input type="radio" name="bank_mode" value="online"
-             {% if cfg.bank_mode == 'online' %}checked{% endif %}> En ligne
-      <span class="small">(Supabase — banque communautaire)</span>
-    </label>
+            <div class="bank-auth-block" id="bank-auth-block">
+              <div id="bank-auth-status" class="settings-hint">…</div>
 
-    <div id="bank-online-cfg" class="bank-online-cfg"
-         style="{% if cfg.bank_mode != 'online' %}display:none{% endif %}">
-      <label>URL Supabase
-        <input type="text" id="cfg-bank-url"
-               placeholder="https://abcdefgh.supabase.co"
-               value="{{ cfg.bank_supabase_url|default('', true) }}"></label>
-      <label>Clé anon (publique)
-        <input type="password" id="cfg-bank-anon" autocomplete="off"
-               placeholder="eyJ…"
-               value="{{ cfg.bank_supabase_anon_key|default('', true) }}"></label>
-      <button id="cfg-bank-save" class="btn btn-small">Enregistrer config</button>
+              <div id="bank-login-form" style="display:none">
+                <label>Email
+                  <input type="email" id="bank-email" placeholder="ton@email.fr"></label>
+                <button id="bank-send-otp" class="btn btn-small">Recevoir un code</button>
+                <span id="bank-otp-status" class="settings-hint"></span>
+              </div>
 
-      <div class="bank-auth-block" id="bank-auth-block">
-        <div id="bank-auth-status" class="settings-hint">…</div>
+              <div id="bank-verify-form" style="display:none">
+                <label>Code reçu
+                  <input type="text" id="bank-otp-code" maxlength="10"
+                         pattern="[0-9]{4,10}" placeholder="123456" inputmode="numeric"></label>
+                <button id="bank-verify-otp" class="btn btn-primary btn-small">Se connecter</button>
+                <button id="bank-cancel-otp" class="btn btn-small">Annuler</button>
+              </div>
 
-        <div id="bank-login-form" style="display:none">
-          <label>Email
-            <input type="email" id="bank-email" placeholder="ton@email.fr"></label>
-          <button id="bank-send-otp" class="btn btn-small">Recevoir un code</button>
-          <span id="bank-otp-status" class="settings-hint"></span>
-        </div>
+              <div id="bank-logout-form" style="display:none">
+                <div class="bank-profile-edit" id="bank-profile-edit">
+                  <label>Nom affiché
+                    <input type="text" id="bank-profile-name" autocomplete="off"
+                           placeholder="Prénom Nom"></label>
+                  <label>Institution (optionnel)
+                    <input type="text" id="bank-profile-inst" autocomplete="off"
+                           placeholder="ENSAI Rennes"></label>
+                  <button id="bank-profile-save" class="btn btn-small">Enregistrer</button>
+                  <span id="bank-profile-status" class="settings-hint"></span>
+                </div>
+                <button id="bank-logout" class="btn btn-small">Se déconnecter</button>
+              </div>
+            </div>
 
-        <div id="bank-verify-form" style="display:none">
-          <label>Code reçu
-            <input type="text" id="bank-otp-code" maxlength="10"
-                   pattern="[0-9]{4,10}" placeholder="123456" inputmode="numeric"></label>
-          <button id="bank-verify-otp" class="btn btn-primary btn-small">Se connecter</button>
-          <button id="bank-cancel-otp" class="btn btn-small">Annuler</button>
-        </div>
-
-        <div id="bank-logout-form" style="display:none">
-          <div class="bank-profile-edit" id="bank-profile-edit">
-            <label>Nom affiché
-              <input type="text" id="bank-profile-name" autocomplete="off"
-                     placeholder="Prénom Nom"></label>
-            <label>Institution (optionnel)
-              <input type="text" id="bank-profile-inst" autocomplete="off"
-                     placeholder="ENSAI Rennes"></label>
-            <button id="bank-profile-save" class="btn btn-small">Enregistrer</button>
-            <span id="bank-profile-status" class="settings-hint"></span>
+            <span class="settings-hint">
+              Setup : <a href="https://github.com/epilliat/amcx/blob/main/supabase/README.md"
+                        target="_blank" rel="noopener">supabase/README.md</a>
+            </span>
           </div>
-          <button id="bank-logout" class="btn btn-small">Se déconnecter</button>
         </div>
       </div>
-
-      <span class="settings-hint">
-        Setup détaillé : <a href="https://github.com/epilliat/amcx/blob/main/supabase/README.md"
-                            target="_blank" rel="noopener">supabase/README.md</a>
-      </span>
     </div>
-  </div>
 
-  <h2 class="banque-h2-sync">📊 Synchroniser les stats</h2>
-  <p class="banque-sync-desc">
-    Recalcule <code>n_eval</code>, <code>n_perfect</code>, taux de réussite des
-    questions importées dans le projet
-    <strong>{{ active_project_name }}</strong> depuis <code>raw_responses/</code>.
-    Idempotent (remplace l'entrée par projet).
-  </p>
-  <button id="banque-sync-btn" class="btn btn-primary"
-          title="Recalcule les stats des questions importées depuis la banque (depuis les copies du projet courant)">📚 Mettre à jour la banque</button>
-  <span id="banque-sync-status" class="settings-hint"></span>
-</section>
+    <!-- Sync stats -->
+    <button type="button" class="btn" id="banque-sync-btn"
+            title="Recalcule les stats des questions importées (projet courant)">
+      📊 Sync stats
+    </button>
+    <span id="banque-sync-status" class="settings-hint"></span>
 
-<!-- =========================================================================
-     Colonne droite : Browse compact
-     ========================================================================= -->
-<section class="banque-pane banque-pane-browse">
-  <h2>📚 Questions visibles dans la banque active</h2>
-  <div class="banque-filters">
-    <input type="text" id="bq-search" placeholder="🔍 titre ou tag…" autocomplete="off">
-    <select id="bq-kind">
-      <option value="">Tous types</option>
-      <option value="question_qcm">QCM</option>
-      <option value="question_open">Ouverte</option>
-      <option value="answerbox">Zone réponse</option>
-      <option value="text">Texte</option>
-    </select>
-    <label class="bq-online-only"><input type="checkbox" id="bq-mine"> Mes questions seulement</label>
-    <label class="bq-online-only"><input type="checkbox" id="bq-fav"> ❤ Mes favoris</label>
+    <!-- Toggle preview -->
+    <button type="button" class="btn" id="banque-preview-toggle"
+            title="Afficher/cacher le panneau d'aperçu grand format">👁 Aperçu</button>
   </div>
-  <div class="banque-count" id="bq-count">—</div>
-  <div class="banque-list" id="bq-list">
-    <p class="banque-empty">Chargement…</p>
-  </div>
-</section>
+</div>
+
+<!-- ====================================================================
+     Layout 3 zones : liste gauche | détail centre | aperçu droit
+     ==================================================================== -->
+<div class="banque-split no-preview">
+
+  <!-- Panel gauche : filtres + liste compacte -->
+  <aside class="banque-list-panel">
+    <div class="banque-filters-compact">
+      <input type="text" id="bq-search" placeholder="🔍 titre ou tag…" autocomplete="off">
+      <div class="bq-filter-row">
+        <select id="bq-kind">
+          <option value="">Tous types</option>
+          <option value="question_qcm">QCM</option>
+          <option value="question_open">Ouverte</option>
+          <option value="answerbox">Zone réponse</option>
+          <option value="text">Texte</option>
+        </select>
+      </div>
+      <div class="bq-filter-row bq-online-only" style="display:none">
+        <label><input type="checkbox" id="bq-mine"> ★ Mes questions</label>
+        <label><input type="checkbox" id="bq-fav"> ❤ Favoris</label>
+        <label><input type="checkbox" id="bq-drafts"> 📝 Brouillons</label>
+      </div>
+      <div class="bq-filter-row">
+        <input type="text" id="bq-mon-tag" placeholder="mon tag perso…"
+               class="bq-online-only" style="display:none" autocomplete="off">
+      </div>
+    </div>
+
+    <div class="banque-count" id="bq-count">—</div>
+    <div class="banque-list-rows" id="bq-list">
+      <p class="banque-empty">Chargement…</p>
+    </div>
+  </aside>
+
+  <!-- Zone centrale : détail de la question sélectionnée -->
+  <section class="banque-detail-pane" id="bq-detail">
+    <p class="banque-empty banque-detail-placeholder">
+      Sélectionne une question à gauche pour la visualiser.
+    </p>
+  </section>
+
+  <!-- Panel droit (toggle) : aperçu grand format -->
+  <aside class="banque-preview-pane" id="bq-preview">
+    <p class="banque-empty">Aperçu grand format. Sélectionne une question.</p>
+  </aside>
 
 </div>
 
@@ -124,33 +153,54 @@
 
 {% block scripts %}
 <script>
-// === Banque tab : config + login + sync + browse compact ====================
+// ============================================================================
+// Banque — gestion + browse + détail + preview toggle
+// ============================================================================
 
-const bankCfgEl    = document.getElementById('bank-online-cfg');
-const bankStatusEl = document.getElementById('bank-auth-status');
-const loginForm    = document.getElementById('bank-login-form');
-const verifyForm   = document.getElementById('bank-verify-form');
-const logoutForm   = document.getElementById('bank-logout-form');
-
-let bankMode   = '{{ cfg.bank_mode|default("local") }}';
+const ACTIVE_PROJECT = '{{ active_project_name|default("") }}';
+let bankMode = '{{ cfg.bank_mode|default("local") }}';
 let bankUserId = '';
+let currentQuestion = null;  // question affichée dans le détail
 
-// --- Switch mode local ↔ online ----------------------------------------
+// === DOM refs =============================================================
+const splitEl       = document.querySelector('.banque-split');
+const connWrap      = document.getElementById('conn-wrap');
+const connToggle    = document.getElementById('conn-toggle');
+const connDropdown  = document.getElementById('conn-dropdown');
+const connBadge     = document.getElementById('conn-badge');
+const bankCfgEl     = document.getElementById('bank-online-cfg');
+const bankStatusEl  = document.getElementById('bank-auth-status');
+const loginForm     = document.getElementById('bank-login-form');
+const verifyForm    = document.getElementById('bank-verify-form');
+const logoutForm    = document.getElementById('bank-logout-form');
+
+// ============================================================================
+// 1. Dropdown Connexion (open/close + click-outside)
+// ============================================================================
+connToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  connDropdown.hidden = !connDropdown.hidden;
+  if (!connDropdown.hidden) refreshAuthStatus();
+});
+document.addEventListener('click', (e) => {
+  if (!connDropdown.hidden && !connWrap.contains(e.target)) connDropdown.hidden = true;
+});
+
+// === Switch mode local ↔ online ============================================
 document.querySelectorAll('input[name="bank_mode"]').forEach(r => {
   r.addEventListener('change', async (e) => {
-    const mode = e.target.value;
-    bankMode = mode;
-    bankCfgEl.style.display = (mode === 'online') ? '' : 'none';
+    bankMode = e.target.value;
+    bankCfgEl.style.display = (bankMode === 'online') ? '' : 'none';
     await fetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({bank_mode: mode})
+      body: JSON.stringify({bank_mode: bankMode})
     });
     refreshAuthStatus();
-    reloadBrowse();
+    reloadList();
   });
 });
 
-// --- Sauvegarde URL + clé anon -----------------------------------------
+// === Sauvegarde URL + clé anon =============================================
 document.getElementById('cfg-bank-save')?.addEventListener('click', async () => {
   const url = document.getElementById('cfg-bank-url').value.trim();
   const anon = document.getElementById('cfg-bank-anon').value.trim();
@@ -165,16 +215,34 @@ document.getElementById('cfg-bank-save')?.addEventListener('click', async () => 
   }
 });
 
-// --- Auth status ------------------------------------------------------
+// === Auth status (refresh dropdown + badge) ===============================
 async function refreshAuthStatus() {
   try {
     const r = await fetch('/api/bank/auth-status');
     const s = await r.json();
     bankMode = s.mode || 'local';
     bankUserId = s.user_id || '';
-    toggleOnlineOnly(bankMode === 'online' && s.logged_in);
+    // Badge dans le bouton 🔐
+    connBadge.className = 'conn-badge';
+    if (s.mode === 'online') {
+      if (s.logged_in) {
+        connBadge.classList.add('conn-badge-online');
+        connBadge.textContent = s.email || 'online';
+      } else {
+        connBadge.classList.add('conn-badge-offline');
+        connBadge.textContent = 'non connecté';
+      }
+    } else {
+      connBadge.classList.add('conn-badge-local');
+      connBadge.textContent = 'local';
+    }
+    // Filtres online-only
+    document.querySelectorAll('.bq-online-only').forEach(el => {
+      el.style.display = (s.mode === 'online' && s.logged_in) ? '' : 'none';
+    });
+    // Détail du dropdown
     if (!s.configured) {
-      bankStatusEl.textContent = '⚠ Configure d\'abord URL + clé anon Supabase ci-dessus.';
+      bankStatusEl.textContent = '⚠ Configure d\'abord URL + clé anon Supabase.';
       loginForm.style.display = 'none';
       verifyForm.style.display = 'none';
       logoutForm.style.display = 'none';
@@ -204,13 +272,7 @@ async function refreshAuthStatus() {
   }
 }
 
-function toggleOnlineOnly(show) {
-  document.querySelectorAll('.bq-online-only').forEach(el => {
-    el.style.display = show ? '' : 'none';
-  });
-}
-
-// --- Login OTP ---------------------------------------------------------
+// === Login OTP =============================================================
 document.getElementById('bank-send-otp')?.addEventListener('click', async () => {
   const email = document.getElementById('bank-email').value.trim();
   const st = document.getElementById('bank-otp-status');
@@ -228,7 +290,6 @@ document.getElementById('bank-send-otp')?.addEventListener('click', async () => 
     st.textContent = '✘ ' + (j.error || 'erreur');
   }
 });
-
 document.getElementById('bank-verify-otp')?.addEventListener('click', async () => {
   const email = document.getElementById('bank-email').value.trim();
   const code = document.getElementById('bank-otp-code').value.trim();
@@ -237,26 +298,19 @@ document.getElementById('bank-verify-otp')?.addEventListener('click', async () =
     body: JSON.stringify({email, code})
   });
   const j = await r.json().catch(() => ({}));
-  if (r.ok) {
-    refreshAuthStatus();
-    reloadBrowse();
-  } else {
-    alert('Échec : ' + (j.error || 'erreur'));
-  }
+  if (r.ok) { refreshAuthStatus(); reloadList(); }
+  else alert('Échec : ' + (j.error || 'erreur'));
 });
-
 document.getElementById('bank-cancel-otp')?.addEventListener('click', () => {
   verifyForm.style.display = 'none';
   loginForm.style.display = '';
   document.getElementById('bank-otp-status').textContent = '';
 });
-
 document.getElementById('bank-logout')?.addEventListener('click', async () => {
   await fetch('/api/bank/auth/logout', {method: 'POST'});
   refreshAuthStatus();
-  reloadBrowse();
+  reloadList();
 });
-
 document.getElementById('bank-profile-save')?.addEventListener('click', async () => {
   const st = document.getElementById('bank-profile-status');
   const name = document.getElementById('bank-profile-name').value.trim();
@@ -269,10 +323,12 @@ document.getElementById('bank-profile-save')?.addEventListener('click', async ()
   });
   const j = await r.json().catch(() => ({}));
   st.textContent = r.ok ? '✓ enregistré' : '✘ ' + (j.error || 'erreur');
-  if (r.ok) reloadBrowse();  // refresh author display
+  if (r.ok) reloadList();
 });
 
-// --- Sync stats du projet courant -------------------------------------
+// ============================================================================
+// 2. Sync stats du projet courant
+// ============================================================================
 document.getElementById('banque-sync-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('banque-sync-btn');
   const st = document.getElementById('banque-sync-status');
@@ -282,7 +338,9 @@ document.getElementById('banque-sync-btn')?.addEventListener('click', async () =
     const r = await fetch('/api/bank/sync', {method: 'POST'});
     const j = await r.json().catch(() => ({}));
     if (r.ok) {
-      st.textContent = `✓ ${j.updated} mises à jour · ${j.skipped} skips · ${j.total_copies} copies scannées`;
+      st.textContent = j.updated > 0
+        ? `✓ ${j.updated} mises à jour · ${j.total_copies} copies`
+        : (j.msg || '✓ aucune question à sync');
     } else {
       st.textContent = '✘ ' + (j.error || 'erreur');
     }
@@ -290,20 +348,53 @@ document.getElementById('banque-sync-btn')?.addEventListener('click', async () =
     st.textContent = '✘ ' + e;
   } finally {
     btn.disabled = false;
+    setTimeout(() => { st.textContent = ''; }, 4000);
   }
 });
 
-// --- Browse compact -----------------------------------------------------
-async function reloadBrowse() {
+// ============================================================================
+// 3. Toggle aperçu (panel droit)
+// ============================================================================
+const previewBtn = document.getElementById('banque-preview-toggle');
+const PREVIEW_KEY = 'banque_preview';
+function applyPreview(state) {
+  if (state === 'on') {
+    splitEl.classList.remove('no-preview');
+    previewBtn.classList.add('btn-toggle-on');
+    if (currentQuestion) renderPreviewPane(currentQuestion);
+  } else {
+    splitEl.classList.add('no-preview');
+    previewBtn.classList.remove('btn-toggle-on');
+  }
+}
+applyPreview(localStorage.getItem(PREVIEW_KEY) || 'off');
+previewBtn.addEventListener('click', () => {
+  const next = (localStorage.getItem(PREVIEW_KEY) || 'off') === 'on' ? 'off' : 'on';
+  localStorage.setItem(PREVIEW_KEY, next);
+  applyPreview(next);
+});
+
+// ============================================================================
+// 4. Liste gauche : load + filter + click
+// ============================================================================
+
+const KIND_ICON = {question_qcm:'☑', question_open:'✍', answerbox:'▭', text:'¶'};
+
+async function reloadList() {
   const q    = document.getElementById('bq-search').value.trim();
   const kind = document.getElementById('bq-kind').value;
   const fav  = document.getElementById('bq-fav').checked;
   const mine = document.getElementById('bq-mine').checked;
+  const drafts = document.getElementById('bq-drafts').checked;
+  const monTag = document.getElementById('bq-mon-tag').value.trim();
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   if (kind) params.set('kind', kind);
-  if (bankMode === 'online' && fav) params.set('mes_favoris', '1');
-  // "Mes questions seulement" : filtre client-side après load (on récupère author_id)
+  if (bankMode === 'online') {
+    if (fav) params.set('mes_favoris', '1');
+    if (monTag) params.set('mon_tag', monTag);
+    if (drafts) params.set('status', 'draft');
+  }
   let r;
   try { r = await fetch('/api/bank?' + params.toString()); }
   catch (e) { renderList([], 'Erreur réseau : ' + e); return; }
@@ -316,58 +407,340 @@ async function reloadBrowse() {
 
 function renderList(items, err) {
   const host = document.getElementById('bq-list');
-  const cnt  = document.getElementById('bq-count');
+  const cnt = document.getElementById('bq-count');
   if (err) { host.innerHTML = '<p class="banque-empty banque-err">' + err + '</p>'; cnt.textContent = ''; return; }
   cnt.textContent = items.length + ' question(s)';
   if (!items.length) {
-    host.innerHTML = '<p class="banque-empty">Aucune question (ou aucun filtre ne correspond).</p>';
+    host.innerHTML = '<p class="banque-empty">Aucune question.</p>';
     return;
   }
   host.innerHTML = '';
   items.forEach(it => {
-    const card = document.createElement('div');
-    card.className = 'banque-card banque-card-' + (it.kind || 'text');
-    const stats = it.stats || {};
-    const summary = stats.by_project ?
-      Object.values(stats.by_project).reduce((a, s) => a + (s.n_eval || 0), 0) : 0;
+    const row = document.createElement('div');
+    row.className = 'banque-q-row';
+    row.dataset.bankId = it.bank_id;
     const isMine = it.author_id === bankUserId;
-    const statusBadge = it.status ?
-      '<span class="banque-status-badge banque-status-' + it.status + '">' + it.status + '</span>' : '';
-    card.innerHTML =
-      '<div class="banque-card-head">' +
-        '<span class="banque-kind-icon">' + kindIcon(it.kind) + '</span>' +
-        '<span class="banque-card-title">' + escapeHtml(it.title || '(sans titre)') + '</span>' +
-        statusBadge +
-        (isMine ? '<span class="banque-mine-badge">★ moi</span>' : '') +
-      '</div>' +
-      '<div class="banque-card-meta">' +
-        (it.author ? '<span class="banque-author">par ' + escapeHtml(it.author) + '</span>' : '') +
-        (summary ? '<span class="banque-evals">📊 ' + summary + ' éval(s)</span>' : '') +
-        ((it.tags || []).map(t => '<span class="banque-tag">' + escapeHtml(t) + '</span>').join('')) +
-      '</div>';
-    host.appendChild(card);
+    row.innerHTML =
+      '<span class="banque-q-icon">' + (KIND_ICON[it.kind] || '·') + '</span>' +
+      '<span class="banque-q-title">' + escapeHtml(it.title || '(sans titre)') + '</span>' +
+      (isMine ? '<span class="banque-q-mine" title="ma question">★</span>' : '') +
+      (it.status && it.status !== 'public' ?
+        '<span class="banque-q-status banque-q-status-' + it.status + '">' + it.status + '</span>' : '');
+    row.addEventListener('click', () => selectQuestion(it.bank_id));
+    host.appendChild(row);
   });
 }
 
-function kindIcon(kind) {
-  return ({question_qcm: '☑', question_open: '✍', answerbox: '▭', text: '¶'})[kind] || '·';
+// ============================================================================
+// 5. Zone centrale : chargement détail + rendu via AMCxRender
+// ============================================================================
+
+async function selectQuestion(bankId) {
+  // active state on row
+  document.querySelectorAll('.banque-q-row.active').forEach(r => r.classList.remove('active'));
+  const row = document.querySelector('.banque-q-row[data-bank-id="' + bankId + '"]');
+  if (row) row.classList.add('active');
+
+  const host = document.getElementById('bq-detail');
+  host.innerHTML = '<p class="banque-empty">Chargement…</p>';
+  try {
+    const r = await fetch('/api/bank/' + encodeURIComponent(bankId));
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      host.innerHTML = '<p class="banque-empty banque-err">' + (j.error || 'Erreur') + '</p>';
+      return;
+    }
+    currentQuestion = j.question;
+    renderDetailPane(currentQuestion);
+    if (localStorage.getItem(PREVIEW_KEY) === 'on') renderPreviewPane(currentQuestion);
+  } catch (e) {
+    host.innerHTML = '<p class="banque-empty banque-err">' + e + '</p>';
+  }
 }
 
-function escapeHtml(s) {
-  return String(s || '').replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function renderDetailPane(q) {
+  const host = document.getElementById('bq-detail');
+  host.innerHTML = '';
+
+  // Header : titre + status + auteur + version
+  const head = document.createElement('div');
+  head.className = 'bq-detail-head';
+  const isMine = q.author_id === bankUserId;
+  head.innerHTML =
+    '<h2>' + (KIND_ICON[q.kind] || '·') + ' ' + escapeHtml(q.title || '(sans titre)') + '</h2>' +
+    '<div class="bq-detail-meta">' +
+      (q.author ? '<span>par <b>' + escapeHtml(q.author) + '</b></span>' : '') +
+      (q.author_institution ? '<span class="bq-detail-inst">· ' + escapeHtml(q.author_institution) + '</span>' : '') +
+      (q.status ? '<span class="banque-q-status banque-q-status-' + q.status + '">' + q.status + '</span>' : '') +
+      (q.version ? '<span class="bq-detail-v">v' + q.version + '</span>' : '') +
+      (isMine ? '<span class="banque-q-mine">★ moi</span>' : '') +
+    '</div>';
+  host.appendChild(head);
+
+  // Tags publics
+  if ((q.tags || []).length) {
+    const tagDiv = document.createElement('div');
+    tagDiv.className = 'bq-detail-tags';
+    tagDiv.innerHTML = q.tags.map(t => '<span class="bank-tag-badge">' + escapeHtml(t) + '</span>').join('');
+    host.appendChild(tagDiv);
+  }
+
+  // Contenu rendu via AMCxRender
+  const body = document.createElement('div');
+  body.className = 'bq-detail-body';
+  host.appendChild(body);
+  AMCxRender.renderQuestion(body, q.data || {}, {kind: q.kind, mode: 'view'});
+
+  // Actions bar
+  const actions = document.createElement('div');
+  actions.className = 'bq-detail-actions';
+  actions.innerHTML = '<button type="button" class="btn btn-primary" id="bq-import">+ Insérer dans le sujet courant</button>';
+  if (isMine) {
+    const nextStatus = q.status === 'public' ? 'draft' : 'public';
+    const publishLabel = q.status === 'public' ? '🔒 Dépublier' : '🌍 Publier';
+    actions.innerHTML +=
+      '<button type="button" class="btn" id="bq-publish">' + publishLabel + '</button>' +
+      '<button type="button" class="btn bq-danger" id="bq-delete">🗑 Supprimer</button>';
+  }
+  host.appendChild(actions);
+
+  document.getElementById('bq-import').addEventListener('click', () => importToSujet(q.bank_id));
+  if (isMine) {
+    document.getElementById('bq-publish').addEventListener('click', () => togglePublish(q));
+    document.getElementById('bq-delete').addEventListener('click', () => deleteQuestion(q));
+  }
+
+  // === Phase B widgets (online seulement) ===
+  if (bankMode === 'online' && bankUserId) {
+    const phB = document.createElement('div');
+    phB.className = 'bq-detail-phaseb';
+    phB.innerHTML =
+      '<div id="bp-rating">⏳ rating…</div>' +
+      '<div id="bp-ptags">⏳ tags persos…</div>' +
+      '<div id="bp-global">⏳ stats globales…</div>';
+    host.appendChild(phB);
+    renderRatingWidget(q.bank_id);
+    renderPersonalTagsWidget(q.bank_id);
+    renderGlobalStatsWidget(q.bank_id);
+  }
+
+  // Mes stats (by_project)
+  const stats = (q.stats || {}).by_project || {};
+  const projs = Object.keys(stats);
+  if (projs.length) {
+    let agg_n = 0, agg_sum = 0, rows = '';
+    projs.sort().forEach(p => {
+      const s = stats[p];
+      const n = s.n_eval || 0;
+      const r = n > 0 ? (s.sum_normalized || 0) / n : null;
+      agg_n += n; agg_sum += s.sum_normalized || 0;
+      rows += '<tr><td>' + escapeHtml(p) + '</td><td>' + n + '</td><td>' +
+              (s.n_perfect || 0) + '</td><td>' +
+              (r != null ? (r * 100).toFixed(1) + '%' : '—') + '</td></tr>';
+    });
+    const meanAll = agg_n > 0 ? (agg_sum / agg_n) : null;
+    const stDiv = document.createElement('details');
+    stDiv.className = 'bq-detail-stats';
+    stDiv.innerHTML =
+      '<summary>📊 Mes stats · ' + agg_n + ' éval · taux moyen ' +
+      (meanAll != null ? (meanAll * 100).toFixed(1) + '%' : '—') + '</summary>' +
+      '<table class="bank-stats-table"><thead><tr><th>Projet</th><th>n_eval</th><th>n_perfect</th><th>taux</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
+    host.appendChild(stDiv);
+  }
 }
 
-// --- Filter triggers ---------------------------------------------------
+function renderPreviewPane(q) {
+  const host = document.getElementById('bq-preview');
+  host.innerHTML = '<div class="bq-preview-inner"></div>';
+  AMCxRender.renderQuestion(
+    host.querySelector('.bq-preview-inner'),
+    q.data || {},
+    {kind: q.kind, mode: 'view', size: 'large'}
+  );
+}
+
+// ============================================================================
+// 6. Actions (insert, publish, delete)
+// ============================================================================
+
+async function importToSujet(bankId) {
+  if (!confirm('Insérer cette question à la fin du sujet courant ?')) return;
+  const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/import',
+                        {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) alert('✓ Question importée. Va voir dans l\'onglet Sujet.');
+  else alert('✘ ' + (j.error || 'erreur'));
+}
+
+async function togglePublish(q) {
+  const next = q.status === 'public' ? 'draft' : 'public';
+  const r = await fetch('/api/bank/' + encodeURIComponent(q.bank_id) + '/status', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: next})
+  });
+  if (r.ok) {
+    selectQuestion(q.bank_id);  // refresh
+    reloadList();
+  } else {
+    const j = await r.json().catch(() => ({}));
+    alert('✘ ' + (j.error || 'erreur'));
+  }
+}
+
+async function deleteQuestion(q) {
+  if (!confirm('Supprimer définitivement « ' + (q.title || q.bank_id) + ' » ?')) return;
+  const r = await fetch('/api/bank/' + encodeURIComponent(q.bank_id), {method: 'DELETE'});
+  if (r.ok) {
+    currentQuestion = null;
+    document.getElementById('bq-detail').innerHTML =
+      '<p class="banque-empty">Question supprimée. Sélectionnes-en une autre.</p>';
+    reloadList();
+  } else {
+    const j = await r.json().catch(() => ({}));
+    alert('✘ ' + (j.error || 'erreur'));
+  }
+}
+
+// ============================================================================
+// 7. Phase B widgets (rating, tags persos, stats globales)
+// ============================================================================
+
+async function renderRatingWidget(bankId) {
+  const host = document.getElementById('bp-rating');
+  if (!host) return;
+  try {
+    const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/rating');
+    const j = await r.json();
+    const rt = (j && j.ok) ? j.rating : {stars: null, favorite: false, comment: ''};
+    host.innerHTML =
+      '<div class="bp-rating-line">' +
+      '<span class="bp-rating-label">Ma note :</span>' +
+      '<span class="bp-stars">' +
+        [1,2,3,4,5].map(n =>
+          '<span class="bp-star ' + (rt.stars && n <= rt.stars ? 'on' : '') + '" data-n="' + n + '">★</span>'
+        ).join('') +
+        (rt.stars ? '<button type="button" class="bp-star-clear">✕</button>' : '') +
+      '</span>' +
+      '<label class="bp-fav-label">' +
+        '<input type="checkbox" class="bp-fav-cb"' + (rt.favorite ? ' checked' : '') + '> ❤ Favori' +
+      '</label>' +
+      '</div>' +
+      '<textarea class="bp-comment" rows="2" placeholder="Commentaire perso">' +
+        escapeHtml(rt.comment || '') + '</textarea>' +
+      '<button type="button" class="btn btn-tiny bp-comment-save">💾</button>' +
+      '<span class="bp-rating-status"></span>';
+    host.querySelectorAll('.bp-star').forEach(el => {
+      el.addEventListener('click', async () => {
+        const n = parseInt(el.dataset.n, 10);
+        await postRating(bankId, {stars: n});
+        renderRatingWidget(bankId);
+      });
+    });
+    host.querySelector('.bp-star-clear')?.addEventListener('click', async () => {
+      await fetch('/api/bank/' + encodeURIComponent(bankId) + '/rating', {method: 'DELETE'});
+      renderRatingWidget(bankId);
+      renderGlobalStatsWidget(bankId);
+    });
+    host.querySelector('.bp-fav-cb').addEventListener('change', async (e) => {
+      await postRating(bankId, {favorite: e.target.checked});
+      renderGlobalStatsWidget(bankId);
+    });
+    host.querySelector('.bp-comment-save').addEventListener('click', async () => {
+      const txt = host.querySelector('.bp-comment').value;
+      await postRating(bankId, {comment: txt});
+      const st = host.querySelector('.bp-rating-status');
+      st.textContent = '✓ enregistré';
+      setTimeout(() => { st.textContent = ''; }, 1500);
+    });
+  } catch (e) {
+    host.textContent = '';
+  }
+}
+
+async function postRating(bankId, body) {
+  return fetch('/api/bank/' + encodeURIComponent(bankId) + '/rating', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+}
+
+async function renderPersonalTagsWidget(bankId) {
+  const host = document.getElementById('bp-ptags');
+  if (!host) return;
+  try {
+    const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/personal-tags');
+    const j = await r.json();
+    const tags = (j && j.ok) ? (j.tags || []) : [];
+    host.innerHTML = '<span class="bp-ptags-label">Mes tags persos :</span>' +
+      tags.map(t =>
+        '<span class="bank-tag-badge bank-tag-perso" data-tag="' + escapeHtml(t) + '">' +
+        escapeHtml(t) + ' <button type="button" class="bp-ptag-x" data-tag="' +
+        escapeHtml(t) + '">×</button></span>'
+      ).join('') +
+      '<input type="text" class="bp-ptag-input" placeholder="+ tag perso… (Entrée)">';
+    host.querySelectorAll('.bp-ptag-x').forEach(b => {
+      b.addEventListener('click', async () => {
+        const newTags = tags.filter(x => x !== b.dataset.tag);
+        await postPersonalTags(bankId, newTags);
+        renderPersonalTagsWidget(bankId);
+      });
+    });
+    const input = host.querySelector('.bp-ptag-input');
+    input.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const v = input.value.trim();
+      if (!v || tags.includes(v)) { input.value = ''; return; }
+      await postPersonalTags(bankId, [...tags, v]);
+      renderPersonalTagsWidget(bankId);
+    });
+  } catch (e) {
+    host.textContent = '';
+  }
+}
+
+async function postPersonalTags(bankId, tags) {
+  return fetch('/api/bank/' + encodeURIComponent(bankId) + '/personal-tags', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tags})
+  });
+}
+
+async function renderGlobalStatsWidget(bankId) {
+  const host = document.getElementById('bp-global');
+  if (!host) return;
+  try {
+    const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/global-stats');
+    const j = await r.json();
+    const s = (j && j.ok) ? j.stats : {};
+    const stars = s.avg_stars != null ? s.avg_stars.toFixed(1) : '—';
+    const pct = s.avg_normalized != null ? (s.avg_normalized * 100).toFixed(1) + '%' : '—';
+    host.innerHTML =
+      '<div class="bp-global-card">' +
+      '<span>⭐ ' + stars + ' <small>(' + (s.n_ratings || 0) + ')</small></span>' +
+      '<span>❤ ' + (s.n_favorites || 0) + '</span>' +
+      '<span>👥 ' + (s.n_users || 0) + ' prof(s)</span>' +
+      '<span>📊 ' + (s.total_n_eval || 0) + ' éval (' + pct + ')</span>' +
+      '</div>';
+  } catch (e) {
+    host.textContent = '';
+  }
+}
+
+// ============================================================================
+// 8. Filter triggers + init
+// ============================================================================
 function debounce(fn, ms) {
   let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
-document.getElementById('bq-search').addEventListener('input', debounce(reloadBrowse, 200));
-document.getElementById('bq-kind').addEventListener('change', reloadBrowse);
-document.getElementById('bq-fav').addEventListener('change', reloadBrowse);
-document.getElementById('bq-mine').addEventListener('change', reloadBrowse);
+document.getElementById('bq-search').addEventListener('input', debounce(reloadList, 200));
+document.getElementById('bq-kind').addEventListener('change', reloadList);
+document.getElementById('bq-fav').addEventListener('change', reloadList);
+document.getElementById('bq-mine').addEventListener('change', reloadList);
+document.getElementById('bq-drafts').addEventListener('change', reloadList);
+document.getElementById('bq-mon-tag').addEventListener('input', debounce(reloadList, 300));
 
-// --- Init -------------------------------------------------------------
-refreshAuthStatus().then(reloadBrowse);
+refreshAuthStatus().then(reloadList);
 </script>
 {% endblock %}
