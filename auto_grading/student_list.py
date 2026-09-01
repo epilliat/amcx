@@ -81,11 +81,44 @@ def load_students() -> list[Student]:
         if i_id >= len(row) or row[i_id] is None:
             continue
         raw_id = row[i_id]
-        sid = str(int(raw_id)) if isinstance(raw_id, (int, float)) else str(raw_id).strip()
+        # Une cellule numérique perd ses zéros de tête dès Excel (`01234` → 1234).
+        # Une cellule texte les conserve : on ne passe par int() que pour retirer
+        # le `.0` des flottants.
+        if isinstance(raw_id, float) and raw_id.is_integer():
+            sid = str(int(raw_id))
+        elif isinstance(raw_id, int):
+            sid = str(raw_id)
+        else:
+            sid = str(raw_id).strip()
         nom = str(row[i_nom] or "") if i_nom < len(row) else ""
         prenom = str(row[i_prenom] or "") if (i_prenom is not None and i_prenom < len(row)) else ""
         out.append(Student(id=sid, nom=nom, prenom=prenom))
-    return out
+    return _pad_leading_zeros(out)
+
+
+def _pad_leading_zeros(students: list[Student]) -> list[Student]:
+    """Restaure les zéros de tête perdus par les cellules numériques du xlsx.
+
+    Les identifiants d'un établissement sont de largeur fixe. Si une nette
+    majorité (≥ 80 %) des ids numériques fait L caractères, ceux qui sont plus
+    courts ont perdu leurs zéros de tête au stockage → on les complète. Sans ça,
+    `by_full_id` (donc les `_student_override` posés à la relecture) ne matche
+    plus, et `last4` est décalé.
+    """
+    digits = [s.id for s in students if s.id.isdigit()]
+    if len(digits) < 2:
+        return students
+    widths: dict[int, int] = {}
+    for d in digits:
+        widths[len(d)] = widths.get(len(d), 0) + 1
+    width, count = max(widths.items(), key=lambda kv: kv[1])
+    if count / len(digits) < 0.8:
+        return students        # largeurs hétérogènes : on ne devine rien
+    return [
+        Student(id=s.id.zfill(width), nom=s.nom, prenom=s.prenom)
+        if (s.id.isdigit() and len(s.id) < width) else s
+        for s in students
+    ]
 
 
 class StudentMatcher:
@@ -97,8 +130,22 @@ class StudentMatcher:
             if len(s.id) >= 4 and s.id[-4:].isdigit():
                 self._by_last4.setdefault(s.id[-4:], s)
         self._by_id = {s.id: s for s in self.students}  # match par id complet
-        # index de noms normalisés pour fuzzy match
-        self._norm_to_student = {_norm(s.full): s for s in self.students}
+        # index de noms normalisés pour fuzzy match. Deux homonymes partagent
+        # la même clé : le second écrasait le premier sans un mot. On garde le
+        # premier et on signale, sinon un match par nom peut désigner l'autre.
+        self._norm_to_student = {}
+        self._homonyms: list[str] = []
+        for s in self.students:
+            key = _norm(s.full)
+            if key in self._norm_to_student:
+                self._homonyms.append(s.full)
+                continue
+            self._norm_to_student[key] = s
+        if self._homonyms:
+            print(f"⚠ liste étudiants : {len(self._homonyms)} homonyme(s) — "
+                  f"le match par nom est ambigu pour : "
+                  f"{', '.join(sorted(set(self._homonyms))[:5])}"
+                  + (" …" if len(set(self._homonyms)) > 5 else ""))
         self._norm_keys = list(self._norm_to_student.keys())
 
     def by_full_id(self, sid: str) -> Student | None:

@@ -55,8 +55,14 @@ MASKED_FEATURE_COLS = [
 # ==========================================================================
 
 def _subject_pdf() -> Path:
-    """Chemin du PDF du sujet (feuille de réponses imprimée)."""
-    for cand in (config.amc_dir() / "DOC-sujet.pdf", ROOT / "sujet" / "DOC-sujet.pdf"):
+    """Chemin du PDF du sujet (feuille de réponses imprimée).
+
+    Le PDF du sujet est une *donnée du projet* (produit par `compile_pdf` dans
+    `project_root()/sujet/`), pas un artefact du code installé — on le cherche
+    donc dans le projet actif, jamais dans le dossier d'installation.
+    """
+    for cand in (config.amc_dir() / "DOC-sujet.pdf",
+                 config.project_root() / "sujet" / "DOC-sujet.pdf"):
         if cand.exists():
             return cand
     raise FileNotFoundError(

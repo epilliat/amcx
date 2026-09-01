@@ -30,7 +30,7 @@ def _resolve_workers(workers: int | None, n_jobs: int) -> int:
         workers = os.cpu_count() or 1
     return max(1, min(workers, max(1, n_jobs)))
 
-ROOT = Path(__file__).resolve().parent
+ROOT = config.project_root()  # projet actif : pour les données
 PAGES_DIR = ROOT / "pages"
 
 # PDF compilés du sujet (à ne PAS confondre avec des copies scannées).

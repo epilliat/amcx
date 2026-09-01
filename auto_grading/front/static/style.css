@@ -1234,6 +1234,7 @@ img.case.correct + .case-label { font-weight: bold; }
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 .bar-field input:focus { outline: 2px solid #9bf; border-color: #6af; }
+.bar-field.q-bound input { width: 54px; }
 .q-max { font-size: 12px; color: #555; }
 .q-max strong { color: #222; font-size: 14px; }
 
@@ -2733,6 +2734,123 @@ img.case.correct + .case-label { font-weight: bold; }
 }
 .banque-title { margin: 0; font-size: 20px; }
 .banque-topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+/* Sélecteur de banque (dropdown + bouton +) */
+.banque-select-wrap { position: relative; }
+.btn-bank-select {
+  font-weight: 500; padding: 4px 10px; min-width: 140px; text-align: left;
+}
+.btn-bank-select .caret { margin-left: 6px; color: #888; font-size: 11px; }
+.banque-select-dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0;
+  width: 360px; max-height: 480px; overflow-y: auto;
+  background: #fff; border: 1px solid #c8c8cf; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  z-index: 100;
+}
+.bank-list { padding: 6px; }
+.bank-row {
+  display: flex; align-items: center; padding: 8px 10px; border-radius: 4px;
+  cursor: pointer; gap: 8px;
+}
+.bank-row:hover { background: #f4f6fa; }
+.bank-row-active { background: #eef5ff; }
+.bank-row-main { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; }
+.bank-row-icon { font-size: 16px; }
+.bank-row-text { flex: 1; min-width: 0; }
+.bank-row-name { font-size: 13px; font-weight: 500; }
+.bank-row-active-tag {
+  display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 500;
+  background: #1e6b3a; color: #fff; padding: 0 5px; border-radius: 8px;
+  vertical-align: middle;
+}
+.bank-row-sub {
+  font-size: 11px; color: #888;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bank-row-del {
+  background: none; border: none; cursor: pointer; padding: 4px 6px;
+  font-size: 14px; color: #888; border-radius: 3px;
+}
+.bank-row-del:hover { background: #ffeded; color: #c33; }
+.bank-add-btn {
+  display: block; margin: 8px; width: calc(100% - 16px);
+}
+
+/* Info banque locale (dans dropdown 🔐) */
+.bank-local-info { padding: 4px 0; }
+.bank-local-info .small {
+  font-family: monospace; font-size: 11px; color: #444;
+  background: #f4f6fa; padding: 4px 8px; border-radius: 3px;
+  word-break: break-all; margin: 4px 0;
+}
+
+/* Conteneur banque-editor : embed un .sujet-block dans la page Banque sans
+   les styles de marge/border de la liste sujet (puisqu'on en montre 1 seul). */
+.banque-editor {
+  background: #fff;
+}
+.banque-editor .sujet-block {
+  margin: 0; padding: 12px; border: 1px solid #d9dce3; border-radius: 6px;
+  background: #fafbfc;
+}
+/* Mode aperçu (lecture seule, rendu grand format) — plus d'espace, pas de
+   chrome d'édition autour. */
+.banque-preview-rendered {
+  padding: 14px 16px; background: #fff;
+  border: 1px solid #e9eaee; border-radius: 6px;
+}
+.banque-preview-rendered .amcx-stmt { font-size: 16px; line-height: 1.6; }
+.banque-preview-rendered .amcx-answers { font-size: 15px; line-height: 1.55; }
+
+/* Title line : H2 + toggle preview/edit alignés horizontalement */
+.bq-detail-titleline {
+  display: flex; align-items: center; gap: 12px;
+}
+.bq-detail-titleline h2 { flex: 1; margin: 0; }
+.bq-mode-toggle { white-space: nowrap; }
+
+/* Bouton Enregistrer désactivé visuellement quand non-dirty */
+#bq-save:disabled { opacity: 0.55; cursor: default; }
+
+/* Modale "Ajouter une banque" */
+.bank-modal-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+  z-index: 1000; display: flex; align-items: center; justify-content: center;
+}
+.bank-modal-bg[hidden] { display: none; }
+.bank-modal {
+  background: #fff; border-radius: 8px; width: 480px; max-width: 92vw;
+  max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.25);
+}
+.bank-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid #e9eaee;
+}
+.bank-modal-head h3 { margin: 0; font-size: 16px; }
+.bank-modal-body {
+  padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+}
+.bank-modal-body label {
+  display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: #444;
+}
+.bank-modal-body input[type="text"],
+.bank-modal-body input[type="password"] {
+  padding: 6px 8px; border: 1px solid #c8c8cf; border-radius: 4px;
+  font-size: 13px;
+}
+.bank-add-type-row {
+  display: flex; gap: 16px; padding: 6px 0;
+}
+.bank-add-type-row label {
+  flex-direction: row; align-items: center; gap: 6px; cursor: pointer;
+}
+.bank-modal-status { font-size: 12px; min-height: 18px; color: #444; }
+.bank-modal-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 10px 16px; border-top: 1px solid #e9eaee; background: #fafbfc;
+}
 
 /* Dropdown connexion */
 .banque-conn-wrap { position: relative; }

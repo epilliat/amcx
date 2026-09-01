@@ -1,0 +1,286 @@
+{# ----------------------------------------------------------------------------
+   Partiel : un bloc <section.sujet-block> tel que rendu dans /sujet.
+
+   Variables attendues :
+     - `b`     : block (avec bid, kind, data, q, max, answers_with_char, preview_q)
+     - `mode`  : 'canonical' | 'legacy' (toolbar / drag handle)
+
+   Utilisé par :
+     - templates/sujet.html (boucle sur tous les blocs)
+     - GET /api/bank/<bid>/block-html (un seul bloc, depuis la banque)
+
+   Le DOM est strictement identique entre les deux contextes → CSS et JS
+   d'édition (renderPreview, refreshScores, addAnswer, etc.) marchent
+   sans adaptation.
+---------------------------------------------------------------------------- #}
+<section class="sujet-block sujet-block-{{ b.kind }}"
+         data-bid="{{ b.bid }}" data-kind="{{ b.kind }}"
+         {% if b.kind == 'question_qcm' %}data-q="{{ b.q }}" data-type="{{ b.data.qtype }}"{% endif %}
+         {% if b.get('preview_q') %}data-preview-q="{{ b.preview_q }}"{% endif %}
+         {% if b.data.get('readonly') %}data-readonly="1"{% endif %}
+         {% if b.data.get('title') %}data-title="{{ b.data.title }}"{% endif %}
+         {% if b.data.get('level') %}data-level="{{ b.data.level }}"{% endif %}>
+  <div class="block-toolbar">
+    {% if mode == 'canonical' %}
+    <span class="block-handle" draggable="true"
+          title="glisser pour déplacer ce bloc">☰</span>
+    {% else %}
+    <span class="block-handle disabled" title="mode legacy : drag&drop désactivé">☰</span>
+    {% endif %}
+    <span class="block-kind-tag">
+      {% if b.kind == 'text' %}TEXTE
+      {% elif b.kind == 'question_qcm' %}QCM{% if b.q %} Q{{ b.q }}{% endif %}
+      {% elif b.kind == 'question_open' %}OPEN
+      {% elif b.kind == 'question_freeform' %}LIBRE 🪄
+      {% elif b.kind == 'answerbox' %}RÉPONSE{% if b.data.placement == 'end' %} ← fin{% endif %}
+      {% endif %}
+    </span>
+    <span class="q-dirty-dot" title="modifications non sauvegardées">●</span>
+    <span class="block-toolbar-spacer"></span>
+    {% if mode == 'canonical' %}
+    {% if b.kind == 'question_qcm' %}
+    <button type="button" class="block-btn block-ai" title="Demander à Claude de modifier cette question"><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon" alt="Claude"></button>
+    {% endif %}
+    <button type="button" class="block-btn block-move-up" title="monter">▲</button>
+    <button type="button" class="block-btn block-move-down" title="descendre">▼</button>
+    <button type="button" class="block-btn block-duplicate" title="dupliquer">⎘</button>
+    <button type="button" class="block-btn block-delete" title="supprimer">✕</button>
+    {% else %}
+    <span class="block-legacy-hint">édition uniquement (mode legacy)</span>
+    {% endif %}
+  </div>
+
+  {# ----- Corps du bloc selon le kind ----- #}
+  {% if b.kind == 'text' %}
+    {% if b.data.get('readonly') %}
+    {# Bloc legacy en lecture seule : titre + tex brut repliable. #}
+    <div class="sujet-field text-readonly">
+      <div class="field-label">
+        <span class="field-tag">{{ b.data.get('level', 'intercalaire') }}</span>
+        {{ b.data.get('title', 'Texte LaTeX') }}
+        <span class="field-note">lecture seule — passer en canonique pour éditer</span>
+      </div>
+      <details class="text-readonly-source">
+        <summary>voir / replier le LaTeX brut ({{ b.data.tex|length }} car.)</summary>
+        <pre>{{ b.data.tex }}</pre>
+      </details>
+      <textarea class="md-src text-src" hidden>{{ b.data.tex }}</textarea>
+    </div>
+    {% else %}
+    <div class="sujet-field">
+      <div class="field-label">Bloc texte libre <span class="field-tag">LaTeX</span></div>
+      <textarea class="md-src text-src" rows="3" spellcheck="false">{{ b.data.tex }}</textarea>
+    </div>
+    {% endif %}
+
+  {% elif b.kind == 'question_qcm' %}
+  <header class="sujet-q-head">
+    <div class="sujet-q-id">
+      <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+             title="identifiant LaTeX">
+      <select class="q-type-select" title="type">
+        <option value="single"{% if b.data.qtype == 'single' %} selected{% endif %}>choix unique</option>
+        <option value="mult"{% if b.data.qtype == 'mult' %} selected{% endif %}>choix multiple</option>
+      </select>
+      <label class="q-horiz" title="disposition des réponses">
+        <input type="checkbox" class="q-env-horiz"{% if b.data.env == 'reponseshoriz' %} checked{% endif %}>
+        horiz</label>
+    </div>
+    <div class="sujet-q-bareme">
+      {% if b.data.qtype == 'mult' %}
+      <span class="bar-grouplabel">Barème — toutes :</span>
+      <label class="bar-field">bonnes
+        <input type="text" class="bar-global-b" spellcheck="false"></label>
+      <label class="bar-field">mauvaises
+        <input type="text" class="bar-global-m" spellcheck="false"></label>
+      {% else %}
+      <label class="bar-field">Valeur
+        <input type="text" class="bar-value" spellcheck="false"
+               value="{{ b.data.get('value', '1') }}"></label>
+      {% endif %}
+      <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
+      {% set sd = score_defaults if score_defaults is defined else None %}
+      <label class="bar-field q-bound" title="plancher de cette question (vide = défaut global)">plancher
+        <input type="number" class="q-floor" step="0.25" spellcheck="false"
+               value="{% if b.data.get('floor') is not none %}{{ '%g'|format(b.data.floor) }}{% endif %}"
+               placeholder="{% if sd and sd.floor is not none %}{{ '%g'|format(sd.floor) }}{% else %}aucun{% endif %}"></label>
+      <label class="bar-field q-bound" title="plafond de cette question (vide = défaut global)">plafond
+        <input type="number" class="q-ceiling" step="0.25" spellcheck="false"
+               value="{% if b.data.get('ceiling') is not none %}{{ '%g'|format(b.data.ceiling) }}{% endif %}"
+               placeholder="{% if sd and sd.ceiling is not none %}{{ '%g'|format(sd.ceiling) }}{% else %}aucun{% endif %}"></label>
+    </div>
+  </header>
+
+  <div class="sujet-field">
+    <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+    <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+  </div>
+
+  <div class="sujet-field">
+    <div class="field-label">Réponses <span class="field-tag">LaTeX</span>
+      {% if b.data.qtype == 'mult' %}<span class="field-note">— chaque case = barème de cette réponse</span>{% endif %}
+      {% if mode == 'canonical' %}
+      <span class="field-actions">
+        <button type="button" class="btn-mini ans-add" title="ajouter une réponse">+ réponse</button>
+      </span>
+      {% endif %}
+    </div>
+    <div class="sujet-answers">
+      {% for i in range(b.data.answers|length) %}
+        {% set a = b.data.answers[i] %}
+        {% set char = b.answers_with_char[i].char if b.answers_with_char|length > i else None %}
+      <div class="md-answer {{ 'is-correct' if a.correct else 'is-wrong' }}"
+           data-correct="{{ '1' if a.correct else '0' }}">
+        <div class="ans-mark">
+          <button type="button" class="ans-badge"
+                  title="cliquer pour basculer bonne / mauvaise">{{ '✔ bonne' if a.correct else '✗ mauvaise' }}</button>
+          {% if char %}<span class="ans-char">case {{ char }}</span>{% endif %}
+          {% if b.data.qtype == 'mult' %}
+          <input type="text" class="ans-bareme" spellcheck="false"
+                 title="barème de cette réponse" value="{{ a.bareme }}">
+          {% else %}
+          <span class="ans-score"></span>
+          {% endif %}
+          {% if mode == 'canonical' %}
+          <button type="button" class="btn-mini ans-remove" title="supprimer cette réponse">✕</button>
+          {% endif %}
+        </div>
+        <textarea class="md-src ans-src" rows="2" spellcheck="false">{{ a.text }}</textarea>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% elif b.kind == 'question_open' %}
+  <header class="sujet-q-head">
+    <div class="sujet-q-id">
+      <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+             title="identifiant LaTeX de la question ouverte">
+      <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+        lignes
+        <input type="number" class="open-lines" min="1" max="40" step="1"
+               value="{{ b.data.lines }}"></label>
+      <label class="q-horiz" title="barème total possible">
+        points max
+        <input type="number" class="open-points" min="0" step="0.5"
+               value="{{ b.data.points }}"></label>
+    </div>
+    <div class="sujet-q-bareme">
+      <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
+    </div>
+  </header>
+
+  <div class="sujet-field">
+    <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+    <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+  </div>
+
+  <div class="sujet-field">
+    <div class="field-label">Cases de notation (cochables par le correcteur)
+      <span class="field-tag">\AMCOpen</span>
+      {% if mode == 'canonical' %}
+      <span class="field-actions">
+        <button type="button" class="btn-mini grading-add" title="ajouter une case">+ case</button>
+      </span>
+      {% endif %}
+    </div>
+    <div class="open-grading-cases">
+      {% for c in b.data.grading_cases %}
+      <div class="grading-case">
+        <label>label
+          <input type="text" class="grading-label" value="{{ c.label }}" spellcheck="false"></label>
+        <label>valeur
+          <input type="number" class="grading-value" step="0.5" value="{{ c.value }}"></label>
+        {% if mode == 'canonical' %}
+        <button type="button" class="btn-mini grading-remove" title="supprimer">✕</button>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% elif b.kind == 'question_freeform' %}
+  <header class="sujet-q-head">
+    <div class="sujet-q-id">
+      <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
+             title="identifiant LaTeX">
+      <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+        lignes
+        <input type="number" class="ff-lines" min="1" max="20" step="1"
+               value="{{ b.data.lines }}"></label>
+      <label class="q-horiz" title="note attribuée si la réponse est correcte">
+        points
+        <input type="number" class="ff-points" min="0" step="0.5"
+               value="{{ b.data.points }}"></label>
+    </div>
+    <div class="sujet-q-bareme">
+      <span class="badge" style="background:#e0d4f5;color:#6533c0;border:1px solid #c8b8ee;">🪄 HTR</span>
+      <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.data.points) }}</strong></span>
+    </div>
+  </header>
+
+  <div class="sujet-field">
+    <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
+    <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
+  </div>
+
+  <div class="sujet-field">
+    <div class="field-label">Réponse attendue <span class="field-tag">expected_answer</span></div>
+    <input type="text" class="ff-expected" spellcheck="false"
+           value="{% if b.data.expected_answer is string %}{{ b.data.expected_answer }}{% else %}{{ b.data.expected_answer|join(' | ') }}{% endif %}"
+           placeholder="ex. 42  ·  (sépare par | pour plusieurs réponses acceptées : Bernoulli | bernoulli)">
+  </div>
+
+  <div class="sujet-field" style="display:flex;gap:14px;align-items:end;">
+    <label class="ab-field" title="comment comparer la lecture OCR à expected_answer">
+      mode de match
+      <select class="ff-match-mode">
+        <option value="exact"{% if b.data.match_mode == 'exact' %} selected{% endif %}>exact (égal après strip+lower)</option>
+        <option value="numeric_tol"{% if b.data.match_mode == 'numeric_tol' %} selected{% endif %}>numeric_tol (nombre, écart ≤ tol)</option>
+        <option value="contains"{% if b.data.match_mode == 'contains' %} selected{% endif %}>contains (substring lower)</option>
+        <option value="regex"{% if b.data.match_mode == 'regex' %} selected{% endif %}>regex</option>
+      </select>
+    </label>
+    <label class="ab-field" title="tolérance numérique (utilisée seulement si mode = numeric_tol)">
+      numeric_tol
+      <input type="number" class="ff-numeric-tol" min="0" step="0.01" value="{{ b.data.numeric_tol }}">
+    </label>
+  </div>
+
+  {% elif b.kind == 'answerbox' %}
+  <header class="sujet-q-head">
+    <div class="sujet-q-id">
+      <label class="ab-field" title="hauteur du cadre (ex. 4cm, 5cm, 10cm)">
+        hauteur
+        <input type="text" class="ab-height" value="{{ b.data.height }}"
+               placeholder="5cm" spellcheck="false"></label>
+      <label class="ab-field" title="où apparaît le cadre dans le PDF">
+        placement
+        <select class="ab-placement">
+          <option value="inline"{% if b.data.placement == 'inline' %} selected{% endif %}>dans le flux des questions</option>
+          <option value="end"{% if b.data.placement == 'end' %} selected{% endif %}>sur la feuille de réponses (en fin)</option>
+        </select>
+      </label>
+      <label class="ab-field" title="grille AMC à cocher par le correcteur (0 = aucune). Détectable a posteriori via le tag « bareme-<bid> » dans exam.xy.">
+        barème max
+        <input type="number" class="ab-bareme-max" min="0" max="99" step="0.25"
+               value="{{ b.data.bareme_max or 0 }}"></label>
+      <label class="ab-field" title="pas entre 2 cases consécutives. Ex. max=1 + step=0.25 → 5 cases (scores 0, 0.25, 0.5, 0.75, 1). Les labels affichés restent 0, 1, 2, …">
+        pas
+        <input type="number" class="ab-bareme-step" min="0.01" max="99" step="0.25"
+               value="{{ b.data.bareme_step or 1 }}"></label>
+    </div>
+  </header>
+
+  <div class="sujet-field">
+    <div class="field-label">Titre (optionnel) <span class="field-tag">au-dessus du cadre</span></div>
+    <input type="text" class="ab-title" value="{{ b.data.title }}"
+           placeholder="ex. Justifie ta réponse">
+  </div>
+
+  <div class="sujet-field">
+    <div class="field-label">Instructions (optionnel) <span class="field-tag">LaTeX</span></div>
+    <textarea class="md-src ab-instructions" rows="2" spellcheck="false">{{ b.data.instructions }}</textarea>
+  </div>
+  {% endif %}
+</section>

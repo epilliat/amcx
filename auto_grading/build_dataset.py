@@ -46,7 +46,7 @@ import config
 import layout_store
 import masked_detect
 
-ROOT = Path(__file__).resolve().parent
+ROOT = config.project_root()  # projet actif : pour les données
 PAGES_DIR = ROOT / "pages"
 RAW_DIR = ROOT / "raw_responses"
 RESULTS_DIR = ROOT / "results"

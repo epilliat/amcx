@@ -40,17 +40,25 @@ import secrets
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 
+import config
 from sujet_store import Block, _gen_bid
 
 DEFAULT_BANK_ROOT = Path.home() / "Documents" / "AMCx-banque"
 
-_lock = Lock()
+_lock = RLock()   # réentrant : update_project_stats appelle save() sous le lock
 
 
 def bank_root() -> Path:
-    """Racine de la banque (env `AMCX_BANK_DIR` > défaut `~/Documents/AMCx-banque`)."""
+    """Racine de la banque locale active.
+
+    Précédence : `config.active_bank_cfg()["path"]` (si type=local) >
+    env `AMCX_BANK_DIR` > défaut `~/Documents/AMCx-banque`.
+    """
+    entry = config.active_bank_cfg()
+    if entry.get("type") == "local" and entry.get("path"):
+        return Path(str(entry["path"])).expanduser().resolve()
     env = os.environ.get("AMCX_BANK_DIR")
     if env:
         return Path(env).expanduser().resolve()
@@ -89,8 +97,20 @@ def _path_of(bank_id: str, slug: str) -> Path:
     return question_dir() / f"{bank_id}-{slug}.json"
 
 
+# 8 hex (banque locale) ou UUID v4 (banque en ligne). Validé avant tout glob :
+# `bank_id="*"` matchait la première question venue — `DELETE /api/bank/*`
+# supprimait une question au hasard.
+_BANK_ID_RE = re.compile(r"^(?:[0-9a-f]{8}|[0-9a-fA-F-]{36})$")
+
+
+def is_valid_bank_id(bank_id) -> bool:
+    return bool(_BANK_ID_RE.match(str(bank_id or "")))
+
+
 def _find_path(bank_id: str) -> Path | None:
     """Cherche le fichier d'une question par bank_id (slug variable)."""
+    if not is_valid_bank_id(bank_id):
+        return None
     for p in question_dir().glob(f"{bank_id}-*.json"):
         return p
     return None
@@ -127,8 +147,7 @@ def save(question: dict) -> Path:
         old = _find_path(bid)
         if old and old != new_path:
             old.unlink(missing_ok=True)
-        new_path.write_text(json.dumps(question, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+        config.write_json_atomic(new_path, question)
         rebuild_index()
         return new_path
 
@@ -173,8 +192,7 @@ def rebuild_index() -> dict:
     ensure_root()
     entries = _build_index_entries()
     idx = {"mtime": _now(), "questions": entries}
-    index_path().write_text(json.dumps(idx, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+    config.write_json_atomic(index_path(), idx)
     return idx
 
 
@@ -268,7 +286,8 @@ def from_block(block, project_name: str = "", title: str = "",
     else:
         kind = block.get("kind", "")
         data = _strip_private(block.get("data", {}))
-    if kind not in ("text", "question_qcm", "question_open", "answerbox"):
+    if kind not in ("text", "question_qcm", "question_open",
+                    "question_freeform", "answerbox"):
         raise ValueError(f"kind invalide: {kind}")
     now = _now()
     return {
@@ -314,7 +333,7 @@ def update_project_stats(bank_id: str, project_name: str, n_eval: int,
             "max_score_at_sync": round(float(max_score_at_sync), 4),
             "last_sync":         _now(),
         }
-    save(q)   # hors lock — save reprend le lock
+        save(q)
 
 
 def stats_summary(question: dict) -> dict:
@@ -357,6 +376,9 @@ def _auto_title_from_data(kind: str, data: dict) -> str:
     if kind == "question_open":
         st = (data.get("statement") or "").strip()
         return _short(st) or (data.get("tag") or "Question ouverte")
+    if kind == "question_freeform":
+        st = (data.get("statement") or "").strip()
+        return _short(st) or (data.get("tag") or "Question libre")
     if kind == "answerbox":
         return data.get("title") or "Zone de réponse"
     if kind == "text":

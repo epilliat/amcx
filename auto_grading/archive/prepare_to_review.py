@@ -24,7 +24,7 @@ try:                                  # repli : absent sur un projet non initial
 except Exception:
     ANSWER_KEY = {}
 
-ROOT = Path(__file__).resolve().parent
+ROOT = config.project_root()  # projet actif : pour les données
 PAGES_DIR = ROOT / "pages"
 RAW_DIR = ROOT / "raw_responses"
 TO_REVIEW_DIR = ROOT / "to_review"

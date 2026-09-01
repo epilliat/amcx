@@ -15,8 +15,9 @@ import re
 from pathlib import Path
 
 from answer_key import ANSWER_KEY
+import config
 
-ROOT = Path(__file__).resolve().parent
+ROOT = config.project_root()  # projet actif : pour les données
 TO_REVIEW_DIR = ROOT / "to_review"
 RAW_DIR = ROOT / "raw_responses"
 

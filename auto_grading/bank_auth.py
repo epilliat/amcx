@@ -36,9 +36,9 @@ class BankAuthError(RuntimeError):
 
 
 def _supabase_url_and_anon() -> tuple[str, str]:
-    cfg = config.load_config()
-    url = (cfg.get("bank_supabase_url") or "").rstrip("/")
-    anon = cfg.get("bank_supabase_anon_key") or ""
+    entry = config.active_bank_cfg()
+    url = (entry.get("supabase_url") or "").rstrip("/")
+    anon = entry.get("supabase_anon_key") or ""
     if not (url and anon):
         raise BankAuthError("Banque en ligne non configurée (URL + clé anon manquantes).")
     return url, anon
@@ -115,12 +115,12 @@ def verify_otp(email: str, code: str) -> dict:
     if not (access and refresh and uid):
         raise BankAuthError("Réponse Supabase incomplète (pas de tokens).")
 
-    config.save_config({
-        "bank_user_token":         access,
-        "bank_refresh_token":      refresh,
-        "bank_user_id":            uid,
-        "bank_user_email":         user.get("email") or email,
-        "bank_token_expires_at":   int(resp.get("expires_at", 0)),
+    config.update_active_bank({
+        "user_token":       access,
+        "refresh_token":    refresh,
+        "user_id":          uid,
+        "user_email":       user.get("email") or email,
+        "token_expires_at": int(resp.get("expires_at", 0)),
     })
     return {
         "user_id":    uid,
@@ -130,14 +130,14 @@ def verify_otp(email: str, code: str) -> dict:
 
 
 def logout() -> None:
-    """Efface les tokens locaux. (Pas d'appel à Supabase /logout — inutile
-    pour un JWT court (1h) et évite une req qui peut échouer.)"""
-    config.save_config({
-        "bank_user_token":       "",
-        "bank_refresh_token":    "",
-        "bank_user_id":          "",
-        "bank_user_email":       "",
-        "bank_token_expires_at": 0,
+    """Efface les tokens de la banque active. (Pas d'appel à Supabase /logout —
+    inutile pour un JWT court (1h) et évite une req qui peut échouer.)"""
+    config.update_active_bank({
+        "user_token":       "",
+        "refresh_token":    "",
+        "user_id":          "",
+        "user_email":       "",
+        "token_expires_at": 0,
     })
 
 
@@ -146,15 +146,14 @@ def logout() -> None:
 # --------------------------------------------------------------------------
 
 def refresh_token_if_possible() -> bool:
-    """Renouvelle access_token via refresh_token. Retourne True si succès,
-    False si pas de refresh_token ou échec (l'user doit re-login).
+    """Renouvelle access_token via refresh_token sur la banque active.
+    Retourne True si succès, False sinon (l'user doit re-login).
     """
-    cfg = config.load_config()
-    refresh = cfg.get("bank_refresh_token") or ""
+    entry = config.active_bank_cfg()
+    refresh = entry.get("refresh_token") or ""
     if not refresh:
         return False
     try:
-        # POST /token?grant_type=refresh_token
         base, anon = _supabase_url_and_anon()
         req = Request(
             base + "/auth/v1/token?grant_type=refresh_token",
@@ -176,12 +175,12 @@ def refresh_token_if_possible() -> bool:
     user = data.get("user") or {}
     if not (access and new_refresh):
         return False
-    config.save_config({
-        "bank_user_token":       access,
-        "bank_refresh_token":    new_refresh,
-        "bank_user_id":          user.get("id") or cfg.get("bank_user_id") or "",
-        "bank_user_email":       user.get("email") or cfg.get("bank_user_email") or "",
-        "bank_token_expires_at": int(data.get("expires_at", 0)),
+    config.update_active_bank({
+        "user_token":       access,
+        "refresh_token":    new_refresh,
+        "user_id":          user.get("id") or entry.get("user_id") or "",
+        "user_email":       user.get("email") or entry.get("user_email") or "",
+        "token_expires_at": int(data.get("expires_at", 0)),
     })
     return True
 
@@ -191,14 +190,16 @@ def refresh_token_if_possible() -> bool:
 # --------------------------------------------------------------------------
 
 def auth_status() -> dict:
-    """Retourne `{configured, logged_in, user_id, email, expires_at}` pour l'UI."""
-    cfg = config.load_config()
-    configured = bool(cfg.get("bank_supabase_url") and cfg.get("bank_supabase_anon_key"))
-    logged_in = bool(cfg.get("bank_user_token"))
+    """Retourne `{configured, logged_in, user_id, email, expires_at}` pour
+    la banque active."""
+    entry = config.active_bank_cfg()
+    is_online = (entry.get("type") == "online")
+    configured = is_online and bool(entry.get("supabase_url") and entry.get("supabase_anon_key"))
+    logged_in = is_online and bool(entry.get("user_token"))
     return {
         "configured": configured,
         "logged_in":  logged_in,
-        "user_id":    cfg.get("bank_user_id") or "",
-        "email":      cfg.get("bank_user_email") or "",
-        "expires_at": int(cfg.get("bank_token_expires_at") or 0),
+        "user_id":    entry.get("user_id") or "",
+        "email":      entry.get("user_email") or "",
+        "expires_at": int(entry.get("token_expires_at") or 0),
     }

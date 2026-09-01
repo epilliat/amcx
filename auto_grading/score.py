@@ -4,34 +4,105 @@ Entrée: dict {1: ["A","C"], 2: [], ...} (lettres cochées par question)
 Sortie: dict {q: float score, "total": float}
 
 L'ensemble des questions et le barème sont dérivés de `sujet/exam.tex`
-(via `sujet_store`) ; `answer_key.py` n'est qu'un repli structurel.
+(via `sujet_store`) — source de vérité unique. Il n'y a **aucun** repli : une
+question absente du sujet ne vaut pas de points, plutôt que d'emprunter la clé
+de correction d'un autre examen.
 """
 
-from sujet_store import effective_spec, get_bareme, parse_tex, total_max
+from sujet_store import (amc_question_map, effective_spec, get_bareme,
+                         parse_tex, total_max)
 
-try:                                  # repli structurel — absent sur un projet vierge
-    from answer_key import ANSWER_KEY
-except Exception:
-    ANSWER_KEY = {}
+
+# Sentinelle : distingue « pas d'argument » (→ lire la config) de None (= aucun
+# plancher). Permet aux call sites existants d'hériter automatiquement des
+# planchers configurés sans aucune modification.
+_UNSET = object()
+
+# Cache (mtime, floors) pour éviter des milliers de lectures disque dans les
+# boucles de notation (onglet Questions, sync banque).
+# `mtime` initialisé à `_UNSET` et non à None : un projet sans config.json a
+# justement un mtime None, ce qui aurait fait passer le cache vide pour frais.
+_FLOORS_CACHE: dict = {"mtime": _UNSET, "floors": (None, None, None)}
+
+
+def _opt_float(v):
+    """None/"" → None ; sinon float (autorise négatif et zéro)."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def floors_from_config() -> tuple:
+    """`(question_floor, total_floor, question_ceiling)` du projet actif.
+
+    Ce sont les défauts globaux (`None` = désactivé). Mis en cache sur le mtime
+    de `config.json` (import paresseux de `config` pour éviter tout cycle).
+    """
+    try:
+        import config  # lazy : config n'importe pas score
+        path = config._config_path()
+        mtime = path.stat().st_mtime if path.exists() else None
+    except Exception:
+        return (None, None, None)
+    if _FLOORS_CACHE["mtime"] != mtime:
+        try:
+            cfg = config.load_config()
+            _FLOORS_CACHE["floors"] = (_opt_float(cfg.get("question_floor")),
+                                       _opt_float(cfg.get("total_floor")),
+                                       _opt_float(cfg.get("question_ceiling")))
+        except Exception:
+            _FLOORS_CACHE["floors"] = (None, None, None)
+        _FLOORS_CACHE["mtime"] = mtime
+    return _FLOORS_CACHE["floors"]
+
+
+def effective_bounds(q: int, copy: int = 1) -> tuple:
+    """`(plancher, plafond)` effectifs d'une question : override du bloc
+    (`floor`/`ceiling` dans exam.tex) sinon défaut global. `None` = pas de borne."""
+    gf, _total, gc = floors_from_config()
+    try:
+        info = parse_tex().get(q) or {}
+    except Exception:
+        info = {}
+    lo = info.get("floor")
+    hi = info.get("ceiling")
+    return (gf if lo is None else lo, gc if hi is None else hi)
 
 
 def question_set() -> list[int]:
-    """Numéros des questions QCM à noter (depuis exam.tex, repli answer_key.py)."""
+    """Numéros des questions QCM à noter, dérivés du sujet."""
     try:
-        qs = sorted(parse_tex().keys())
-        if qs:
-            return qs
+        return sorted(parse_tex().keys())
     except Exception:
-        pass
-    return sorted(ANSWER_KEY.keys())
+        return []
 
 
-def score_question(q: int, selected: list[str], copy: int = 1) -> float:
+def score_question(q: int, selected: list[str], copy: int = 1,
+                   floor=_UNSET, ceiling=_UNSET) -> float:
     """Score d'une question pour une copie donnée.
 
     `copy=1` par défaut → JSON legacy (sans `_copy_id`) continue à fonctionner.
+    `floor`/`ceiling` : bornes par question (points barème). `_UNSET` → résolues
+    via `effective_bounds` (override du bloc sinon défaut global) ; `None` → borne
+    désactivée. Le score final est clampé `min(max(s, floor), ceiling)`.
     """
-    # type / options / correct dérivés d'exam.tex pour CETTE copie (repli answer_key.py)
+    # `q` est un numéro de question du calage AMC ; le sujet indexe ses QCM à
+    # part. La carte est l'identité dans le cas normal, mais elle écarte les
+    # cases de notation des questions ouvertes (non notées automatiquement).
+    qmap = amc_question_map(copy)["qcm"]
+    q = qmap.get(q, q if not qmap else None)
+    if q is None:
+        return 0.0
+    if floor is _UNSET or ceiling is _UNSET:
+        ef, ec = effective_bounds(q, copy)
+        if floor is _UNSET:
+            floor = ef
+        if ceiling is _UNSET:
+            ceiling = ec
+    # type / options / correct dérivés d'exam.tex pour CETTE copie
     spec = effective_spec(q, copy=copy)
     bareme = get_bareme(copy=copy).get(q, {})
     correct = set(spec["correct"])
@@ -41,29 +112,39 @@ def score_question(q: int, selected: list[str], copy: int = 1) -> float:
 
     if spec["type"] == "single":
         # `value` pt ssi exactement la bonne lettre est cochée (rien d'autre)
-        return float(bareme.get("value", 1.0)) if sel == correct else 0.0
+        s = float(bareme.get("value", 1.0)) if sel == correct else 0.0
+    else:
+        # mult — barème par réponse : points propres à chaque case cochée
+        # Un mauvais cochage (points négatifs) peut rendre la question négative.
+        chars = bareme.get("chars")
+        # Pas de barème exploitable dans le sujet (points manquants sur une
+        # réponse) → la question ne vaut rien. On ne devine pas : un barème
+        # inventé produirait des notes fausses et silencieuses.
+        s = round(sum(chars.get(letter, 0.0) for letter in sel), 6) if chars else 0.0
 
-    # mult — barème par réponse : points propres à chaque case cochée
-    chars = bareme.get("chars")
-    if chars:
-        return round(sum(chars.get(letter, 0.0) for letter in sel), 6)
-
-    # repli : barème par question d'answer_key.py
-    ak = ANSWER_KEY.get(q, {})
-    b, m = ak.get("b", 0.0), ak.get("m", 0.0)
-    s = 0.0
-    for letter in spec["options"]:
-        if letter in sel:
-            s += b if letter in correct else m
-    # Pas de plancher : un mauvais cochage (malus m<0) peut rendre la question négative.
-    return round(s, 6)
+    # Bornes par question (plancher/plafond) — désactivées par défaut.
+    if floor is not None:
+        s = max(s, float(floor))
+    if ceiling is not None:
+        s = min(s, float(ceiling))
+    return s
 
 
-def score_copy(answers: dict[int, list[str]], copy: int = 1) -> dict:
-    """Note d'une copie. `copy=1` par défaut (rétrocompat JSON legacy)."""
+def score_copy(answers: dict[int, list[str]], copy: int = 1, copy_floor=_UNSET) -> dict:
+    """Note d'une copie. `copy=1` par défaut (rétrocompat JSON legacy).
+
+    Les bornes par question (plancher/plafond, override ou global) sont gérées
+    dans `score_question`. `copy_floor` = plancher global du total de copie
+    (`total_floor`) : `_UNSET` → lu depuis la config ; `None` → désactivé.
+    Ordre : bornes par question → somme → plancher global de copie.
+    """
+    if copy_floor is _UNSET:
+        copy_floor = floors_from_config()[1]
     per_q = {q: score_question(q, answers.get(q, []), copy=copy)
              for q in question_set()}
     total = round(sum(per_q.values()), 4)
+    if copy_floor is not None:
+        total = max(total, float(copy_floor))
     return {"per_question": per_q, "total": total}
 
 

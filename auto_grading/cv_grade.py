@@ -351,6 +351,12 @@ FEATURE_COLS = _BASE_FEATURE_COLS + MASKED_FEATURE_COLS
 # indépendant de la calibration du GBM (cf. grade_image).
 MASKED_INK_ABS = 0.12
 
+# Une page est une « feuille de réponses » tant que MOINS de cette fraction de
+# cases QCM voit son cadre imprimé absent du scan. Sur une vraie feuille ≈0.02–0.10 ;
+# sur une page sans grille (recto sujet d'une copie multi-pages) ≈1.0. Seuil large
+# (0.7) → ne jette jamais une vraie copie, même mal scannée. Cf. grade_image.
+ANSWER_SHEET_FRAME_FAIL_FRAC = 0.7
+
 
 def extract_features(warped: np.ndarray, box: "BoxLayout",
                      q_ratios_s18: list[float], copy_baseline: float,
@@ -630,6 +636,7 @@ def grade_image(image_path: Path | None = None,
     ambiguous = []  # cases douteuses (liste de dicts → _ambiguous_cells)
     ml_overrides = 0
     n_frame_fail = 0  # cases QCM dont le cadre n'a pas été détecté dans le scan
+    n_cells = 0       # total de cases QCM (dénominateur pour le ratio frame_fail)
 
     # Pré-calcul par question : tri, seuils, features masquées + features GBM.
     # On collecte les features de TOUTES les cases (toutes questions confondues)
@@ -702,6 +709,7 @@ def grade_image(image_path: Path | None = None,
         # --- flagging : on signale toute case où les estimateurs divergent ---
         bad_struct = qtypes.get(q, "mult") == "single" and len(sel) != 1
         for b, r, mf, e1, e2, e3, proba in cells:
+            n_cells += 1
             if mf["frame_detected"] == 0.0:
                 n_frame_fail += 1
             reasons = []
@@ -761,6 +769,13 @@ def grade_image(image_path: Path | None = None,
     # page_index inconnu (mode in-memory sans nom de fichier).
     open_answers = _grade_freeform_open_answers(warped, page_index) if page_index else {}
 
+    # Détection « cette page est-elle une feuille de réponses ? » — utile quand
+    # une copie fait plusieurs pages (recto sujet + verso réponses) : la page
+    # sans grille de cases voit ~tous ses cadres échouer. Signal robuste, indépen-
+    # dant de ce que l'étudiant a coché. Si la référence (PDF sujet) est absente,
+    # frame_detected n'est jamais évalué (n_frame_fail=0) → on garde la page.
+    is_answer_sheet = not (n_cells > 0 and n_frame_fail >= ANSWER_SHEET_FRAME_FAIL_FRAC * n_cells)
+
     return {
         "student_name": "",
         "student_id": student_id,
@@ -771,6 +786,9 @@ def grade_image(image_path: Path | None = None,
         "_cv_method": method,
         "_ambiguous_cells": ambiguous,
         "_copy_id": copy_id,
+        "_n_frame_fail": n_frame_fail,
+        "_n_cells": n_cells,
+        "_is_answer_sheet": is_answer_sheet,
     }
 
 
@@ -991,6 +1009,10 @@ def _fused_worker(args):
     to_save = {k: v for k, v in r.items() if not k.startswith("_")}
     to_save["answers"] = {str(k): v for k, v in to_save["answers"].items()}
     to_save["_ambiguous_cells"] = r.get("_ambiguous_cells", [])
+    # Signal « feuille de réponses ? » (copies multi-pages) — propagé au seed.
+    for _k in ("_is_answer_sheet", "_n_frame_fail", "_n_cells"):
+        if _k in r:
+            to_save[_k] = r[_k]
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(to_save, f, ensure_ascii=False, indent=2)
 

@@ -9,9 +9,12 @@ API (utilisée par l'UI) :
     create_project(dest, template="from_amc", source_tex=Path("…/exam.tex"))
 
 Le dossier `templates/<id>/exam.tex` contient le sujet de démarrage (LaTeX
-canonique avec marqueurs `%%QCM-…`). Un projet vierge = code copié + config
-par défaut + ce sujet copié au bon endroit. Le PDF, le `.xy` et les
-`raw_responses/` seront produits ensuite par le pipeline.
+canonique avec marqueurs `%%QCM-…`). Un projet vierge ne contient **que des
+données** : config par défaut + ce sujet copié au bon endroit. Le code (Python,
+Flask, templates, static, modèles ML) reste dans l'installation (le repo) et
+n'est jamais copié dans un projet — il est résolu au runtime via `__file__` /
+`_INSTALL_DIR`, tandis que les données le sont via `config.project_root()`. Le
+PDF, le `.xy` et les `raw_responses/` seront produits ensuite par le pipeline.
 """
 
 from __future__ import annotations
@@ -21,18 +24,8 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent          # auto_grading/ (source du code)
-PROJECT_ROOT = ROOT.parent                      # dossier projet source
+ROOT = Path(__file__).resolve().parent          # auto_grading/ (installation = repo)
 TEMPLATES_DIR = ROOT / "templates"               # templates fournis
-
-# Dossiers de données / artefacts générés — jamais copiés vers un projet vierge.
-_SKIP_DIRS = {"pages", "raw_responses", "raw_responses_cv", "results", "imports",
-              "compte_rendu", "_removed", "to_review", "__pycache__",
-              "zoom_cache", ".git", ".venv", "sujet"}
-# Fichiers spécifiques à un examen — recréés vierges.
-_SKIP_FILES = {"config.json", "answer_key.py", "student_list.xlsx",
-               "student_list_pending.xlsx", ".env", "exam.tex",
-               "DOC-sujet.pdf", "cell_clf.pkl"}
 
 CONFIG_TEMPLATE = {
     "amc_dir": "../projet",
@@ -50,6 +43,10 @@ CONFIG_TEMPLATE = {
     "qcm_agg_weight": 1.0,
     "final_threshold": 20.0,
     "pass_mark": 10.0,
+    "question_floor": None,
+    "question_ceiling": None,
+    "total_floor": None,
+    "show_score_range": False,
 }
 
 
@@ -85,23 +82,6 @@ def _read_template_tex(template_id: str) -> str:
     if not p.exists():
         raise KeyError(f"Template inconnu : {template_id}")
     return p.read_text(encoding="utf-8")
-
-
-# --- Copie du code ---------------------------------------------------------
-
-def _ignore(dirpath: str, names: list[str]) -> set[str]:
-    skip = set()
-    for n in names:
-        if n in _SKIP_DIRS or n in _SKIP_FILES:
-            skip.add(n)
-        elif n.endswith((".pyc", ".xy")):
-            skip.add(n)
-    return skip
-
-
-def _copy_install(dest_ag: Path) -> None:
-    """Copie le code d'`auto_grading/` (hors données) vers `dest_ag`."""
-    shutil.copytree(ROOT, dest_ag, ignore=_ignore)
 
 
 # --- Création d'un projet ---------------------------------------------------
@@ -147,26 +127,21 @@ def create_project(
     dest.mkdir(parents=True, exist_ok=True)
     ag = dest / "auto_grading"
     try:
-        # 1. copier le code (sans les données) — conserve models/cell_clf_full.pkl
-        _copy_install(ag)
+        # 1. structure de données du projet (aucun code copié — le code vit dans
+        #    l'installation et est résolu au runtime via __file__/_INSTALL_DIR)
+        ag.mkdir(parents=True, exist_ok=True)
 
-        # 2. fichiers à la racine du projet
-        for fn in ("pyproject.toml", "CLAUDE.md", "README.md"):
-            src = PROJECT_ROOT / fn
-            if src.exists():
-                shutil.copy(src, dest / fn)
-
-        # 3. dossier de l'examen (PDF scannés + xlsx liste à y déposer plus tard)
+        # 2. dossier de l'examen (PDF scannés + xlsx liste à y déposer plus tard)
         (dest / "projet").mkdir(parents=True, exist_ok=True)
 
-        # 4. config + sujet vierges
+        # 3. config + sujet vierges
         (ag / "config.json").write_text(
             json.dumps(CONFIG_TEMPLATE, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8")
         sujet_dir = ag / "sujet"
         sujet_dir.mkdir(parents=True, exist_ok=True)
 
-        # 5. exam.tex : depuis fichier importé OU depuis template (déjà lu)
+        # 4. exam.tex : depuis fichier importé OU depuis template (déjà lu)
         if template == "from_amc":
             shutil.copy(source_tex, sujet_dir / "exam.tex")
             if try_migrate:
@@ -187,6 +162,10 @@ def _try_migrate_to_canonical(ag: Path) -> tuple[bool, str]:
     `ag` (le nouveau projet) et en appelant `sujet_store.migrate_to_canonical()`
     dans un sous-process — évite de polluer les caches du process appelant.
 
+    Le **code** est chargé depuis l'installation (`AG_DIR=ROOT`) — le projet ne
+    contient que des données ; seules les **données** sont résolues vers `ag`
+    via `AMCX_PROJECT_DIR`.
+
     Retourne `(ok, message)`. Best-effort : un échec laisse le sujet en legacy.
     """
     import subprocess
@@ -196,7 +175,7 @@ def _try_migrate_to_canonical(ag: Path) -> tuple[bool, str]:
         "from sujet_store import migrate_to_canonical; "
         "migrate_to_canonical()"
     ]
-    env = {**__import__('os').environ, "AMCX_PROJECT_DIR": str(ag), "AG_DIR": str(ag)}
+    env = {**__import__('os').environ, "AMCX_PROJECT_DIR": str(ag), "AG_DIR": str(ROOT)}
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
@@ -225,16 +204,18 @@ def main():
     else:
         ag = create_project(dest, template=args.template)
 
-    print(f"✓ Projet vierge créé : {dest}")
+    print(f"✓ Projet vierge créé (données seules) : {dest}")
     print(f"  (dossier auto_grading : {ag})")
+    print("  Le code reste dans l'installation ; on le lance TOUJOURS depuis le repo,")
+    print("  le projet actif (donc les données) est résolu via le pointeur global.")
     print("  Étapes suivantes :")
-    print(f"    cd {dest}")
-    print("    python auto_grading/front/server.py        # UI → onglet « Sujet »")
+    print(f"    export AMCX_PROJECT_DIR={ag}        # ou ouvrir le projet via l'UI")
+    print(f"    python {ROOT / 'front' / 'server.py'}   # UI → onglet « Sujet »")
     print("    (éditer puis COMPILER le sujet ; imprimer ; faire passer l'examen)")
     print("    (déposer les PDF scannés + le xlsx liste dans  projet/)")
-    print("    python auto_grading/extract_pages.py")
-    print("    python auto_grading/cv_grade.py --all")
-    print("    python auto_grading/front/seed_raw_responses.py")
+    print(f"    python {ROOT / 'extract_pages.py'}")
+    print(f"    python {ROOT / 'cv_grade.py'} --all")
+    print(f"    python {ROOT / 'front' / 'seed_raw_responses.py'}")
 
 
 if __name__ == "__main__":

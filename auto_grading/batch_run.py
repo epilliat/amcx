@@ -1,4 +1,4 @@
-"""Orchestre l'appel grader.py sur les pages extraites, écrit students.csv.
+"""Recalcule students.csv depuis raw_responses/ (mode --cache-only).
 
 Idempotent: si raw_responses/<batch>/<page>.json existe déjà, on skippe l'appel API
 et on relit le JSON. Permet itération rapide.
@@ -13,16 +13,14 @@ import sys
 import time
 from pathlib import Path
 
-try:                                  # repli : absent sur un projet non encore initialisé
-    from answer_key import ANSWER_KEY
-except Exception:
-    ANSWER_KEY = {}
-from score import score_copy
+from score import question_set, score_copy
+from sujet_store import effective_spec
 from student_list import StudentMatcher
+import config
 # `grade_image` (voie Claude-vision) est importé paresseusement dans process() :
 # il tire anthropic + dotenv, inutiles en mode --cache-only.
 
-ROOT = Path(__file__).resolve().parent
+ROOT = config.project_root()  # projet actif : pour les données
 PAGES_DIR = ROOT / "pages"
 RAW_DIR = ROOT / "raw_responses"
 RESULTS_DIR = ROOT / "results"
@@ -52,7 +50,7 @@ def csv_header() -> list[str]:
     cols = ["batch", "page",
             "id_canonical", "nom_canonical", "prenom_canonical", "match_method", "match_flag",
             "id_lu", "nom_lu"]
-    for q in ANSWER_KEY:
+    for q in question_set():
         cols += [f"Q{q}_selected", f"Q{q}_correct", f"Q{q}_score"]
     cols += ["total_qcm", "model_notes", "warnings"]
     return cols
@@ -66,10 +64,13 @@ def csv_row(batch: str, page_num: int, data: dict, scores: dict, match: dict) ->
            s.prenom if s else "",
            match["method"], match["flag"],
            data["student_id"], data["student_name"]]
-    for q in ANSWER_KEY:
-        sel = "".join(data["answers"].get(q, []))
-        cor = ANSWER_KEY[q]["correct"]
-        row += [sel, cor, scores["per_question"][q]]
+    copy = int(data.get("_copy_id", 1) or 1)
+    answers = data.get("answers", {}) or {}
+    for q in question_set():
+        # Les clés JSON sont des chaînes ; accepter les deux formes.
+        sel = "".join(answers.get(str(q), answers.get(q, [])))
+        cor = effective_spec(q, copy=copy)["correct"]
+        row += [sel, cor, scores["per_question"].get(q, "")]
     row += [scores["total"], data.get("notes", ""), " | ".join(data.get("warnings", []))]
     return row
 
@@ -90,7 +91,16 @@ def process(batch: str, image_path: Path, force: bool = False, cache_only: bool 
     elif cache_only:
         return None
     else:
-        from grader import grade_image  # import paresseux → anthropic seulement si besoin
+        # Voie Claude-vision : déplacée dans archive/ (câblée en dur sur
+        # EXAM_2026). `--cache-only` n'en a pas besoin.
+        try:
+            from grader import grade_image  # import paresseux → anthropic seulement si besoin
+        except ImportError as e:
+            raise SystemExit(
+                "La voie Claude-vision est archivée (auto_grading/archive/grader.py) "
+                "et n'est plus branchée sur le sujet du projet. Utilise le pipeline "
+                "OpenCV : cv_grade.py --all puis batch_run.py --cache-only."
+            ) from e
         data = grade_image(image_path)
         # sérialiser
         to_save = dict(data)
@@ -170,7 +180,7 @@ def main():
         except Exception as e:  # noqa
             print(f"  [{i:3d}/{len(items)}] {batch}/page_{path.stem} ERREUR: {e}", flush=True)
             err_row = [batch, int(path.stem.split("_")[1]), "", "", "", "error", str(e), "", ""] \
-                + [""] * (3 * len(ANSWER_KEY)) + ["", "", str(e)]
+                + [""] * (3 * len(question_set())) + ["", "", str(e)]
             rows.append(err_row)
 
     with open(args.csv, "w", newline="") as f:

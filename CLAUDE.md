@@ -32,7 +32,9 @@ un sous-dossier `data/` avec les SQLite. Pour le test, `amc_dir` pointe sur
 | `<amc_dir>/data/scoring.sqlite` | *(optionnel)* — non requis : barème lu dans `exam.tex` |
 | liste étudiants (xlsx) | `config.student_xlsx` : `id_etudiant`, `nom`, `prenom_etat_civil` |
 
-Le sujet vit dans `auto_grading/sujet/exam.tex` (**source de vérité unique**). Le
+Le sujet vit dans `auto_grading/sujet/subject.json` (**source de vérité unique** —
+voir *Store du sujet* plus bas ; `exam.tex` en est un **produit**, régénéré à la
+compilation). Le
 code vit dans [auto_grading/](auto_grading/). `pyproject.toml` est à la racine.
 
 ## Démarrer un nouveau projet
@@ -77,12 +79,17 @@ des récents dans `~/.config/amcx/recent.json`. La variable d'env
 `AMCX_PROJECT_DIR` (utile pour tests/dev) prend le pas sur le pointeur.
 
 Architecture :
-- **Le code** vit dans l'installation (le `auto_grading/` du repo). Une
-  invocation `python auto_grading/front/server.py` lance toujours le code
-  installé — peu importe le projet actif. *Limitation actuelle* :
-  `new_project.py` copie le code dans chaque projet (héritage à nettoyer).
-- **Les données** (sujet, raw_responses, pages, config, imports, compte_rendu,
-  models) vivent dans le projet actif → résolues via `config.project_root()`.
+- **Le code** (Python, Flask, `front/templates`, `front/static`, modèles ML
+  `models/`) vit **uniquement** dans l'installation (le `auto_grading/` du repo),
+  poussée sur GitHub. Une invocation `python auto_grading/front/server.py` lance
+  toujours le code installé — peu importe le projet actif. Résolu au runtime via
+  `__file__` / `_INSTALL_DIR` (cf. `cv_grade.MODELS_DIR`, Flask
+  `template_folder`/`static_folder`). `new_project.py` ne copie **aucun** code :
+  un projet vierge = `config.json` + `sujet/exam.tex` seulement.
+- **Les données** (sujet, raw_responses, pages, config, imports, compte_rendu)
+  vivent dans le projet actif → résolues via `config.project_root()`. Un projet
+  ne contient donc **que des données** ; les modèles ML sont partagés depuis
+  l'installation.
 - **Switch de projet** = `project_state.restart_server_with_project(path)` :
   écrit le pointeur, spawn un watcher détaché qui attend la libération du port,
   puis `os._exit(0)` du process courant → le watcher exec un nouveau serveur
@@ -151,18 +158,26 @@ dans `amc_dir`, sinon `sujet/exam.xy`.
 l'écrit en mode *calibration* (`compile_pdf()` ajoute un `exam-config.tex` avec
 `\def\SujetExterne{1}`). `layout_store.parse_xy()` est un portage fidèle de l'outil
 AMC `meptex` — vérifié reproduire `layout.sqlite` à ~1e-12 px. → **plus aucune
-dépendance au logiciel AMC**. `answer_key.py` n'est qu'un repli structurel,
-régénérable via [regen_answer_key.py](auto_grading/regen_answer_key.py).
+dépendance au logiciel AMC**.
+
+⚠ **Ne jamais coder en dur les numéros de question.** AMC numérote *toutes* les
+questions (QCM, ouvertes, colonnes du code étudiant) : les colonnes ID sont
+Q32-35 sur EXAM_2026 mais Q3-6 ou Q33-36 ailleurs. La correspondance
+« numéro AMC ↔ bloc du sujet » est donnée par
+`sujet_store.amc_question_map(copy)`, bâtie sur les tags du `.xy`
+(`question_names`) avec repli positionnel ; `server.id_columns()` en dérive les
+colonnes du code étudiant. `check_layout_consistency()` tourne au démarrage du
+serveur et signale tout décalage sujet ↔ calage.
 
 ### 2. Q8 vaut 2 pts → total 32
 Q8 a 6 bonnes réponses (`\bareme{b=1/3,m=-1/3}` dans [exam.tex](EXAM_2026/exam.tex)). Total max = **32**.
 
-**Le barème est piloté par `auto_grading/sujet/exam.tex`** (source de vérité unique, éditée via l'onglet *Sujet*). [score.py](auto_grading/score.py) lit `b`/`m`/`value` via [sujet_store.py](auto_grading/sujet_store.py)`.get_bareme()` (qui parse `exam.tex`, cache `mtime`) ; `answer_key.py` ne sert plus que de repli. Modifier le barème dans l'UI recalcule toutes les notes (le total max n'est donc plus figé à 32). Voir la section *Onglet Sujet*.
+**Le barème est piloté par `auto_grading/sujet/subject.json`** (source de vérité unique, éditée via l'onglet *Sujet*). [score.py](auto_grading/score.py) lit `b`/`m`/`value` via [sujet_store.py](auto_grading/sujet_store.py)`.get_bareme()` (qui lit `subject.json`, cache `mtime`). Il n'y a **aucun repli** : une question absente du sujet vaut 0 (`answer_key.py`, figé sur EXAM_2026, a été supprimé — il produisait des notes fausses et silencieuses dans les autres projets, cf. [archive/](auto_grading/archive/)). Modifier le barème dans l'UI recalcule toutes les notes (le total max n'est donc plus figé à 32). Voir la section *Onglet Sujet*.
 
 **Pas de plancher** : depuis le passage en points négatifs, [score.py](auto_grading/score.py) ne plafonne plus une question mult à 0 (`mult = Σ b/m`, peut être négatif) — donc le total d'une copie peut aussi être négatif. Le score est recalculé à la volée depuis `answers` à chaque affichage ; changer `score.py` ne touche jamais `raw_responses/`.
 
 ### 3. Source de vérité = `raw_responses/<batch>/page_<NNN>.json`
-L'UI lit/écrit là. **Ne jamais écraser les `answers` de ces fichiers** — c'est la relecture finale de l'utilisateur. `cv_grade.py --all` n'écrit QUE dans `raw_responses_cv/` (scratch). Le re-seed (`seed_raw_responses.py --preserve-manual`) ne préserve les `answers` que des copies `validated`/`manually_edited` ; les autres seraient réécrites. **En pratique : ne pas re-grader cet examen.**
+L'UI lit/écrit là. **Ne jamais écraser les `answers` de ces fichiers** — c'est la relecture finale de l'utilisateur. `cv_grade.py --all` n'écrit QUE dans `raw_responses_cv/` (scratch). Le re-seed (`seed_raw_responses.py --preserve-manual`) préserve les copies portant un flag de `seed_raw_responses.USER_FLAGS` (`manually_edited`, `validated`, `id_corrige`, `open_answer_edited`) ou un `_student_override`/`_cv_student_id` : `answers`, `student_name`, `student_id`, `_student_override`, `_cv_student_id`, `open_answers` et les flags utilisateur. Les autres copies sont rafraîchies depuis le CV. Toutes les écritures de `raw_responses/` passent par `config.write_json_atomic` (tmp + `os.replace`). **En pratique : ne pas re-grader cet examen.**
 
 ### 4. Structure d'un JSON
 ```jsonc
@@ -256,12 +271,13 @@ auto_grading/
 ├── config.py / config.json    ← config runtime partagée (amc_dir, etc.)
 ├── layout_store.py            ← géométrie des cases : parseur .xy (port de meptex)
 │                                 + lecteur layout.sqlite ; get_layout() (précédence)
-├── new_project.py             ← crée un projet vierge (copie code, sujet gabarit)
-├── answer_key.py              ← repli structurel (regen depuis exam.tex+calage)
-├── regen_answer_key.py        ← régénère answer_key.py depuis exam.tex + layout_store
+├── new_project.py             ← crée un projet vierge DONNÉES SEULES (config + sujet gabarit, aucun code copié)
+├── archive/                   ← code hors service (answer_key, voie Claude-vision,
+│                                 ancien workflow to_review/) — voir son README
 ├── sujet_store.py             ← parse/édite sujet/exam.tex : parse_tex, get_bareme,
 │                                 max_score, total_max, save_questions, compile_pdf
-├── sujet/                     ← exam.tex (SOURCE DE VÉRITÉ du sujet) + DOC-sujet.pdf
+├── sujet/                     ← subject.json (SOURCE DE VÉRITÉ) + exam.tex (généré)
+│                                 + DOC-sujet.pdf + exam.xy (calage)
 ├── score.py                   ← applique le barème (single=value/0 ; mult=Σ b/m, peut être négatif)
 ├── student_list.py            ← StudentMatcher : match par id (last4) + fuzzy nom ; config-driven
 ├── grade_imports.py           ← import csv/xlsx de notes externes : auto-détection de structure,
@@ -274,12 +290,11 @@ auto_grading/
 ├── train_classifier.py        ← entraîne le GBM
 ├── cv_benchmark.py            ← accuracy CV vs ground truth
 ├── batch_run.py               ← orchestrateur → students.csv (import grader paresseux)
-├── grader.py / vision_prompt.py  ← voie Claude-vision héritée (extra [api], non utilisée)
 ├── models/                    ← cell_clf_full.pkl (prod), cell_clf.pkl
 ├── front/
 │   ├── server.py              ← UI Flask (toutes les routes)
 │   ├── seed_raw_responses.py  ← merge CV+AMC → raw_responses/ (--preserve-manual)
-│   ├── templates/             ← base.html + dashboard/zoom/zoom_all/flagged/student/identites/sujet
+│   ├── templates/             ← base.html + dashboard/zoom/flagged/student/identites/sujet/banque
 │   │                            + partials _zoom_grid / _id_grid / _student_card / zoom_fragment
 │   └── static/                ← style.css + vendor/ (KaTeX + marked.js, vendorisés hors-ligne)
 ├── pages/                     ← 173 JPEG (ignorés git ; 1 pub CamScanner écartée)
@@ -310,9 +325,8 @@ pkill -f "front/server.py"
 .venv/bin/python auto_grading/build_dataset.py
 .venv/bin/python auto_grading/train_classifier.py --cv
 
-# Benchmark + answer_key + CSV
+# Benchmark + CSV
 .venv/bin/python auto_grading/cv_benchmark.py
-.venv/bin/python auto_grading/regen_answer_key.py
 .venv/bin/python auto_grading/batch_run.py --cache-only
 
 # Sujet : récap du sujet parsé depuis sujet/exam.tex (lecture seule)
@@ -330,7 +344,6 @@ pkill -f "front/server.py"
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
 | `/flagged` | **Review rapide** : cases flaggées / Identité ; filtres validés |
-| `/zoom-all` | Toutes les copies empilées, grilles lazy-load |
 | `/student/<b>/<p>` | Vue copie : image canonique + ronds magenta + zoom embedded |
 | `/student/<b>/<p>/zoom` | Onglets *Réponses* (2 zones) / *Identité* (crop nom + grille ID) |
 | `/identites` | Review finale : copies non reliées ↔ noms, drag&drop |
@@ -361,7 +374,54 @@ pkill -f "front/server.py"
 | `/api/save-report` | écrit `compte_rendu/` : notes.csv + SVG |
 | `/api/student-card/<b>/<p>` | fragment HTML fiche étudiant |
 | `/export.csv` | CSV récap |
-| `/img/...`, `/img_canon/...`, `/zoom_img/...`, `/name_img/<b>/<p>.jpg` | images |
+| `/img/...`, `/img_canon/...`, `/zoom_img/...`, `/name_img/<b>/<p>.jpg` | images (cache disque sous `static/zoom_cache/<hash-projet>/`, invalidé au mtime de la page source) |
+
+## Édition du sujet — pertes de saisie évitées
+
+L'onglet *Sujet* recharge la page après plusieurs actions (ajout, duplication,
+import de banque, édition IA, migration). Chacune passe par `reloadPage()`,
+précédée de `ensureSavedBeforeReload()` pour les actions déclenchées à la main :
+proposition d'enregistrer, ou abandon. Un `beforeunload` couvre tout le reste
+(fermeture d'onglet, navigation). Un changement de type single↔mult ne recharge
+plus au milieu de la boucle de sauvegarde (`_reloadAfterSave`, appliqué à la
+fin) — sinon les blocs suivants étaient abandonnés.
+
+`AMCxBlockEditor` (front/static/block_editor.js) stocke son contexte **par bloc**
+(`WeakMap`) : un callback partagé faisait que le dernier `initBlock` écrasait
+ceux des blocs précédents. Sans effet tant qu'une page n'édite qu'un bloc
+(banque), bloquant pour la migration de `/sujet` vers cet éditeur.
+`onTypeChange(blk)` est attendu (`await`) : l'appelant enregistre avant de
+re-rendre.
+
+## Sécurité (serveur local, sans authentification)
+
+Le serveur écoute par défaut sur `127.0.0.1` mais `--host` permet de l'exposer,
+et aucune route n'est authentifiée. Garde-fous en place — **à ne pas retirer** :
+
+- **Noms de batch validés au plus près du disque** : `server.safe_batch()` est
+  appelé dans `load_copy_json` / `save_copy_json` / les routes d'images, pas
+  dans chaque route — un nouvel appelant ne peut pas l'oublier. Sans ça,
+  `batch="../../.."` lit et écrit hors du projet (`save_copy_json` crée les
+  dossiers manquants). Idem `q`/`char` de `/zoom_img`, validés avant de
+  construire le chemin de cache.
+- **Anti-CSRF** : `_same_origin_only()` (`before_request`) refuse toute requête
+  non-GET dont l'`Origin` ne correspond pas à l'hôte servi. Les 11
+  `get_json(force=True)` acceptent du `text/plain`, donc sans ça une page web
+  tierce peut déclencher n'importe quelle mutation sur `localhost:5050`.
+  Une requête sans `Origin` (curl, tests) reste acceptée.
+- **Secrets jamais renvoyés au navigateur** : `public_config()` masque
+  `anthropic_api_key` et retire les jetons Supabase des banques.
+  `/api/ai/auth-status` et `/api/banks` exposent déjà ce dont le front a besoin.
+- **Contenu de banque = entrée non fiable** : une question `public` vient d'un
+  autre utilisateur. `AMCxRender.sanitizeHtml()` filtre par liste blanche la
+  sortie de marked (avant réinsertion du HTML KaTeX, qui est généré localement).
+  Les messages d'erreur vont en `textContent`, jamais en `innerHTML`.
+- **`bank_id` validé** avant tout glob (`bank.is_valid_bank_id`) : `"*"`
+  matchait la première question venue.
+- `ValueError` → **400** via `@app.errorhandler`, pas un 500 opaque.
+
+La route `/api/save` (écriture d'un JSON arbitraire à un chemin fourni par le
+client, sans aucun appelant côté front) a été **supprimée**.
 
 ## Identités — match étudiant & doublons
 
@@ -388,6 +448,32 @@ en deux modes auto-détectés selon le contenu d'`exam.tex` :
 - **`empty`** : `exam.tex` absent (créer un projet via `new_project.py`).
 
 Détection : `sujet_store.is_canonical(tex)` ⇔ présence de `%%QCM-BLOCKS-START`.
+Le mode est **persisté dans `subject.json`** : un sujet legacy le reste tant
+qu'il n'a pas été migré explicitement.
+
+### Store du sujet : `sujet/subject.json`
+
+**La source de vérité est `sujet/subject.json`**, pas `exam.tex`.
+
+- « Sauvegarder » (toutes les routes `/api/sujet/*`) écrit **uniquement** le
+  store, jamais le `.tex`.
+- « Compiler » (`compile_pdf`) est le **seul** endroit qui écrit `exam.tex` :
+  il le régénère depuis le store (backup `exam.tex.bak` si le contenu change),
+  puis produit `DOC-sujet.pdf` et le calage `exam.xy`.
+- **Bootstrap** : si `subject.json` est absent mais `exam.tex` présent, le tex
+  est parsé une fois et le store écrit ; le `.tex` n'est pas touché.
+- ⚠ **Un sujet legacy bootstrappé reste `legacy`** et n'est **pas** régénéré à
+  la compilation — son préambule et sa feuille de réponses sont conservés
+  verbatim (`cfg.preamble_tex` / `cfg.answer_sheet_tex`, découpés par
+  `_split_legacy_tex`, partagé avec `migrate_to_canonical`). C'est ce qui
+  garantit un calage `.xy` **byte-identique** : régénérer depuis le gabarit
+  changerait la position des cases et désalignerait toutes les copies déjà
+  scannées. Vérifié sur EXAM_2026 : `bb78eb3d97b26e34` avant migration, après
+  migration, et après bootstrap.
+- **Store corrompu** : il est mis de côté en `subject.json.corrupt-<horodatage>`,
+  le sujet repart d'`exam.tex`, et un avertissement remonte dans
+  `GET /api/sujet` → `warnings` (plus de repli silencieux, qui perdait sans un
+  mot toutes les éditions non compilées).
 
 ### Modèle de blocs canonique
 
@@ -546,7 +632,7 @@ sujet avant de migrer :
 - Tous les blocs text legacy ont `data.readonly = True` et un titre lisible
   (`data.title` = titre de section ou aperçu des premiers chars).
 - `parse_tex()` (compat) continue de retourner uniquement les `question_qcm`
-  indexés par ordre (1, 2, … N). `score.py` et `regen_answer_key.py` marchent
+  indexés par ordre (1, 2, … N). `score.py` marche
   inchangés.
 
 ### `new_project.py` template canonique
@@ -565,10 +651,67 @@ une mauvaise réponse en mettant `1/2` (sans le `-`), le tex devient
 
 ## Banque de questions (MVP)
 
-Une banque locale permet de réutiliser une question entre projets sans
-copier-coller le `.tex`. Module : [auto_grading/bank.py](auto_grading/bank.py).
+Une banque permet de réutiliser une question entre projets sans copier-coller
+le `.tex`. Modules : [auto_grading/bank.py](auto_grading/bank.py) (local) et
+[auto_grading/bank_online.py](auto_grading/bank_online.py) (Supabase).
 
-**Stockage** : `~/Documents/AMCx-banque/` (override env `AMCX_BANK_DIR`).
+### Multi-banques (V2) — sélection + ajout depuis l'UI
+
+`config.banks` est un dict `{slug: entry}` (V2) — plusieurs banques peuvent
+coexister (perso, ENSAI, communautaire, …) et l'user switche entre elles
+dans la **topbar de la page Banque** (dropdown à côté du titre). Chaque
+entry porte son propre type/credentials :
+
+```jsonc
+{
+  "active_bank": "perso-local",
+  "banks": {
+    "perso-local":        {"name": "…", "type": "local",  "path": "~/Documents/AMCx-banque/"},
+    "hypothesis-testing": {"name": "…", "type": "local",  "path": "~/Documents/AMCx-banques/hypothesis-testing/"},
+    "ensai-public":       {"name": "…", "type": "online", "supabase_url": "…", "supabase_anon_key": "…",
+                           "user_token": "…", "refresh_token": "…", "user_id": "…", "user_email": "…",
+                           "token_expires_at": …}
+  }
+}
+```
+
+**Migration auto** : au 1er `load_config()` avec une config V1 (clés flat
+`bank_mode`, `bank_supabase_url`, …), `_migrate_banks()` crée `banks["default"]`
+depuis ces valeurs et pose `active_bank="default"`. Les clés flat sont
+conservées en DEFAULTS pour permettre un rollback. Les nouvelles écritures
+vont dans `banks[active]` via `config.update_active_bank(updates)`.
+
+**Helpers `config.py`** : `active_bank_cfg()` → dict de la banque active,
+`active_bank_slug()` → slug, `update_active_bank(updates)` → patch dans
+`banks[active]` (sans toucher aux autres banques).
+
+**Routes serveur** (CRUD sur les banques elles-mêmes, distinctes des routes
+`/api/bank*` qui agissent sur les questions de la banque active) :
+- `GET    /api/banks`                  → `{active, banks: [{slug, name, type, path? | supabase_url?, logged_in?, user_email?}]}`
+- `POST   /api/banks`                  → `{name, type:'local'|'online', path? | supabase_url?, supabase_anon_key?}` → crée + génère un slug unique
+- `DELETE /api/banks/<slug>`           → supprime. Si c'était l'active, repointe vers une autre (ou recrée default vide)
+- `POST   /api/banks/<slug>/activate`  → switch (le serveur reste up, `_bank()` lit la nouvelle au prochain request)
+
+`_bank()` (dispatcher dans server.py) lit `config.active_bank_cfg()["type"]`
+et retourne `bank` ou `bank_online`. Toutes les routes `/api/bank*` (questions)
+restent inchangées.
+
+**UI** (`templates/banque.html`) : topbar = `[📚 Banque]  [💾 Nom de la banque ▾]
+[+ Ajouter] [🔐 Connexion] [📊 Sync] [👁 Aperçu]`. Le dropdown banque affiche
+toutes les banques avec icône (💾/🌐), pastille « active » sur la courante,
+🗑 par ligne (suppression). Click sur une ligne autre = `POST activate` +
+`window.location.reload()`. Bouton « + Ajouter » → modale (nom + type
+local/online + path ou URL+anon).
+
+**Hors-scope V2** : multi-bank read (interroger plusieurs banques en parallèle),
+cross-bank stats, browse natif de dossier (le champ « Chemin » est un text
+input — utiliser `~` ou chemin absolu), renommage, PATCH des credentials
+d'une banque existante (workaround : delete + recréer).
+
+### Schéma de stockage (local)
+
+**Stockage local** : `~/Documents/AMCx-banque/` par défaut (override : champ
+`path` de la banque active, ou env `AMCX_BANK_DIR` en fallback final).
 1 fichier JSON par question sous `questions/<bank_id>-<slug>.json` +
 `index.json` (cache, reconstruit auto si désynchronisé).
 
@@ -615,19 +758,25 @@ existante), synchro git, détection de dépendances LaTeX.
 
 ### Backend en ligne (Supabase) — multi-user
 
-À côté de la banque locale, un backend Supabase est disponible pour partager
-une banque entre plusieurs profs (communauté ouverte). Toggle via Réglages →
-Banque dans le dashboard. Setup : voir [supabase/README.md](supabase/README.md).
+À côté des banques locales, un backend Supabase est disponible pour partager
+une banque entre plusieurs profs (communauté ouverte). Chaque banque online
+a ses propres credentials (URL + clé anon + tokens user) — on peut donc avoir
+plusieurs banques online en parallèle (cf. V2 multi-banques ci-dessus).
+Setup : voir [supabase/README.md](supabase/README.md).
 
 **Architecture** :
-- [auto_grading/bank.py](auto_grading/bank.py) reste le backend local (défaut).
+- [auto_grading/bank.py](auto_grading/bank.py) reste le backend local.
 - [auto_grading/bank_online.py](auto_grading/bank_online.py) : client HTTP qui
-  tape sur PostgREST de Supabase, même API que `bank.py`.
+  tape sur PostgREST de Supabase, même API que `bank.py`. Tous les
+  reads/writes passent par `config.active_bank_cfg()` (URL / anon /
+  user_token / refresh_token).
 - [auto_grading/bank_auth.py](auto_grading/bank_auth.py) : flot OTP code à
   6 chiffres par email (pas de magic link cliquable → zéro redirect URL à
-  configurer).
+  configurer). Lit/écrit dans la banque active via
+  `config.active_bank_cfg()` / `config.update_active_bank(...)`.
 - [auto_grading/front/server.py](auto_grading/front/server.py) helper `_bank()` :
-  dispatcher qui retourne `bank` ou `bank_online` selon `config.bank_mode`.
+  dispatcher qui retourne `bank` ou `bank_online` selon
+  `config.active_bank_cfg()["type"]`.
 
 **Schéma Postgres** ([supabase/schema.sql](supabase/schema.sql)) :
 - `profiles` : extend `auth.users` (display_name + institution)
@@ -641,9 +790,10 @@ Banque dans le dashboard. Setup : voir [supabase/README.md](supabase/README.md).
 
 **Auth** : flot OTP — `POST /api/bank/auth/send-otp {email}` → Supabase envoie
 un code 6 chiffres → user le saisit → `POST /api/bank/auth/verify-otp
-{email, code}` → access_token + refresh_token persistés dans `config.json`
-(`bank_user_token`, `bank_refresh_token`, `bank_user_id`, `bank_user_email`).
-Refresh transparent via `bank_auth.refresh_token_if_possible()` au 1er 401.
+{email, code}` → access_token + refresh_token persistés dans la banque
+active (`banks[active].user_token`, `.refresh_token`, `.user_id`, `.user_email`)
+via `config.update_active_bank(...)`. Refresh transparent via
+`bank_auth.refresh_token_if_possible()` au 1er 401.
 
 **⚠ Mode invite-only (FORTEMENT recommandé)** : par défaut, n'importe qui
 peut signup avec son email — y compris tes étudiants — et lirait les
@@ -912,17 +1062,19 @@ réponse (rectangle large sous le marker, hauteur `lines × 24pt`). Écrit
 
 ## Si tu dois changer le barème
 
-Le plus simple : l'éditer dans l'onglet *Sujet* — le `\bareme{...}` est réécrit dans
-`sujet/exam.tex`, le recalcul des notes est immédiat partout (`score.py` relit `exam.tex`).
-Sinon éditer `\bareme{...}` directement dans `sujet/exam.tex` ; `batch_run.py --cache-only`
-recalcule le CSV. `answer_key.py` (structure des questions) reste régénéré à part via
-`regen_answer_key.py`.
+L'éditer dans l'onglet *Sujet* : le barème est écrit dans `sujet/subject.json` et le
+recalcul des notes est immédiat partout (`score.py` relit le store).
+
+⚠ **Ne pas éditer `sujet/exam.tex` à la main** : il est régénéré depuis le store à
+chaque compilation, une modification directe serait écrasée (un backup
+`exam.tex.bak` est écrit avant réécriture). Pour repartir d'un `.tex` édité
+dehors, l'importer comme nouveau projet (`new_project.py --from-amc`).
 
 ## Décisions de design qui peuvent surprendre
 
 - **CV+ML est source primaire des `answers`** (pas AMC) — choix utilisateur « CV par défaut, flag si diff AMC ». La ground truth AMC est dans `_amc_answers`, la diff dans `_cv_amc_diff`.
 - **Le ML tourne sur toutes les cases** (et pas seulement une bande grise) ; l'ambiguïté est le désaccord ML/seuil — définition nette voulue par l'utilisateur.
-- **Pas d'API Anthropic** dans le pipeline : `grader.py`/`vision_prompt.py` sont une voie multimodale abandonnée (extra `[api]`, import paresseux dans `batch_run.py`).
+- **Pas d'API Anthropic** dans le pipeline de correction : `grader.py`/`vision_prompt.py` (voie multimodale abandonnée) sont dans [archive/](auto_grading/archive/) ; l'import paresseux de `batch_run.py` échoue désormais avec un message explicite. L'API Anthropic ne sert qu'à l'édition IA du sujet et au HTR.
 - **`index.html` supprimé** — `/` rend `dashboard.html` (toutes les pages héritent de `base.html`).
-- **`to_review/`** + `prepare_to_review.py` / `import_reviewed.py` / `update_to_review_with_cv.py` / `build_index_md.py` = ancien workflow fichiers, superseded par l'UI. Archive.
+- **`to_review/`** + `prepare_to_review.py` / `import_reviewed.py` / `update_to_review_with_cv.py` / `build_index_md.py` = ancien workflow fichiers, superseded par l'UI → déplacés dans [auto_grading/archive/](auto_grading/archive/) (⚠ `import_reviewed.py` écrivait dans `raw_responses/` sans rien préserver).
 - Le serveur Flask est en `debug=off` → **les templates ne se rechargent pas à chaud**, redémarrer après édition.

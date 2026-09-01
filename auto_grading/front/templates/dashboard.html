@@ -204,6 +204,18 @@
         <label>Seuil de réussite
           <input type="number" id="cfg-pass-mark" step="0.5" min="0"
                  value="{{ "%g"|format(cfg.pass_mark) }}"></label>
+        <label title="Aucune question ne descend sous cette valeur (points barème). Vide = aucun plancher. Surchargeable par question dans l'onglet Sujet.">Plancher / question
+          <input type="number" id="cfg-question-floor" step="0.25" placeholder="aucun"
+                 value="{{ "%g"|format(cfg.question_floor) if cfg.question_floor is not none else "" }}"></label>
+        <label title="Aucune question ne dépasse cette valeur (points barème). Vide = aucun plafond. Surchargeable par question dans l'onglet Sujet.">Plafond / question
+          <input type="number" id="cfg-question-ceiling" step="0.25" placeholder="aucun"
+                 value="{{ "%g"|format(cfg.question_ceiling) if cfg.question_ceiling is not none else "" }}"></label>
+        <label title="Le total QCM brut ne descend pas sous cette valeur (points barème). Vide = aucun plancher.">Plancher global
+          <input type="number" id="cfg-total-floor" step="0.5" placeholder="aucun"
+                 value="{{ "%g"|format(cfg.total_floor) if cfg.total_floor is not none else "" }}"></label>
+        <label class="settings-check" title="Imprime sous chaque QCM une ligne italique « entre LO et HI pt ». Recompiler le sujet pour l'appliquer.">
+          <input type="checkbox" id="cfg-show-score-range"{% if cfg.show_score_range %} checked{% endif %}>
+          Afficher la fourchette sur le sujet</label>
         <button id="cfg-apply" class="btn btn-primary btn-small">Appliquer</button>
         <button id="save-report" class="btn btn-small">💾 Sauvegarder le compte rendu</button>
         <span id="report-status" class="settings-hint"></span>
@@ -503,6 +515,14 @@ async function applyConfig() {
     final_threshold: parseFloat(document.getElementById('cfg-final-threshold').value),
     pass_mark: parseFloat(document.getElementById('cfg-pass-mark').value),
   };
+  // Planchers/plafond (points barème) : champ vide = désactivé (null).
+  const qf = document.getElementById('cfg-question-floor').value.trim();
+  const qc = document.getElementById('cfg-question-ceiling').value.trim();
+  const tf = document.getElementById('cfg-total-floor').value.trim();
+  body.question_floor   = qf === '' ? null : parseFloat(qf);
+  body.question_ceiling = qc === '' ? null : parseFloat(qc);
+  body.total_floor      = tf === '' ? null : parseFloat(tf);
+  body.show_score_range = document.getElementById('cfg-show-score-range').checked;
   // chaque colonne a 2 lignes de paramètres (rescaling + agrégation) → on fusionne
   const cols = {};
   document.querySelectorAll('.param-row').forEach(row => {

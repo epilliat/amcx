@@ -21,13 +21,14 @@ from pathlib import Path
 
 import openpyxl
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent          # installation : pour les imports
 sys.path.insert(0, str(ROOT))
 import config  # noqa: E402
 from student_list import StudentMatcher  # noqa: E402
 
-NOTES_CSV = ROOT / "compte_rendu" / "notes.csv"
-DEFAULT_OUT = ROOT / "compte_rendu" / "notes_scolarite.xlsx"
+_DATA = config.project_root()                    # projet actif : pour les données
+NOTES_CSV = _DATA / "compte_rendu" / "notes.csv"
+DEFAULT_OUT = _DATA / "compte_rendu" / "notes_scolarite.xlsx"
 
 
 def template_path() -> Path | None:

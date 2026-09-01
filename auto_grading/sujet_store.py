@@ -31,22 +31,20 @@ donne la lettre de feuille de chaque réponse par copie (`_tex_chars(copy)`).
 from __future__ import annotations
 
 import copy as _copy
+import json
+import os
 import random
 import re
 import secrets
 import shutil
 import subprocess
+from datetime import datetime
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 
 import layout_store
-
-try:                                  # repli structurel — absent sur un projet vierge
-    from answer_key import ANSWER_KEY
-except Exception:
-    ANSWER_KEY = {}
 
 # SUJET_DIR vit dans le projet actif (cf. config.project_root()).
 # Calculé à l'import (donc figé au démarrage du process) — un switch de projet
@@ -59,6 +57,7 @@ EXAM_TEX = SUJET_DIR / "exam.tex"
 SUJET_PDF = SUJET_DIR / "DOC-sujet.pdf"
 EXAM_XY = SUJET_DIR / "exam.xy"
 OPEN_ZONES_JSON = SUJET_DIR / "open_zones.json"  # géométrie des cases freeform (HTR)
+SUBJECT_JSON = SUJET_DIR / "subject.json"        # SOURCE DE VÉRITÉ (blocs propres)
 
 _Q_BEGIN = re.compile(r"\\begin\{(questionmult|question)\}\{([^}]+)\}")
 _REP_BEGIN = re.compile(r"\\begin\{(reponseshoriz|reponses)\}")
@@ -171,12 +170,141 @@ def _config_to_dict(cfg: SubjectConfig) -> dict:
 
 
 def subject_to_dict(subject: dict) -> dict:
-    """Sérialise un subject (résultat de `parse_subject`) en dict JSON."""
+    """Sérialise un subject (résultat de `parse_subject`) en dict JSON pour l'API.
+
+    NB : volontairement SANS `preamble_tex`/`answer_sheet_tex` (l'UI n'en a pas
+    besoin). Pour la persistance complète (store), voir `_subject_to_store`.
+    """
     return {
         "config": _config_to_dict(subject["config"]),
         "blocks": [_block_to_dict(b) for b in subject["blocks"]],
         "mode": subject.get("mode", "empty"),
     }
+
+
+# --------------------------------------------------------------------------
+# Store JSON : `sujet/subject.json` est la SOURCE DE VÉRITÉ du sujet.
+# `exam.tex` n'est plus qu'un artefact, régénéré uniquement par `compile_pdf`.
+# (De)sérialisation COMPLÈTE (inclut preamble_tex / answer_sheet_tex que
+# `_config_to_dict` omet).
+# --------------------------------------------------------------------------
+
+def _subject_to_store(subject: dict) -> dict:
+    """Subject {config, blocks} → dict JSON complet (persistance)."""
+    cfg: SubjectConfig = subject["config"]
+    return {
+        "version": 1,
+        "config": {
+            "num_copies": cfg.num_copies,
+            "random_seed": cfg.random_seed,
+            "shuffle_answers": cfg.shuffle_answers,
+            "shuffle_questions": cfg.shuffle_questions,
+            "header": cfg.header.__dict__.copy(),
+            "answer_sheet": cfg.answer_sheet.__dict__.copy(),
+            "preamble_tex": cfg.preamble_tex,
+            "answer_sheet_tex": cfg.answer_sheet_tex,
+        },
+        "blocks": [{"bid": b.bid, "kind": b.kind, "data": b.data}
+                   for b in subject["blocks"]],
+        # Le mode DOIT être persisté : un sujet legacy bootstrappé dans le
+        # store restait « legacy » en mémoire mais repassait « canonical » à
+        # la relecture — le verrou lecture seule sautait tout seul, et la
+        # compilation suivante réécrivait exam.tex depuis le gabarit.
+        "mode": subject.get("mode", "canonical"),
+    }
+
+
+def _subject_from_store(d: dict) -> dict:
+    """dict JSON complet → Subject {config, blocks, mode}.
+
+    `mode` est relu du store : un sujet legacy le reste tant qu'il n'a pas été
+    migré explicitement.
+    """
+    cd = d.get("config", {}) or {}
+    header = HeaderBlock(**{k: v for k, v in (cd.get("header") or {}).items()
+                           if k in HeaderBlock.__dataclass_fields__})
+    answer_sheet = AnswerSheetConfig(
+        **{k: v for k, v in (cd.get("answer_sheet") or {}).items()
+           if k in AnswerSheetConfig.__dataclass_fields__})
+    cfg = SubjectConfig(
+        num_copies=int(cd.get("num_copies", 1) or 1),
+        random_seed=int(cd.get("random_seed", DEFAULT_SEED) or DEFAULT_SEED),
+        shuffle_answers=bool(cd.get("shuffle_answers", True)),
+        shuffle_questions=bool(cd.get("shuffle_questions", False)),
+        header=header,
+        answer_sheet=answer_sheet,
+        preamble_tex=cd.get("preamble_tex", "") or "",
+        answer_sheet_tex=cd.get("answer_sheet_tex", "") or "",
+    )
+    blocks = [Block(bid=b.get("bid") or _gen_bid(b.get("kind", "")),
+                    kind=b.get("kind", ""), data=b.get("data") or {})
+              for b in (d.get("blocks") or [])]
+    return {"config": cfg, "blocks": blocks,
+            "mode": d.get("mode") or "canonical"}
+
+
+def _write_subject_json(subject: dict) -> None:
+    """Écrit `subject.json` de façon atomique (tmp + os.replace)."""
+    SUJET_DIR.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(_subject_to_store(subject), ensure_ascii=False, indent=2)
+    tmp = SUBJECT_JSON.with_suffix(".json.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, SUBJECT_JSON)
+
+
+# Avertissements de chargement du store, remontés à l'UI. Vidés à la lecture.
+_STORE_WARNINGS: list[str] = []
+
+
+def pop_store_warnings() -> list[str]:
+    """Retourne et vide les avertissements de chargement du store."""
+    out = list(_STORE_WARNINGS)
+    _STORE_WARNINGS.clear()
+    return out
+
+
+def _load_subject_store() -> dict:
+    """Charge le sujet depuis le store JSON (source de vérité).
+
+    Bootstrap : si `subject.json` est absent mais `exam.tex` existe, on parse le
+    .tex (canonique OU legacy) et on écrit `subject.json` une fois — le .tex
+    n'est PAS modifié. Si rien n'existe → sujet vide.
+    """
+    with _io_lock:
+        if SUBJECT_JSON.exists():
+            try:
+                return _subject_from_store(
+                    json.loads(SUBJECT_JSON.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                # Store illisible : on repart du .tex, mais SANS le faire en
+                # silence — le .tex n'est réécrit qu'à la compilation, donc
+                # tout ce qui a été édité depuis serait perdu sans un mot.
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                corrupt = SUBJECT_JSON.with_name(f"subject.json.corrupt-{stamp}")
+                try:
+                    SUBJECT_JSON.replace(corrupt)
+                except OSError:
+                    corrupt = None
+                _STORE_WARNINGS.append(
+                    f"subject.json illisible ({e}) — repli sur exam.tex."
+                    + (f" Fichier mis de côté : {corrupt.name}." if corrupt else "")
+                    + " Les éditions faites depuis la dernière compilation"
+                      " sont perdues.")
+                print("⚠ " + _STORE_WARNINGS[-1])
+        if EXAM_TEX.exists():
+            sub = _parse_tex_subject(EXAM_TEX.read_text(encoding="utf-8"))
+            try:
+                _write_subject_json(sub)
+            except OSError:
+                pass
+            return sub
+        return {"config": SubjectConfig(), "blocks": [], "mode": "empty"}
+
+
+def save_subject_store(subject: dict) -> None:
+    """Persiste le sujet dans `subject.json` (NE TOUCHE PAS au .tex) + caches."""
+    _write_subject_json(subject)
+    _invalidate_caches()
 
 
 # --------------------------------------------------------------------------
@@ -217,6 +345,138 @@ def _tex_chars(copy: int = 1) -> dict:
         cm = {}
     _charmap_by_copy[copy] = cm
     return cm
+
+
+# --------------------------------------------------------------------------
+# Correspondance « numéro de question AMC » ↔ blocs du sujet
+# --------------------------------------------------------------------------
+
+# Blocs qui produisent des cases à lettres sur la feuille de réponses sans être
+# des QCM notés automatiquement (cases de notation cochées par le correcteur).
+_OPEN_KINDS = ("question_open", "question_freeform", "answerbox")
+
+_qmap_by_copy: dict[int, dict] = {}
+
+
+def amc_question_map(copy: int = 1) -> dict:
+    """Rôle de chaque numéro de question du calage, pour la copie donnée.
+
+    AMC numérote **toutes** les questions du sujet (QCM, ouvertes, colonnes du
+    code étudiant) ; `parse_tex()` n'indexe que les QCM. Les deux coïncident
+    tant que le rendu place les questions ouvertes après la feuille de réponses
+    — mais rien ne le garantit sur un sujet importé. Cette carte rend la
+    correspondance explicite au lieu de la supposer.
+
+    Source primaire : `layout.question_names` (tag AMC → numéro), écrit par
+    pdflatex dans le `.xy` — exact même si l'ordre diffère. Repli positionnel
+    quand les tags manquent (calage ancien) ou sont ambigus (tag dupliqué).
+
+    Retourne `{"qcm": {num_amc: q_tex}, "open": {num_amc: bid}, "id": [num…],
+    "issues": [str…]}`. `issues` non vide = sujet et calage ont divergé
+    (recompiler), et les notes affichées peuvent être fausses.
+    """
+    if copy in _qmap_by_copy:
+        return _qmap_by_copy[copy]
+    out = {"qcm": {}, "open": {}, "id": [], "issues": []}
+    try:
+        try:
+            lay = layout_store.get_layout(copy=copy)
+        except TypeError:
+            lay = layout_store.get_layout()
+        boxes_by_q: dict[int, list] = {}
+        for b in lay.sheet_boxes():
+            boxes_by_q.setdefault(b.question, []).append(b)
+    except Exception as e:  # noqa: BLE001 — pas de calage (projet non compilé)
+        out["issues"].append(f"calage illisible : {e}")
+        _qmap_by_copy[copy] = out
+        return out
+
+    letters = []
+    for q, bs in sorted(boxes_by_q.items()):
+        chars = [b.char for b in bs if b.char]
+        if chars and all(str(c).isdigit() for c in chars):
+            out["id"].append(q)          # colonne du code étudiant
+        else:
+            letters.append((q, len(bs)))
+
+    qcm = parse_tex()                     # {q_tex: info}, QCM en ordre document
+    qcm_qs = sorted(qcm)
+    subject = parse_subject()
+    open_blocks = [b for b in subject["blocks"] if b.kind in _OPEN_KINDS]
+
+    # tag AMC → numéro(s). Un tag dupliqué (question importée dans son propre
+    # projet d'origine) est inutilisable : on le retire de l'index.
+    by_tag: dict[str, list] = {}
+    for num, name in (getattr(lay, "question_names", None) or {}).items():
+        by_tag.setdefault(str(name).strip(), []).append(num)
+    unique_tag = {t: n[0] for t, n in by_tag.items() if len(n) == 1}
+    letter_nums = {num for num, _ in letters}
+
+    # 1. QCM : par tag quand c'est possible, sinon par position.
+    unmatched_tex = []
+    for q_tex in qcm_qs:
+        tag = str(qcm[q_tex].get("tag") or "").strip()
+        num = unique_tag.get(tag)
+        if num in letter_nums and num not in out["qcm"]:
+            out["qcm"][num] = q_tex
+        else:
+            unmatched_tex.append(q_tex)
+    free = [n for n, _ in letters if n not in out["qcm"]]
+    if unmatched_tex:
+        for num, q_tex in zip(free, unmatched_tex):
+            out["qcm"][num] = q_tex
+        if len(free) < len(unmatched_tex):
+            out["issues"].append(
+                f"{len(unmatched_tex) - len(free)} QCM du sujet sans question "
+                f"correspondante dans le calage — sujet modifié depuis la "
+                f"dernière compilation ?")
+
+    # 2. Contrôle : le nombre de cases doit coller au nombre de réponses.
+    n_boxes_of = dict(letters)
+    for num, q_tex in out["qcm"].items():
+        n_ans = len(qcm[q_tex].get("answers") or [])
+        if n_boxes_of.get(num) != n_ans:
+            out["issues"].append(
+                f"Q{num} du calage a {n_boxes_of.get(num)} case(s) mais la "
+                f"question « {qcm[q_tex].get('tag') or q_tex} » en déclare {n_ans}")
+
+    # 3. Ce qui reste appartient aux blocs à cases de notation. AMC les nomme
+    #    `bareme-<bid>` ; repli positionnel sinon.
+    rest = [n for n, _ in letters if n not in out["qcm"]]
+    by_bid = {}
+    for num in rest:
+        name = str((getattr(lay, "question_names", None) or {}).get(num, "")).strip()
+        bid = name[len("bareme-"):] if name.startswith("bareme-") else None
+        if bid:
+            by_bid[num] = bid
+    for num in rest:
+        if num in by_bid:
+            out["open"][num] = by_bid[num]
+    leftover = [n for n in rest if n not in out["open"]]
+    free_blocks = [b.bid for b in open_blocks if b.bid not in out["open"].values()]
+    for num, bid in zip(leftover, free_blocks):
+        out["open"][num] = bid
+    if len(rest) != len(open_blocks):
+        out["issues"].append(
+            f"{len(rest)} question(s) de calage non attribuée(s) pour "
+            f"{len(open_blocks)} bloc(s) à cases de notation")
+    _qmap_by_copy[copy] = out
+    return out
+
+
+def check_layout_consistency(verbose: bool = True) -> list[str]:
+    """Vérifie la cohérence sujet ↔ calage. Retourne la liste des anomalies.
+
+    Appelé au démarrage du serveur : un décalage ici fausse silencieusement
+    toutes les notes, autant le dire fort.
+    """
+    issues = amc_question_map(1)["issues"]
+    if issues and verbose:
+        print("⚠ Sujet et calage (.xy) incohérents — les notes peuvent être fausses :")
+        for i in issues:
+            print(f"    · {i}")
+        print("  → recompile le sujet (onglet Sujet → Compiler).")
+    return issues
 
 
 # --------------------------------------------------------------------------
@@ -704,6 +964,15 @@ def _parse_canonical(tex):
             # (cf. `render_block`). Pas écrasé si déjà présent dans `data`.
             if attrs.get("bank_id") and "_bank_id" not in b.data:
                 b.data["_bank_id"] = attrs["bank_id"]
+            # Plancher/plafond surchargés par question (sinon hérite du global) :
+            # stockés sur l'en-tête %%QCM-BLOCK (comme bank_id), pas dans le corps.
+            if kind == "question_qcm":
+                for _k in ("floor", "ceiling"):
+                    if attrs.get(_k) is not None and _k not in b.data:
+                        try:
+                            b.data[_k] = float(attrs[_k])
+                        except ValueError:
+                            pass
             b._start = body_offset + m.start()
             b._end = body_offset + em.end()
             blocks.append(b)
@@ -736,6 +1005,70 @@ def _legacy_segment_title(seg: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _split_legacy_tex(tex: str) -> dict | None:
+    """Découpe un tex AMC legacy en ses morceaux structurels.
+
+    Retourne `{preamble, body_start, body_end, body_content, answer_sheet_tex,
+    num_copies}`, ou None si `\\exemplaire{N}{` est introuvable.
+
+    Le préambule (avant `\\exemplaire`) et la feuille de réponses (depuis le
+    dernier `\\newpage` qui précède le 1er marqueur AMC) doivent être conservés
+    **verbatim** : ce sont eux qui fixent la géométrie des cases. Les
+    régénérer depuis un gabarit change le calage `.xy` et désaligne toutes
+    les copies déjà scannées.
+
+    Utilisé à la fois par `_parse_legacy_subject` (lecture/bootstrap) et par
+    `migrate_to_canonical` — les deux DOIVENT découper pareil, sinon migrer et
+    bootstrapper ne donnent pas le même sujet.
+    """
+    ex_m = re.search(r"\\exemplaire\{(\d+)\}\{", tex)
+    if not ex_m:
+        return None
+    body_start = ex_m.end()
+    depth, j = 1, body_start
+    while j < len(tex) and depth > 0:
+        if tex[j] == "{":
+            depth += 1
+        elif tex[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    if depth != 0:
+        return None
+    body = tex[body_start:j]
+
+    # Début de la feuille de réponses : dernier `\newpage` avant le 1er
+    # marqueur AMC (`\formulaire`, `\champnom`, `\AMCcodeGridInt`…).
+    as_marker = -1
+    for marker in ("\\AMCdebutFormulaire", "\\formulaire",
+                   "\\champnom", "\\AMCcodeGridInt"):
+        i = body.find(marker)
+        if i >= 0 and (as_marker < 0 or i < as_marker):
+            as_marker = i
+    as_start = -1
+    if as_marker >= 0:
+        np = body.rfind("\\newpage", 0, as_marker)
+        as_start = np if np >= 0 else as_marker
+    if as_start >= 0:
+        body_content = body[:as_start]
+        answer_sheet_tex = body[as_start:].strip()
+        body_end = body_start + as_start
+    else:
+        body_content = body
+        answer_sheet_tex = ""
+        body_end = j
+    return {
+        "preamble":         tex[:ex_m.start()].rstrip(),
+        "body":             body,
+        "body_start":       body_start,
+        "body_end":         body_end,
+        "body_content":     body_content,
+        "answer_sheet_tex": answer_sheet_tex,
+        "num_copies":       int(ex_m.group(1)),
+    }
+
+
 def _parse_legacy_subject(tex):
     """En mode legacy : expose questions + **tous** les segments intercalaires
     du corps `\\exemplaire{N}{…}` (instructions, sections, énoncés d'exercice,
@@ -754,15 +1087,22 @@ def _parse_legacy_subject(tex):
         cfg.num_copies = int(m.group(1))
 
     # Délimiter le corps de \exemplaire pour ne pas attraper le préambule ni
-    # la feuille de réponses dans les segments text.
-    ex_m = re.search(r"\\exemplaire\{\d+\}\{", tex)
-    body_start = ex_m.end() if ex_m else 0
-    body_end = len(tex)
-    for marker in ("\\AMCdebutFormulaire", "\\champnom",
-                   "\\AMCcodeGridInt", "\\formulaire"):
-        i = tex.find(marker, body_start)
-        if i >= 0 and i < body_end:
-            body_end = i
+    # la feuille de réponses dans les segments text — et surtout les CONSERVER
+    # verbatim : ce sont eux qui fixent la géométrie des cases. Sans ça, une
+    # recompilation les régénère depuis le gabarit et change le calage `.xy`,
+    # ce qui désaligne toutes les copies déjà scannées.
+    split = _split_legacy_tex(tex)
+    if split:
+        cfg.preamble_tex = split["preamble"]
+        cfg.answer_sheet_tex = split["answer_sheet_tex"]
+        body_start, body_end = split["body_start"], split["body_end"]
+    else:
+        body_start, body_end = 0, len(tex)
+        for marker in ("\\AMCdebutFormulaire", "\\champnom",
+                       "\\AMCcodeGridInt", "\\formulaire"):
+            i = tex.find(marker, body_start)
+            if i >= 0 and i < body_end:
+                body_end = i
 
     qs = _attach_chars(_parse_legacy_questions(tex), copy=1)
     # Frontières dans le body : questions ET sections/subsections/chapters.
@@ -866,22 +1206,29 @@ def _legacy_text_preview(seg: str, max_len: int = 60) -> str:
     return s[:max_len] + ("…" if len(s) > max_len else "")
 
 
-def parse_subject(tex=None):
-    """Parse le sujet entier. Retourne `{config: SubjectConfig, blocks: [Block], mode}`.
+def _parse_tex_subject(tex: str):
+    """Parse un tex (canonique OU legacy) → `{config, blocks, mode}`.
 
-    `mode` ∈ {'canonical', 'legacy', 'empty'} :
-    - **canonical** : marqueurs `%%QCM-…` présents, CRUD libre, round-trip garanti.
-    - **legacy** : tex écrit à la main (EXAM_2026), seuls les blocs `question_qcm`
-      sont exposés et seul `update_block`/`save_questions` est autorisé.
-    - **empty** : fichier inexistant.
+    Utilisé uniquement pour le **bootstrap** du store JSON et l'**import** d'un
+    .tex existant. N'est plus le chemin de lecture courant (cf. `parse_subject`).
     """
-    if tex is None:
-        if not EXAM_TEX.exists():
-            return {"config": SubjectConfig(), "blocks": [], "mode": "empty"}
-        tex = EXAM_TEX.read_text(encoding="utf-8")
     if is_canonical(tex):
         return _parse_canonical(tex)
     return _parse_legacy_subject(tex)
+
+
+def parse_subject(tex=None):
+    """Parse le sujet entier. Retourne `{config: SubjectConfig, blocks: [Block], mode}`.
+
+    **Source de vérité = `sujet/subject.json`** (store JSON, blocs propres).
+    - `tex is None` (cas courant) → lit le store JSON (`_load_subject_store`,
+      avec bootstrap depuis `exam.tex` au 1er accès). `mode` = 'canonical' (ou
+      'empty' si aucun sujet).
+    - `tex` fourni → parse ce tex (import / migration), sans toucher au store.
+    """
+    if tex is not None:
+        return _parse_tex_subject(tex)
+    return _load_subject_store()
 
 
 # --------------------------------------------------------------------------
@@ -1377,6 +1724,14 @@ def render_block(b: Block, cfg: SubjectConfig | None = None) -> str:
         attrs.append(f"qtype={b.data.get('qtype', 'single')}")
         if b.data.get("tag"):
             attrs.append(f"tag={b.data['tag']}")
+        # Override plancher/plafond par question (uniquement si surchargé).
+        for _k in ("floor", "ceiling"):
+            v = b.data.get(_k)
+            if v is not None and v != "":
+                try:
+                    attrs.append(f"{_k}={float(v):g}")
+                except (TypeError, ValueError):
+                    pass
     elif b.kind == "question_open":
         if b.data.get("tag"):
             attrs.append(f"tag={b.data['tag']}")
@@ -1479,20 +1834,26 @@ def render_subject(subject: dict) -> str:
 # CRUD canonique (haut niveau, lit/écrit exam.tex)
 # --------------------------------------------------------------------------
 
-_io_lock = Lock()
+# RLock (réentrant) : le CRUD prend le lock puis appelle `parse_subject()` →
+# `_load_subject_store()` qui reprend le même lock dans le même thread.
+_io_lock = RLock()
 
 
 def _save_subject(subject: dict) -> None:
-    """Écrit le tex canonique sur disque + invalide les caches."""
-    tex = render_subject(subject)
-    EXAM_TEX.write_text(tex, encoding="utf-8")
-    _invalidate_caches()
+    """Persiste le sujet dans le store JSON (source de vérité) + invalide les caches.
+
+    **N'écrit PLUS le .tex** : `exam.tex` est régénéré uniquement par
+    `compile_pdf()`. Tout le CRUD (add/update/delete/move/… + config/header/…)
+    passe par ici → « Sauvegarder » ne touche jamais au LaTeX.
+    """
+    save_subject_store(subject)
 
 
 def _invalidate_caches() -> None:
-    global _charmap_by_copy, _regions
+    global _charmap_by_copy, _qmap_by_copy, _regions
     _cache["mtime"] = None
     _charmap_by_copy = {}
+    _qmap_by_copy = {}
     _regions = None
 
 
@@ -1771,50 +2132,20 @@ def migrate_to_canonical() -> dict:
         backup = EXAM_TEX.with_suffix(".tex.legacy-backup")
         backup.write_text(tex, encoding="utf-8")
 
-        # 1. Repérer la zone \exemplaire{N}{ … }
-        ex_m = re.search(r"\\exemplaire\{(\d+)\}\{", tex)
-        if not ex_m:
-            return {"ok": False, "log": "`\\exemplaire{N}{` introuvable — "
-                    "structure de sujet AMC inattendue."}
-        num_copies = int(ex_m.group(1))
-        preamble = tex[:ex_m.start()].rstrip()
-        body_start = ex_m.end()
-        depth, j = 1, body_start
-        while j < len(tex) and depth > 0:
-            if tex[j] == "{":
-                depth += 1
-            elif tex[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        if depth != 0:
-            return {"ok": False, "log": "Accolade fermante d'\\exemplaire "
-                    "introuvable."}
-        body = tex[body_start:j]
-        # `post` (après \exemplaire) attendu = \end{document} — pas conservé,
-        # le render_subject le réécrit canoniquement.
-
-        # 2. Séparer le body : contenu des questions vs feuille de réponses.
-        # On heuristique le début de la feuille de réponses au dernier `\newpage`
-        # qui précède un marqueur AMC (`\formulaire`, `\AMCdebutFormulaire`,
-        # `\AMCcodeGridInt`, `\champnom`).
-        as_marker = -1
-        for marker in ("\\AMCdebutFormulaire", "\\formulaire",
-                       "\\champnom", "\\AMCcodeGridInt"):
-            i = body.find(marker)
-            if i >= 0 and (as_marker < 0 or i < as_marker):
-                as_marker = i
-        as_start = -1
-        if as_marker >= 0:
-            np = body.rfind("\\newpage", 0, as_marker)
-            as_start = np if np >= 0 else as_marker
-        if as_start >= 0:
-            body_content = body[:as_start]
-            answer_sheet_tex = body[as_start:].strip()
-        else:
-            body_content = body
-            answer_sheet_tex = ""
+        # 1-2. Découpe structurelle : préambule / corps / feuille de réponses.
+        # Même helper que `_parse_legacy_subject` — migrer et bootstrapper le
+        # store doivent produire exactement le même sujet.
+        # (`post`, après \exemplaire, vaut \end{document} : non conservé,
+        # `render_subject` le réécrit canoniquement.)
+        split = _split_legacy_tex(tex)
+        if split is None:
+            return {"ok": False, "log": "`\\exemplaire{N}{` introuvable ou mal "
+                    "fermé — structure de sujet AMC inattendue."}
+        num_copies = split["num_copies"]
+        preamble = split["preamble"]
+        body = split["body"]
+        body_content = split["body_content"]
+        answer_sheet_tex = split["answer_sheet_tex"]
 
         # 3. Découper le body en frontières {questions, \section, \subsection,
         # \chapter}. Chaque section devient son propre bloc text éditable, ce
@@ -1924,14 +2255,19 @@ _cache = {"mtime": None, "questions": {}}
 def parse_tex():
     """Compat : `{q: {tag, type, env, statement, answers:[{...,char}], bareme, block}}`.
 
-    Dérivé de `parse_subject()` pour mutualiser le parsing. En mode legacy le
-    résultat est identique à l'ancienne implémentation. En mode canonique seuls
+    Dérivé de `parse_subject()` (store JSON) pour mutualiser le parsing. Seuls
     les blocs `question_qcm` sont exposés (les `text`/`question_open` n'ont pas
-    de notion de "q" indexé).
+    de notion de "q" indexé). Cache keyé sur le mtime de `subject.json`.
     """
-    if not EXAM_TEX.exists():
+    # Clé de cache = mtime du store JSON (source de vérité). Si le store n'existe
+    # pas encore mais qu'un exam.tex est présent, parse_subject() le bootstrappe ;
+    # on prend alors le mtime de l'exam.tex en repli pour amorcer le cache.
+    if SUBJECT_JSON.exists():
+        mt = SUBJECT_JSON.stat().st_mtime
+    elif EXAM_TEX.exists():
+        mt = EXAM_TEX.stat().st_mtime
+    else:
         return {}
-    mt = EXAM_TEX.stat().st_mtime
     if _cache["mtime"] != mt:
         subject = parse_subject()
         qs: dict[int, dict] = {}
@@ -1954,6 +2290,8 @@ def parse_tex():
                 "answers": answers,
                 "bareme": ({"value": d.get("value", "1")}
                            if d.get("qtype") == "single" else {}),
+                "floor": d.get("floor"),
+                "ceiling": d.get("ceiling"),
                 "block": (b._start, b._end),
             }
             qs[q] = info
@@ -1977,9 +2315,10 @@ def effective_spec(q: int, copy: int = 1):
     indexé par sa position parmi les questions QCM exposées dans `parse_tex`) :
     `is_open=True`, `open_values={lettre: valeur}`, `correct` = vide.
     """
-    ak = ANSWER_KEY.get(q, {})
-    spec = {"type": ak.get("type", "single"), "options": ak.get("options", ""),
-            "correct": ak.get("correct", ""), "tag": ak.get("tag", "")}
+    # Défaut vide : une question absente du sujet n'a ni options ni bonnes
+    # réponses. Aucun repli sur une clé de correction externe — elle
+    # appartiendrait à un autre examen (cf. suppression d'answer_key.py).
+    spec = {"type": "single", "options": "", "correct": "", "tag": ""}
     try:
         info = parse_tex().get(q)
     except Exception:
@@ -2034,16 +2373,12 @@ def get_bareme(copy: int = 1):
 
 def max_score(q: int, copy: int = 1) -> float:
     """Score maximal d'une question avec le barème courant (copie donnée)."""
-    spec = effective_spec(q, copy=copy)
     try:
         info = parse_tex().get(q)
     except Exception:
         info = None
     if info is None:
-        ak = ANSWER_KEY.get(q, {})
-        if spec["type"] == "single":
-            return 1.0
-        return round(len(spec["correct"]) * ak.get("b", 0.0), 6)
+        return 0.0        # question inconnue du sujet → aucun point
     if info["type"] == "single":
         v = _frac(info["bareme"].get("value"))
         return 1.0 if v is None else float(v)
@@ -2091,27 +2426,33 @@ def _render_block(upd):
 
 
 def save_questions(updates):
-    """Réécrit dans `exam.tex` les blocs des questions éditées (mode legacy
-    ou patch ciblé canonique).
+    """Compat : met à jour le `data` des blocs question (par index `q`) dans le
+    store JSON. Ne touche pas au .tex.
 
     `updates` : [{q, tag, type, env, statement, answers:[{text, correct, bareme}], value}].
+    `q` = numéro (1-based) du QCM dans l'ordre du document.
     """
-    if not EXAM_TEX.exists():
-        raise FileNotFoundError("sujet/exam.tex")
     with _io_lock:
-        tex = EXAM_TEX.read_text(encoding="utf-8")
-        # On utilise le parseur "legacy" qui repère les `\\begin{question*}` quel
-        # que soit le mode du fichier — il extrait toujours les positions.
-        qs = _attach_chars(_parse_legacy_questions(tex), copy=1)
-        spans = []
+        subject = parse_subject()
+        qcm_blocks = [b for b in subject["blocks"] if b.kind == "question_qcm"]
         for upd in updates:
             q = int(upd["q"])
-            info = qs.get(q)
-            if info is None:
+            if q < 1 or q > len(qcm_blocks):
                 raise KeyError(q)
-            spans.append((info["block"][0], info["block"][1], _render_block(upd)))
-        EXAM_TEX.write_text(apply_edits(tex, spans), encoding="utf-8")
-        _invalidate_caches()
+            b = qcm_blocks[q - 1]
+            # Préserve les clés non éditées (floor/ceiling/_bank_id…), patche le reste.
+            b.data.update({
+                "tag": upd.get("tag", b.data.get("tag", "")),
+                "qtype": "mult" if upd.get("type") == "mult" else "single",
+                "env": "reponseshoriz" if upd.get("env") == "reponseshoriz" else "reponses",
+                "statement": upd.get("statement", ""),
+                "answers": [{"text": str(a.get("text", "")),
+                             "correct": bool(a.get("correct")),
+                             "bareme": str(a.get("bareme", ""))}
+                            for a in upd.get("answers", [])],
+                "value": str(upd.get("value", "1")) or "1",
+            })
+        save_subject_store(subject)
 
 
 # --------------------------------------------------------------------------
@@ -2280,19 +2621,260 @@ def calibrate_open_zones() -> dict:
     return zones
 
 
+def _fmt_signed(x, force_plus=False):
+    """Nombre formaté pour le mode mathématique LaTeX, virgule française.
+
+    `force_plus` ajoute un `+` explicite aux valeurs positives (borne haute).
+    Ex. -0.25 → "-0{,}25" ; 1 (force_plus) → "+1" ; 0 → "0".
+    """
+    x = float(x)
+    a = abs(x)
+    if abs(a - round(a)) < 1e-9:
+        s = str(int(round(a)))
+    else:
+        s = ("%g" % a).replace(".", "{,}")
+    if x < 0:
+        return "-" + s
+    return ("+" if force_plus else "") + s
+
+
+def _qcm_natural_bounds(data: dict) -> tuple:
+    """(min, max) naturels d'un QCM = Σ barème faux (≤0), Σ barème correct (≥0)."""
+    hi = sum((_frac(str(a.get("bareme", "0"))) or 0.0)
+             for a in data.get("answers", []) if a.get("correct"))
+    lo = sum((_frac(str(a.get("bareme", "0"))) or 0.0)
+             for a in data.get("answers", []) if not a.get("correct"))
+    return round(lo, 6), round(hi, 6)
+
+
+BAREME_EX_START = "% --- AMCx:bareme-exemples (généré, ne pas éditer cette zone) ---"
+BAREME_EX_END = "% --- AMCx:bareme-exemples-fin ---"
+
+
+def _fr_latex(fr) -> str:
+    """Fraction LaTeX : entier → '1' ; fraction → '\\tfrac{a}{b}' (signe devant)."""
+    from fractions import Fraction
+    fr = Fraction(fr)
+    if fr.denominator == 1:
+        return str(fr.numerator)
+    sign = "-" if fr < 0 else ""
+    return f"{sign}\\tfrac{{{abs(fr.numerator)}}}{{{abs(fr.denominator)}}}"
+
+
+def _fr_dec(fr) -> str:
+    """Décimal français à 2 décimales (virgule) : Fraction(1,6) → '0{,}17'."""
+    v = round(float(fr), 2)
+    s = ("%g" % v) if abs(v - round(v)) > 1e-9 else str(int(round(v)))
+    return s.replace(".", "{,}").replace("-", "-")
+
+
+def render_bareme_examples(subject: dict, floor=None, ceiling=None, n: int = 2) -> str:
+    """Génère un bloc LaTeX « Barème » (explication + N exemples chiffrés) dérivé
+    des structures de barème réellement présentes dans le sujet, avec scores
+    clampés à [floor, ceiling] (cohérent avec `score.score_question`).
+
+    Bloc encadré par `BAREME_EX_START`/`BAREME_EX_END` → ré-génération idempotente.
+    """
+    from fractions import Fraction
+    from collections import Counter
+
+    def F(x):
+        try:
+            return Fraction(str(x))
+        except (ValueError, ZeroDivisionError, TypeError):
+            return Fraction(0)
+
+    # Recense les structures (n_bonnes, n_mauvaises, b, m) par fréquence.
+    structs = Counter()
+    for b in subject.get("blocks", []):
+        if b.kind != "question_qcm":
+            continue
+        ans = b.data.get("answers", [])
+        good = [F(a.get("bareme", 0)) for a in ans if a.get("correct")]
+        bad = [F(a.get("bareme", 0)) for a in ans if not a.get("correct")]
+        if not good or not bad:
+            continue
+        bval = good[0]                 # barème d'une bonne (b > 0)
+        mval = -bad[0]                 # |barème d'une mauvaise| (m > 0)
+        structs[(len(good), len(bad), bval, mval)] += 1
+
+    def clamp(x):
+        if floor is not None and x < Fraction(F(floor)):
+            return Fraction(F(floor)), "min"
+        if ceiling is not None and x > Fraction(F(ceiling)):
+            return Fraction(F(ceiling)), "max"
+        return x, None
+
+    lines = [BAREME_EX_START]
+    # Explication générale.
+    flo = _fr_latex(F(floor)) if floor is not None else None
+    cei = _fr_latex(F(ceiling)) if ceiling is not None else None
+    lines.append(r"\textbf{Barème.} Chaque question est à choix multiple. Le score "
+                 r"d'une question vaut")
+    lines.append(r"\[ \text{score}(Q) = \sum_{\text{cases cochées}} "
+                 r"\begin{cases} +b & \text{si bonne réponse,} \\ "
+                 r"-m & \text{si mauvaise réponse,} \end{cases} \]")
+    lines.append(r"avec $b = 1/(\text{nb. de bonnes réponses})$ et "
+                 r"$m = 1/(\text{nb. de mauvaises réponses})$. Une case non cochée "
+                 r"ne rapporte ni ne coûte rien.")
+    if floor is not None and ceiling is not None:
+        lines.append(f"La note d'une question est ensuite ramenée dans "
+                     f"l'intervalle $[{flo},\\, {cei}]$ pt "
+                     f"(sauf indication contraire à côté de l'énoncé).")
+    elif floor is not None:
+        lines.append(f"La note d'une question ne peut pas descendre sous ${flo}$ pt.")
+    elif ceiling is not None:
+        lines.append(f"La note d'une question est plafonnée à ${cei}$ pt.")
+
+    def approx_or_exact(x):
+        """'= 1' / '= 0' si simple ; sinon '\\approx 0{,}17'."""
+        x = Fraction(x)
+        return f"= {x.numerator}" if x.denominator == 1 else f"\\approx {_fr_dec(x)}"
+
+    # N exemples sur les structures les plus fréquentes.
+    for k, ((ng, nb, bval, mval), _cnt) in enumerate(structs.most_common(n), 1):
+        smax, smax_tag = clamp(ng * bval)               # toutes les bonnes
+        smin, smin_tag = clamp(-nb * mval)              # toutes les mauvaises
+        smix, _ = clamp(bval - mval)                    # 1 bonne + 1 mauvaise
+        lbl_b = f"${ng}$ bonnes" if ng > 1 else "$1$ bonne"
+        lbl_m = f"${nb}$ mauvaises" if nb > 1 else "$1$ mauvaise"
+        lines.append("")  # ligne vide = saut de paragraphe (pour que \smallskip agisse)
+        lines.append(r"\smallskip\noindent\textbf{Exemple " + str(k) + "} — question à "
+                     f"{lbl_b} et {lbl_m}, donc "
+                     f"$b = {_fr_latex(bval)}$ et $m = {_fr_latex(mval)}$.")
+        lines.append(r"\begin{itemize}\setlength\itemsep{-2pt}")
+        # toutes les bonnes → maximum
+        raw_hi = (f"${ng} \\times {_fr_latex(bval)} = {_fr_latex(ng*bval)}$"
+                  if ng > 1 else f"${_fr_latex(ng*bval)}$")
+        cocher_b = "Cocher les bonnes" if ng > 1 else "Cocher la bonne"
+        if smax_tag == "max":
+            lines.append(f"\\item {cocher_b} : {raw_hi}, ramené à "
+                         f"${_fr_latex(smax)}$ pt \\textbf{{(maximum)}}.")
+        else:
+            lines.append(f"\\item {cocher_b} : {raw_hi} pt \\textbf{{(maximum)}}.")
+        # 1 bonne + 1 mauvaise
+        lines.append(f"\\item Cocher $1$ bonne et $1$ mauvaise : "
+                     f"${_fr_latex(bval)} - {_fr_latex(mval)} {approx_or_exact(smix)}$ pt.")
+        # toutes les mauvaises → minimum
+        raw_lo = (f"$-{nb} \\times {_fr_latex(mval)} = {_fr_latex(-nb*mval)}$"
+                  if nb > 1 else f"$-{_fr_latex(mval)}$")
+        cocher_m = "Cocher les mauvaises" if nb > 1 else "Cocher la mauvaise"
+        if smin_tag == "min":
+            lines.append(f"\\item {cocher_m} : {raw_lo}, ramené à "
+                         f"${_fr_latex(smin)}$ pt \\textbf{{(minimum)}}.")
+        else:
+            lines.append(f"\\item {cocher_m} : {raw_lo} pt \\textbf{{(minimum)}}.")
+        lines.append(r"\item Ne rien cocher : $0$ pt.")
+        lines.append(r"\end{itemize}")
+
+    lines.append(BAREME_EX_END)
+    return "\n".join(lines)
+
+
+def _inject_score_ranges(tex: str, g_floor=None, g_ceiling=None) -> str:
+    """Insère sous chaque énoncé QCM une ligne italique « entre LO et HI pt ».
+
+    Bornes par question : override (`data.floor/ceiling`) sinon défaut global
+    sinon borne naturelle du barème. Transformation appliquée au compile-time
+    uniquement (exam.tex source jamais modifié). No-op hors mode canonique.
+    """
+    try:
+        sub = parse_subject(tex)
+    except Exception:
+        return tex
+    if sub.get("mode") != "canonical":
+        return tex
+    edits = []
+    for b in sub["blocks"]:
+        if b.kind != "question_qcm":
+            continue
+        nat_lo, nat_hi = _qcm_natural_bounds(b.data)
+        lo = b.data.get("floor")
+        hi = b.data.get("ceiling")
+        if lo is None:
+            lo = g_floor
+        if hi is None:
+            hi = g_ceiling
+        if lo is None:
+            lo = nat_lo
+        if hi is None:
+            hi = nat_hi
+        seg = tex[b._start:b._end]
+        m = re.search(r"\\begin\{reponses", seg)
+        if not m:
+            continue
+        pos = b._start + m.start()
+        # Petit saut de ligne APRÈS l'énoncé, puis l'indication en italique sur
+        # sa propre ligne, EN DESSOUS de la question (avant les réponses).
+        note = ("\\par\\smallskip{\\small\\itshape Note de cette question : entre $"
+                + _fmt_signed(lo) + "$ et $" + _fmt_signed(hi, force_plus=True)
+                + "$ pt.\\par}\\smallskip\n")
+        edits.append((pos, pos, note))
+    return apply_edits(tex, edits)
+
+
 def compile_pdf():
     """Compile `exam.tex` → `sujet/DOC-sujet.pdf`. Retourne {'ok': bool, 'log': str}.
 
     Compilation dans un dossier temporaire (sujet/ reste propre) ; le PDF n'est
     copié qu'en cas de succès — un échec laisse l'ancien DOC-sujet.pdf intact.
+
+    En mode canonique, `exam.tex` est d'abord régénéré depuis le store (seul
+    endroit qui écrit le .tex), avec un backup `exam.tex.bak`. En mode legacy
+    le .tex est compilé **tel quel** : le régénérer changerait le calage.
     """
     global _regions
     with _compile_lock:
+        # Régénère exam.tex depuis le store JSON (source de vérité). C'est le
+        # SEUL endroit qui écrit le .tex : « Compiler » = mettre à jour le tex
+        # puis produire le PDF. « Sauvegarder » ne touche jamais au .tex.
+        subject = parse_subject()
+        if subject.get("mode") == "empty" or not subject.get("blocks"):
+            if not EXAM_TEX.exists():
+                return {"ok": False, "log": "Aucun sujet à compiler (subject.json/exam.tex absents)."}
+        elif subject.get("mode") == "legacy":
+            # Sujet legacy : on compile le .tex tel quel, sans le régénérer.
+            # Le régénérer changerait le calage `.xy` et désalignerait les
+            # copies déjà scannées. Pour l'éditer, il faut migrer explicitement
+            # (bouton « Migrer vers le format canonique »).
+            if not EXAM_TEX.exists():
+                return {"ok": False, "log": "sujet/exam.tex introuvable."}
+        else:
+            try:
+                SUJET_DIR.mkdir(parents=True, exist_ok=True)
+                new_tex = render_subject(subject)
+                # Backup avant réécriture : c'est le seul endroit qui écrase le
+                # .tex, et l'utilisateur a pu l'éditer à la main entre-temps.
+                if EXAM_TEX.exists():
+                    old_tex = EXAM_TEX.read_text(encoding="utf-8")
+                    if old_tex != new_tex:
+                        EXAM_TEX.with_suffix(".tex.bak").write_text(
+                            old_tex, encoding="utf-8")
+                EXAM_TEX.write_text(new_tex, encoding="utf-8")
+            except OSError as e:
+                return {"ok": False, "log": f"Écriture exam.tex impossible : {e}"}
         if not EXAM_TEX.exists():
             return {"ok": False, "log": "sujet/exam.tex introuvable."}
         tmp = Path(tempfile.mkdtemp(prefix="amc_compile_"))
         try:
-            shutil.copy(EXAM_TEX, tmp / "exam.tex")
+            # Affichage optionnel de la fourchette de note sous chaque QCM :
+            # transformation appliquée à la copie temporaire seulement.
+            _show_range = False
+            _gf = _gc = None
+            try:
+                import config as _config
+                _cfg = _config.load_config()
+                _show_range = bool(_cfg.get("show_score_range"))
+                _gf = _cfg.get("question_floor")
+                _gc = _cfg.get("question_ceiling")
+            except Exception:
+                pass
+            if _show_range:
+                _tex = _inject_score_ranges(EXAM_TEX.read_text(encoding="utf-8"),
+                                            g_floor=_gf, g_ceiling=_gc)
+                (tmp / "exam.tex").write_text(_tex, encoding="utf-8")
+            else:
+                shutil.copy(EXAM_TEX, tmp / "exam.tex")
             # `exam-config.tex` est lu par automultiplechoice.sty (\jobname-config) :
             # définir \SujetExterne active le mode « calibration » → pdflatex écrit
             # le fichier de calage exam.xy (positions des cases) en plus du PDF.

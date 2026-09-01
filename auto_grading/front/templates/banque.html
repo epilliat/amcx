@@ -2,6 +2,7 @@
 {% block title %}Banque — AMCx{% endblock %}
 
 {% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 {% endblock %}
@@ -9,10 +10,25 @@
 {% block content %}
 
 <!-- ====================================================================
-     Topbar : titre + dropdown connexion + sync + toggle preview
+     Topbar : titre + dropdown banques + bouton ajouter + dropdown connexion
+              + sync + toggle preview
      ==================================================================== -->
 <div class="banque-topbar">
   <h1 class="banque-title">📚 Banque</h1>
+
+  <!-- Dropdown sélection de banque + bouton "+" -->
+  <div class="banque-select-wrap" id="bank-select-wrap">
+    <button type="button" class="btn btn-bank-select" id="bank-select-toggle"
+            title="Changer de banque">
+      <span id="bank-select-label">…</span> <span class="caret">▾</span>
+    </button>
+    <div class="banque-select-dropdown" id="bank-select-dropdown" hidden>
+      <div class="bank-list" id="bank-list"><p class="banque-empty">Chargement…</p></div>
+      <button type="button" class="btn btn-small bank-add-btn" id="bank-add-btn">
+        + Ajouter une banque
+      </button>
+    </div>
+  </div>
 
   <div class="banque-topbar-actions">
     <!-- Dropdown Connexion -->
@@ -22,28 +38,17 @@
       </button>
       <div class="banque-conn-dropdown" id="conn-dropdown" hidden>
         <div class="bank-settings-body">
-          <label class="bank-mode-row">
-            <input type="radio" name="bank_mode" value="local"
-                   {% if cfg.bank_mode != 'online' %}checked{% endif %}> Local
-            <span class="small">(~/Documents/AMCx-banque/)</span>
-          </label>
-          <label class="bank-mode-row">
-            <input type="radio" name="bank_mode" value="online"
-                   {% if cfg.bank_mode == 'online' %}checked{% endif %}> En ligne
-            <span class="small">(Supabase — banque communautaire)</span>
-          </label>
+          <div id="conn-local-info" class="bank-local-info" style="display:none">
+            <div class="settings-hint">💾 Banque locale active</div>
+            <div id="conn-local-path" class="small"></div>
+            <div class="settings-hint">
+              Pour ajouter ou changer de banque, utilise le sélecteur à gauche.
+            </div>
+          </div>
 
-          <div id="bank-online-cfg" class="bank-online-cfg"
-               style="{% if cfg.bank_mode != 'online' %}display:none{% endif %}">
-            <label>URL Supabase
-              <input type="text" id="cfg-bank-url"
-                     placeholder="https://abcdefgh.supabase.co"
-                     value="{{ cfg.bank_supabase_url|default('', true) }}"></label>
-            <label>Clé anon (publique)
-              <input type="password" id="cfg-bank-anon" autocomplete="off"
-                     placeholder="eyJ…"
-                     value="{{ cfg.bank_supabase_anon_key|default('', true) }}"></label>
-            <button id="cfg-bank-save" class="btn btn-small">Enregistrer config</button>
+          <div id="bank-online-cfg" class="bank-online-cfg" style="display:none">
+            <div class="settings-hint">🌐 Banque en ligne active</div>
+            <div id="conn-online-url" class="small"></div>
 
             <div class="bank-auth-block" id="bank-auth-block">
               <div id="bank-auth-status" class="settings-hint">…</div>
@@ -93,15 +98,13 @@
       📊 Sync stats
     </button>
     <span id="banque-sync-status" class="settings-hint"></span>
-
-    <!-- Toggle preview -->
-    <button type="button" class="btn" id="banque-preview-toggle"
-            title="Afficher/cacher le panneau d'aperçu grand format">👁 Aperçu</button>
   </div>
 </div>
 
 <!-- ====================================================================
-     Layout 3 zones : liste gauche | détail centre | aperçu droit
+     Layout 2 zones : liste gauche | détail centre.
+     L'aperçu grand format est maintenant intégré au centre via le toggle
+     ✏ Éditer / 👁 Aperçu sur la fiche question.
      ==================================================================== -->
 <div class="banque-split no-preview">
 
@@ -142,17 +145,73 @@
     </p>
   </section>
 
-  <!-- Panel droit (toggle) : aperçu grand format -->
-  <aside class="banque-preview-pane" id="bq-preview">
-    <p class="banque-empty">Aperçu grand format. Sélectionne une question.</p>
-  </aside>
+</div>
 
+<!-- ====================================================================
+     Modale : ajouter une banque (locale ou en ligne)
+     ==================================================================== -->
+<div class="bank-modal-bg" id="bank-add-modal" hidden>
+  <div class="bank-modal">
+    <div class="bank-modal-head">
+      <h3>Ajouter une banque</h3>
+      <button type="button" class="btn btn-tiny" id="bank-add-close">✕</button>
+    </div>
+    <div class="bank-modal-body">
+      <label>Nom
+        <input type="text" id="add-bank-name" autocomplete="off"
+               placeholder="Ex. Hypothesis Testing">
+      </label>
+      <div class="bank-add-type-row">
+        <label><input type="radio" name="add_bank_type" value="local" checked>
+          💾 Locale (dossier)</label>
+        <label><input type="radio" name="add_bank_type" value="online">
+          🌐 En ligne (Supabase)</label>
+      </div>
+      <div class="bank-add-local">
+        <label>Chemin du dossier
+          <input type="text" id="add-bank-path" autocomplete="off"
+                 placeholder="~/Documents/AMCx-banques/ma-banque/">
+        </label>
+        <div class="settings-hint">
+          Le dossier doit contenir un sous-dossier <code>questions/</code>
+          ou être vide (il sera créé). Utilise <code>~</code> ou chemin absolu.
+        </div>
+      </div>
+      <div class="bank-add-online" style="display:none">
+        <label>URL Supabase
+          <input type="text" id="add-bank-url" autocomplete="off"
+                 placeholder="https://abcdefgh.supabase.co">
+        </label>
+        <label>Clé anon (publique)
+          <input type="password" id="add-bank-anon" autocomplete="off"
+                 placeholder="eyJ…">
+        </label>
+        <div class="settings-hint">
+          Après création tu devras te connecter via le bouton 🔐 (OTP par email).
+        </div>
+      </div>
+      <div class="bank-modal-status" id="bank-add-status"></div>
+    </div>
+    <div class="bank-modal-foot">
+      <button type="button" class="btn" id="bank-add-cancel">Annuler</button>
+      <button type="button" class="btn btn-primary" id="bank-add-create">Créer</button>
+    </div>
+  </div>
 </div>
 
 {% endblock %}
 
 {% block scripts %}
 <script>
+// Message d'erreur : texte, jamais du HTML. Le message peut venir du serveur
+// ou d'une banque partagée — l'injecter en innerHTML est une porte XSS.
+function showErr(host, msg) {
+  host.textContent = '';
+  const p = document.createElement('p');
+  p.className = 'banque-empty banque-err';
+  p.textContent = String(msg);
+  host.appendChild(p);
+}
 // ============================================================================
 // Banque — gestion + browse + détail + preview toggle
 // ============================================================================
@@ -163,7 +222,6 @@ let bankUserId = '';
 let currentQuestion = null;  // question affichée dans le détail
 
 // === DOM refs =============================================================
-const splitEl       = document.querySelector('.banque-split');
 const connWrap      = document.getElementById('conn-wrap');
 const connToggle    = document.getElementById('conn-toggle');
 const connDropdown  = document.getElementById('conn-dropdown');
@@ -186,36 +244,8 @@ document.addEventListener('click', (e) => {
   if (!connDropdown.hidden && !connWrap.contains(e.target)) connDropdown.hidden = true;
 });
 
-// === Switch mode local ↔ online ============================================
-document.querySelectorAll('input[name="bank_mode"]').forEach(r => {
-  r.addEventListener('change', async (e) => {
-    bankMode = e.target.value;
-    bankCfgEl.style.display = (bankMode === 'online') ? '' : 'none';
-    await fetch('/api/config', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({bank_mode: bankMode})
-    });
-    refreshAuthStatus();
-    reloadList();
-  });
-});
-
-// === Sauvegarde URL + clé anon =============================================
-document.getElementById('cfg-bank-save')?.addEventListener('click', async () => {
-  const url = document.getElementById('cfg-bank-url').value.trim();
-  const anon = document.getElementById('cfg-bank-anon').value.trim();
-  const r = await fetch('/api/config', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({bank_supabase_url: url, bank_supabase_anon_key: anon})
-  });
-  if (r.ok) refreshAuthStatus();
-  else {
-    const j = await r.json().catch(() => ({}));
-    bankStatusEl.textContent = '✘ ' + (j.error || 'erreur');
-  }
-});
-
 // === Auth status (refresh dropdown + badge) ===============================
+//  Lit la banque ACTIVE (son `type` détermine local/online).
 async function refreshAuthStatus() {
   try {
     const r = await fetch('/api/bank/auth-status');
@@ -224,6 +254,7 @@ async function refreshAuthStatus() {
     bankUserId = s.user_id || '';
     // Badge dans le bouton 🔐
     connBadge.className = 'conn-badge';
+    const localInfo = document.getElementById('conn-local-info');
     if (s.mode === 'online') {
       if (s.logged_in) {
         connBadge.classList.add('conn-badge-online');
@@ -232,15 +263,22 @@ async function refreshAuthStatus() {
         connBadge.classList.add('conn-badge-offline');
         connBadge.textContent = 'non connecté';
       }
+      localInfo.style.display = 'none';
+      bankCfgEl.style.display = '';
+      document.getElementById('conn-online-url').textContent = s.supabase_url || '';
     } else {
       connBadge.classList.add('conn-badge-local');
       connBadge.textContent = 'local';
+      localInfo.style.display = '';
+      bankCfgEl.style.display = 'none';
+      document.getElementById('conn-local-path').textContent = s.path || '';
     }
     // Filtres online-only
     document.querySelectorAll('.bq-online-only').forEach(el => {
       el.style.display = (s.mode === 'online' && s.logged_in) ? '' : 'none';
     });
-    // Détail du dropdown
+    // Détail du dropdown (online seulement)
+    if (s.mode !== 'online') return;
     if (!s.configured) {
       bankStatusEl.textContent = '⚠ Configure d\'abord URL + clé anon Supabase.';
       loginForm.style.display = 'none';
@@ -353,29 +391,7 @@ document.getElementById('banque-sync-btn')?.addEventListener('click', async () =
 });
 
 // ============================================================================
-// 3. Toggle aperçu (panel droit)
-// ============================================================================
-const previewBtn = document.getElementById('banque-preview-toggle');
-const PREVIEW_KEY = 'banque_preview';
-function applyPreview(state) {
-  if (state === 'on') {
-    splitEl.classList.remove('no-preview');
-    previewBtn.classList.add('btn-toggle-on');
-    if (currentQuestion) renderPreviewPane(currentQuestion);
-  } else {
-    splitEl.classList.add('no-preview');
-    previewBtn.classList.remove('btn-toggle-on');
-  }
-}
-applyPreview(localStorage.getItem(PREVIEW_KEY) || 'off');
-previewBtn.addEventListener('click', () => {
-  const next = (localStorage.getItem(PREVIEW_KEY) || 'off') === 'on' ? 'off' : 'on';
-  localStorage.setItem(PREVIEW_KEY, next);
-  applyPreview(next);
-});
-
-// ============================================================================
-// 4. Liste gauche : load + filter + click
+// 3. Liste gauche : load + filter + click
 // ============================================================================
 
 const KIND_ICON = {question_qcm:'☑', question_open:'✍', answerbox:'▭', text:'¶'};
@@ -408,7 +424,7 @@ async function reloadList() {
 function renderList(items, err) {
   const host = document.getElementById('bq-list');
   const cnt = document.getElementById('bq-count');
-  if (err) { host.innerHTML = '<p class="banque-empty banque-err">' + err + '</p>'; cnt.textContent = ''; return; }
+  if (err) { showErr(host, err); cnt.textContent = ''; return; }
   cnt.textContent = items.length + ' question(s)';
   if (!items.length) {
     host.innerHTML = '<p class="banque-empty">Aucune question.</p>';
@@ -444,30 +460,53 @@ async function selectQuestion(bankId) {
   const host = document.getElementById('bq-detail');
   host.innerHTML = '<p class="banque-empty">Chargement…</p>';
   try {
+    // 1. Charge la question (métadonnées)
     const r = await fetch('/api/bank/' + encodeURIComponent(bankId));
     const j = await r.json();
     if (!r.ok || !j.ok) {
-      host.innerHTML = '<p class="banque-empty banque-err">' + (j.error || 'Erreur') + '</p>';
+      showErr(host, j.error || 'Erreur');
       return;
     }
     currentQuestion = j.question;
-    renderDetailPane(currentQuestion);
-    if (localStorage.getItem(PREVIEW_KEY) === 'on') renderPreviewPane(currentQuestion);
+    // 2. Charge le HTML du bloc (rendu identique à un bloc Sujet)
+    const rh = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/block-html');
+    if (!rh.ok) {
+      showErr(host, 'Erreur HTML : ' + rh.status);
+      return;
+    }
+    const blockHtml = await rh.text();
+    renderDetailPane(currentQuestion, blockHtml);
   } catch (e) {
-    host.innerHTML = '<p class="banque-empty banque-err">' + e + '</p>';
+    showErr(host, e);
   }
 }
 
-function renderDetailPane(q) {
+// Mode courant du détail : 'preview' (défaut, lecture, grand espace)
+// ou 'edit' (bloc éditable identique à /sujet). Persisté en localStorage.
+const VIEW_MODE_KEY = 'banque_view_mode';
+function getViewMode() { return localStorage.getItem(VIEW_MODE_KEY) || 'preview'; }
+function setViewMode(m) { localStorage.setItem(VIEW_MODE_KEY, m); }
+
+// Cache HTML du bloc éditable pour éviter de re-fetch quand on toggle.
+let _currentBlockHtml = null;
+
+function renderDetailPane(q, blockHtml) {
+  _currentBlockHtml = blockHtml;
   const host = document.getElementById('bq-detail');
   host.innerHTML = '';
+  const isMine = q.author_id === bankUserId;
+  const mode = getViewMode();
 
-  // Header : titre + status + auteur + version
+  // === Header : titre + status + auteur + version + toggle preview/edit ===
   const head = document.createElement('div');
   head.className = 'bq-detail-head';
-  const isMine = q.author_id === bankUserId;
+  const toggleLabel = mode === 'edit' ? '👁 Aperçu' : '✏ Éditer';
   head.innerHTML =
-    '<h2>' + (KIND_ICON[q.kind] || '·') + ' ' + escapeHtml(q.title || '(sans titre)') + '</h2>' +
+    '<div class="bq-detail-titleline">' +
+      '<h2>' + (KIND_ICON[q.kind] || '·') + ' ' + escapeHtml(q.title || '(sans titre)') + '</h2>' +
+      '<button type="button" class="btn btn-small bq-mode-toggle" id="bq-mode-toggle"' +
+        ' title="basculer entre aperçu et édition">' + toggleLabel + '</button>' +
+    '</div>' +
     '<div class="bq-detail-meta">' +
       (q.author ? '<span>par <b>' + escapeHtml(q.author) + '</b></span>' : '') +
       (q.author_institution ? '<span class="bq-detail-inst">· ' + escapeHtml(q.author_institution) + '</span>' : '') +
@@ -477,7 +516,12 @@ function renderDetailPane(q) {
     '</div>';
   host.appendChild(head);
 
-  // Tags publics
+  document.getElementById('bq-mode-toggle').addEventListener('click', () => {
+    setViewMode(mode === 'edit' ? 'preview' : 'edit');
+    renderDetailPane(q, _currentBlockHtml);  // re-render avec le nouveau mode
+  });
+
+  // === Tags publics ===
   if ((q.tags || []).length) {
     const tagDiv = document.createElement('div');
     tagDiv.className = 'bq-detail-tags';
@@ -485,29 +529,93 @@ function renderDetailPane(q) {
     host.appendChild(tagDiv);
   }
 
-  // Contenu rendu via AMCxRender
+  // === Body : preview OU éditeur selon le mode ===
   const body = document.createElement('div');
-  body.className = 'bq-detail-body';
+  body.className = 'bq-detail-body banque-' + mode;
   host.appendChild(body);
-  AMCxRender.renderQuestion(body, q.data || {}, {kind: q.kind, mode: 'view'});
 
-  // Actions bar
+  let blk = null;
+  if (mode === 'edit') {
+    body.classList.add('banque-editor');
+    body.innerHTML = blockHtml;
+    blk = body.querySelector('.sujet-block');
+    if (blk) {
+      // Cache les boutons sans sens dans la banque (déplacement, IA…)
+      blk.querySelectorAll('.block-move-up, .block-move-down, .block-duplicate, .block-ai, .block-handle')
+         .forEach(el => el.style.display = 'none');
+      // ✕ → supprimer la question de la banque
+      const del = blk.querySelector('.block-delete');
+      if (del) {
+        del.title = 'Supprimer cette question de la banque';
+        del.addEventListener('click', () => deleteQuestion(q));
+      }
+      // Init éditeur partagé (mêmes fonctions que /sujet)
+      AMCxBlockEditor.initBlock(blk, {
+        onDirtyChange: (isDirty) => {
+          const btn = document.getElementById('bq-save');
+          if (btn) {
+            btn.disabled = !isDirty;
+            btn.classList.toggle('btn-primary', isDirty);
+          }
+        },
+        onSave: async (blk, data) => await saveBankBlock(q.bank_id, blk, data),
+        // Changer single↔mult re-rend la question depuis le serveur : il faut
+        // d'abord enregistrer l'édition en cours, sinon elle est perdue sans
+        // avertissement.
+        onTypeChange: async (blk) => {
+          if (blk.classList.contains('dirty')) {
+            const ok = await saveBankBlock(
+              q.bank_id, blk, AMCxBlockEditor.collectBlockData(blk));
+            if (!ok) return;          // échec de sauvegarde : on ne recharge pas
+          }
+          selectQuestion(q.bank_id);
+        },
+      });
+    }
+  } else {
+    // Mode 'preview' : rendu grand format via AMCxRender (lecture seule)
+    body.classList.add('banque-preview-rendered');
+    AMCxRender.renderQuestion(body, q.data || {}, {
+      kind: q.kind, mode: 'view', size: 'large',
+    });
+  }
+
+  // === Barre d'actions ===
   const actions = document.createElement('div');
   actions.className = 'bq-detail-actions';
-  actions.innerHTML = '<button type="button" class="btn btn-primary" id="bq-import">+ Insérer dans le sujet courant</button>';
-  if (isMine) {
-    const nextStatus = q.status === 'public' ? 'draft' : 'public';
-    const publishLabel = q.status === 'public' ? '🔒 Dépublier' : '🌍 Publier';
-    actions.innerHTML +=
-      '<button type="button" class="btn" id="bq-publish">' + publishLabel + '</button>' +
-      '<button type="button" class="btn bq-danger" id="bq-delete">🗑 Supprimer</button>';
+  let actionsHtml = '';
+  if (mode === 'edit') {
+    actionsHtml +=
+      '<button type="button" class="btn" id="bq-save" disabled>💾 Enregistrer</button>';
   }
+  actionsHtml +=
+    '<button type="button" class="btn btn-primary" id="bq-import">+ Insérer dans le sujet courant</button>';
+  if (isMine) {
+    const publishLabel = q.status === 'public' ? '🔒 Dépublier' : '🌍 Publier';
+    actionsHtml +=
+      '<button type="button" class="btn" id="bq-publish">' + publishLabel + '</button>';
+    if (mode === 'preview') {
+      actionsHtml +=
+        '<button type="button" class="btn bq-danger" id="bq-delete-preview">🗑 Supprimer</button>';
+    }
+  }
+  actions.innerHTML = actionsHtml;
   host.appendChild(actions);
 
+  if (mode === 'edit') {
+    document.getElementById('bq-save').addEventListener('click', async () => {
+      if (!blk) return;
+      const data = AMCxBlockEditor.collectBlockData(blk);
+      const ok = await saveBankBlock(q.bank_id, blk, data);
+      if (ok) AMCxBlockEditor.clearDirty(blk);
+    });
+  }
   document.getElementById('bq-import').addEventListener('click', () => importToSujet(q.bank_id));
   if (isMine) {
     document.getElementById('bq-publish').addEventListener('click', () => togglePublish(q));
-    document.getElementById('bq-delete').addEventListener('click', () => deleteQuestion(q));
+    if (mode === 'preview') {
+      document.getElementById('bq-delete-preview').addEventListener('click', () => deleteQuestion(q));
+    }
   }
 
   // === Phase B widgets (online seulement) ===
@@ -550,14 +658,22 @@ function renderDetailPane(q) {
   }
 }
 
-function renderPreviewPane(q) {
-  const host = document.getElementById('bq-preview');
-  host.innerHTML = '<div class="bq-preview-inner"></div>';
-  AMCxRender.renderQuestion(
-    host.querySelector('.bq-preview-inner'),
-    q.data || {},
-    {kind: q.kind, mode: 'view', size: 'large'}
-  );
+// === Sauvegarde d'un bloc édité dans la banque ============================
+async function saveBankBlock(bankId, blk, data) {
+  const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/save-data', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({data: data})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    alert('✘ Échec sauvegarde : ' + (j.error || 'erreur'));
+    return false;
+  }
+  // Mets à jour le max affiché (q-max-val)
+  const maxEl = blk.querySelector('.q-max-val');
+  if (maxEl && j.max != null) maxEl.textContent = Number(j.max).toFixed(2);
+  // Pas de toast bruyant ; le bouton 💾 se grise via clearDirty
+  return true;
 }
 
 // ============================================================================
@@ -740,6 +856,160 @@ document.getElementById('bq-fav').addEventListener('change', reloadList);
 document.getElementById('bq-mine').addEventListener('change', reloadList);
 document.getElementById('bq-drafts').addEventListener('change', reloadList);
 document.getElementById('bq-mon-tag').addEventListener('input', debounce(reloadList, 300));
+
+// ============================================================================
+// 9. Sélection de banque (dropdown + bouton + Ajouter + modale)
+// ============================================================================
+
+const bankSelectWrap     = document.getElementById('bank-select-wrap');
+const bankSelectToggle   = document.getElementById('bank-select-toggle');
+const bankSelectDropdown = document.getElementById('bank-select-dropdown');
+const bankSelectLabel    = document.getElementById('bank-select-label');
+const bankListEl         = document.getElementById('bank-list');
+const bankAddModal       = document.getElementById('bank-add-modal');
+const bankAddStatus      = document.getElementById('bank-add-status');
+
+bankSelectToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  bankSelectDropdown.hidden = !bankSelectDropdown.hidden;
+  if (!bankSelectDropdown.hidden) refreshBankList();
+});
+document.addEventListener('click', (e) => {
+  if (!bankSelectDropdown.hidden && !bankSelectWrap.contains(e.target))
+    bankSelectDropdown.hidden = true;
+});
+
+async function refreshBankList() {
+  let j;
+  try {
+    const r = await fetch('/api/banks');
+    j = await r.json();
+  } catch (e) {
+    bankListEl.innerHTML = '<p class="banque-empty">Erreur</p>';
+    return;
+  }
+  if (!j.ok) { bankListEl.innerHTML = '<p class="banque-empty">Erreur</p>'; return; }
+  const banks = j.banks || [];
+  const active = j.active;
+  // Mets à jour le label du bouton
+  const cur = banks.find(b => b.slug === active);
+  if (cur) {
+    const icon = cur.type === 'online' ? '🌐' : '💾';
+    bankSelectLabel.textContent = icon + ' ' + cur.name;
+  } else {
+    bankSelectLabel.textContent = '(aucune banque)';
+  }
+  // Remplis la liste
+  if (!banks.length) {
+    bankListEl.innerHTML = '<p class="banque-empty">Aucune banque</p>';
+    return;
+  }
+  bankListEl.innerHTML = '';
+  banks.forEach(b => {
+    const row = document.createElement('div');
+    row.className = 'bank-row' + (b.slug === active ? ' bank-row-active' : '');
+    const icon = b.type === 'online' ? '🌐' : '💾';
+    const sub = b.type === 'online'
+      ? (b.user_email || b.supabase_url || '')
+      : (b.path || '');
+    row.innerHTML =
+      '<div class="bank-row-main">' +
+        '<span class="bank-row-icon">' + icon + '</span>' +
+        '<div class="bank-row-text">' +
+          '<div class="bank-row-name">' + escapeHtml(b.name) +
+            (b.slug === active ? ' <span class="bank-row-active-tag">active</span>' : '') +
+          '</div>' +
+          '<div class="bank-row-sub">' + escapeHtml(sub) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<button type="button" class="bank-row-del" title="Supprimer">🗑</button>';
+    // Click sur ligne (hors bouton 🗑) = activer
+    row.querySelector('.bank-row-main').addEventListener('click', async () => {
+      if (b.slug === active) { bankSelectDropdown.hidden = true; return; }
+      const r = await fetch('/api/banks/' + encodeURIComponent(b.slug) + '/activate',
+                            {method: 'POST'});
+      if (r.ok) { window.location.reload(); }
+      else {
+        const j = await r.json().catch(() => ({}));
+        alert('✘ ' + (j.error || 'erreur'));
+      }
+    });
+    row.querySelector('.bank-row-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Supprimer la banque « ' + b.name + ' » ?\n' +
+                   'Les questions ne seront pas effacées sur disque/Supabase, ' +
+                   'seule la référence dans AMCx disparaît.')) return;
+      const r = await fetch('/api/banks/' + encodeURIComponent(b.slug), {method: 'DELETE'});
+      if (r.ok) {
+        // Si on a supprimé l'active, reload pour repartir sur la nouvelle
+        if (b.slug === active) window.location.reload();
+        else refreshBankList();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        alert('✘ ' + (j.error || 'erreur'));
+      }
+    });
+    bankListEl.appendChild(row);
+  });
+}
+
+// === Modale "+ Ajouter une banque" =========================================
+document.getElementById('bank-add-btn').addEventListener('click', () => {
+  bankSelectDropdown.hidden = true;
+  bankAddStatus.textContent = '';
+  document.getElementById('add-bank-name').value = '';
+  document.getElementById('add-bank-path').value = '';
+  document.getElementById('add-bank-url').value = '';
+  document.getElementById('add-bank-anon').value = '';
+  document.querySelector('input[name="add_bank_type"][value="local"]').checked = true;
+  document.querySelector('.bank-add-local').style.display = '';
+  document.querySelector('.bank-add-online').style.display = 'none';
+  bankAddModal.hidden = false;
+  document.getElementById('add-bank-name').focus();
+});
+document.getElementById('bank-add-close').addEventListener('click', () => bankAddModal.hidden = true);
+document.getElementById('bank-add-cancel').addEventListener('click', () => bankAddModal.hidden = true);
+document.querySelectorAll('input[name="add_bank_type"]').forEach(r => {
+  r.addEventListener('change', (e) => {
+    const t = e.target.value;
+    document.querySelector('.bank-add-local').style.display  = (t === 'local')  ? '' : 'none';
+    document.querySelector('.bank-add-online').style.display = (t === 'online') ? '' : 'none';
+  });
+});
+document.getElementById('bank-add-create').addEventListener('click', async () => {
+  const name = document.getElementById('add-bank-name').value.trim();
+  const type = document.querySelector('input[name="add_bank_type"]:checked').value;
+  if (!name) { bankAddStatus.textContent = '✘ Nom requis.'; return; }
+  const payload = {name, type};
+  if (type === 'local') {
+    payload.path = document.getElementById('add-bank-path').value.trim();
+    if (!payload.path) { bankAddStatus.textContent = '✘ Chemin requis.'; return; }
+  } else {
+    payload.supabase_url     = document.getElementById('add-bank-url').value.trim();
+    payload.supabase_anon_key = document.getElementById('add-bank-anon').value.trim();
+    if (!payload.supabase_url || !payload.supabase_anon_key) {
+      bankAddStatus.textContent = '✘ URL + clé anon requis.'; return;
+    }
+  }
+  bankAddStatus.textContent = 'Création…';
+  const r = await fetch('/api/banks', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) {
+    bankAddStatus.textContent = '✓ Créée : ' + (j.slug || '?');
+    setTimeout(() => {
+      bankAddModal.hidden = true;
+      refreshBankList();
+    }, 600);
+  } else {
+    bankAddStatus.textContent = '✘ ' + (j.error || 'erreur');
+  }
+});
+
+// Init : remplit le label du bouton banque
+refreshBankList();
 
 refreshAuthStatus().then(reloadList);
 </script>

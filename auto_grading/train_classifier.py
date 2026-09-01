@@ -26,10 +26,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import GroupKFold
 
 from build_dataset import FEATURE_COLS
+import config
 
-ROOT = Path(__file__).resolve().parent
+_INSTALL_DIR = Path(__file__).resolve().parent   # installation : modèles partagés (commités)
+ROOT = config.project_root()                      # projet actif : dataset + rapport
 RESULTS_DIR = ROOT / "results"
-MODELS_DIR = ROOT / "models"
+MODELS_DIR = _INSTALL_DIR / "models"
 AMBIG_LO, AMBIG_HI = 0.20, 0.45  # zone grise (cohérent avec cv_grade.grade_image)
 
 

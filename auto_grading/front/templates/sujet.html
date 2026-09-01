@@ -102,6 +102,13 @@
             <label class="bd-field bd-field-full"><span>Instructions (LaTeX)</span>
               <textarea id="hdr-instructions" rows="3" spellcheck="false"
                 {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}>{{ header.instructions }}</textarea></label>
+            {% if mode == 'canonical' and not header.raw_tex %}
+            <div class="bd-field bd-field-full">
+              <button type="button" id="gen-bareme-ex" class="btn btn-small"
+                title="Génère le bloc « Barème » (explication + exemples chiffrés) depuis les questions du sujet, clampé au plancher/plafond définis dans les Réglages (dashboard). Insère du LaTeX éditable dans les Instructions ci-dessus.">📊 Générer les exemples de barème</button>
+              <span id="gen-bareme-status" class="settings-hint"></span>
+            </div>
+            {% endif %}
           </div>
         </details>
 
@@ -279,297 +286,11 @@
   {% endif %}
 
   {% for b in blocks %}
-  {# ----- En-tête commun à tous les blocs : drag handle, boutons, type ----- #}
-  <section class="sujet-block sujet-block-{{ b.kind }}"
-           data-bid="{{ b.bid }}" data-kind="{{ b.kind }}"
-           {% if b.kind == 'question_qcm' %}data-q="{{ b.q }}" data-type="{{ b.data.qtype }}"{% endif %}
-           {% if b.get('preview_q') %}data-preview-q="{{ b.preview_q }}"{% endif %}
-           {% if b.data.get('readonly') %}data-readonly="1"{% endif %}
-           {% if b.data.get('title') %}data-title="{{ b.data.title }}"{% endif %}
-           {% if b.data.get('level') %}data-level="{{ b.data.level }}"{% endif %}>
-    <div class="block-toolbar">
-      {% if mode == 'canonical' %}
-      <span class="block-handle" draggable="true"
-            title="glisser pour déplacer ce bloc">☰</span>
-      {% else %}
-      <span class="block-handle disabled" title="mode legacy : drag&drop désactivé">☰</span>
-      {% endif %}
-      <span class="block-kind-tag">
-        {% if b.kind == 'text' %}TEXTE
-        {% elif b.kind == 'question_qcm' %}QCM Q{{ b.q }}
-        {% elif b.kind == 'question_open' %}OPEN
-        {% elif b.kind == 'question_freeform' %}LIBRE 🪄
-        {% elif b.kind == 'answerbox' %}RÉPONSE{% if b.data.placement == 'end' %} ← fin{% endif %}
-        {% endif %}
-      </span>
-      <span class="q-dirty-dot" title="modifications non sauvegardées">●</span>
-      <span class="block-toolbar-spacer"></span>
-      {% if mode == 'canonical' %}
-      {% if b.kind == 'question_qcm' %}
-      <button type="button" class="block-btn block-ai" title="Demander à Claude de modifier cette question"><img src="{{ url_for('static', filename='claude-icon.svg') }}" class="claude-icon" alt="Claude"></button>
-      {% endif %}
-      <button type="button" class="block-btn block-move-up" title="monter">▲</button>
-      <button type="button" class="block-btn block-move-down" title="descendre">▼</button>
-      <button type="button" class="block-btn block-duplicate" title="dupliquer">⎘</button>
-      <button type="button" class="block-btn block-delete" title="supprimer">✕</button>
-      {% else %}
-      <span class="block-legacy-hint">édition uniquement (mode legacy)</span>
-      {% endif %}
-    </div>
-
-    {# ----- Corps du bloc selon le kind ----- #}
-    {% if b.kind == 'text' %}
-      {% if b.data.get('readonly') %}
-      {# Bloc legacy en lecture seule : titre + tex brut repliable. #}
-      <div class="sujet-field text-readonly">
-        <div class="field-label">
-          <span class="field-tag">{{ b.data.get('level', 'intercalaire') }}</span>
-          {{ b.data.get('title', 'Texte LaTeX') }}
-          <span class="field-note">lecture seule — passer en canonique pour éditer</span>
-        </div>
-        <details class="text-readonly-source">
-          <summary>voir / replier le LaTeX brut ({{ b.data.tex|length }} car.)</summary>
-          <pre>{{ b.data.tex }}</pre>
-        </details>
-        <textarea class="md-src text-src" hidden>{{ b.data.tex }}</textarea>
-      </div>
-      {% else %}
-      <div class="sujet-field">
-        <div class="field-label">Bloc texte libre <span class="field-tag">LaTeX</span></div>
-        <div class="md-pair">
-          <textarea class="md-src text-src" rows="3" spellcheck="false">{{ b.data.tex }}</textarea>
-          <div class="md-view"></div>
-        </div>
-      </div>
-      {% endif %}
-
-    {% elif b.kind == 'question_qcm' %}
-    {# Rendu QCM (identique à l'ancien sujet.html) ; les champs d'édition restent
-       compatibles avec /api/sujet/save (mode legacy) ET /api/sujet/blocks/update (canonique). #}
-    <header class="sujet-q-head">
-      <div class="sujet-q-id">
-        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
-               title="identifiant LaTeX">
-        <select class="q-type-select" title="type">
-          <option value="single"{% if b.data.qtype == 'single' %} selected{% endif %}>choix unique</option>
-          <option value="mult"{% if b.data.qtype == 'mult' %} selected{% endif %}>choix multiple</option>
-        </select>
-        <label class="q-horiz" title="disposition des réponses">
-          <input type="checkbox" class="q-env-horiz"{% if b.data.env == 'reponseshoriz' %} checked{% endif %}>
-          horiz</label>
-      </div>
-      <div class="sujet-q-bareme">
-        {% if b.data.qtype == 'mult' %}
-        <span class="bar-grouplabel">Barème — toutes :</span>
-        <label class="bar-field">bonnes
-          <input type="text" class="bar-global-b" spellcheck="false"></label>
-        <label class="bar-field">mauvaises
-          <input type="text" class="bar-global-m" spellcheck="false"></label>
-        {% else %}
-        <label class="bar-field">Valeur
-          <input type="text" class="bar-value" spellcheck="false"
-                 value="{{ b.data.get('value', '1') }}"></label>
-        {% endif %}
-        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
-      </div>
-    </header>
-
-    <div class="sujet-field">
-      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
-      <div class="md-pair">
-        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
-        <div class="md-view"></div>
-      </div>
-    </div>
-
-    <div class="sujet-field">
-      <div class="field-label">Réponses <span class="field-tag">LaTeX</span>
-        {% if b.data.qtype == 'mult' %}<span class="field-note">— chaque case = barème de cette réponse</span>{% endif %}
-        {% if mode == 'canonical' %}
-        <span class="field-actions">
-          <button type="button" class="btn-mini ans-add" title="ajouter une réponse">+ réponse</button>
-        </span>
-        {% endif %}
-      </div>
-      <div class="sujet-answers">
-        {% for i in range(b.data.answers|length) %}
-          {% set a = b.data.answers[i] %}
-          {% set char = b.answers_with_char[i].char if b.answers_with_char|length > i else None %}
-        <div class="md-answer {{ 'is-correct' if a.correct else 'is-wrong' }}"
-             data-correct="{{ '1' if a.correct else '0' }}">
-          <div class="ans-mark">
-            <button type="button" class="ans-badge"
-                    title="cliquer pour basculer bonne / mauvaise">{{ '✔ bonne' if a.correct else '✗ mauvaise' }}</button>
-            {% if char %}<span class="ans-char">case {{ char }}</span>{% endif %}
-            {% if b.data.qtype == 'mult' %}
-            <input type="text" class="ans-bareme" spellcheck="false"
-                   title="barème de cette réponse" value="{{ a.bareme }}">
-            {% else %}
-            <span class="ans-score"></span>
-            {% endif %}
-            {% if mode == 'canonical' %}
-            <button type="button" class="btn-mini ans-remove" title="supprimer cette réponse">✕</button>
-            {% endif %}
-          </div>
-          <div class="md-pair">
-            <textarea class="md-src ans-src" rows="2" spellcheck="false">{{ a.text }}</textarea>
-            <div class="md-view"></div>
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-
-    {% elif b.kind == 'question_open' %}
-    <header class="sujet-q-head">
-      <div class="sujet-q-id">
-        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
-               title="identifiant LaTeX de la question ouverte">
-        <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
-          lignes
-          <input type="number" class="open-lines" min="1" max="40" step="1"
-                 value="{{ b.data.lines }}"></label>
-        <label class="q-horiz" title="barème total possible">
-          points max
-          <input type="number" class="open-points" min="0" step="0.5"
-                 value="{{ b.data.points }}"></label>
-      </div>
-      <div class="sujet-q-bareme">
-        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.max) }}</strong></span>
-      </div>
-    </header>
-
-    <div class="sujet-field">
-      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
-      <div class="md-pair">
-        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
-        <div class="md-view"></div>
-      </div>
-    </div>
-
-    <div class="sujet-field">
-      <div class="field-label">Cases de notation (cochables par le correcteur)
-        <span class="field-tag">\AMCOpen</span>
-        {% if mode == 'canonical' %}
-        <span class="field-actions">
-          <button type="button" class="btn-mini grading-add" title="ajouter une case">+ case</button>
-        </span>
-        {% endif %}
-      </div>
-      <div class="open-grading-cases">
-        {% for c in b.data.grading_cases %}
-        <div class="grading-case">
-          <label>label
-            <input type="text" class="grading-label" value="{{ c.label }}" spellcheck="false"></label>
-          <label>valeur
-            <input type="number" class="grading-value" step="0.5" value="{{ c.value }}"></label>
-          {% if mode == 'canonical' %}
-          <button type="button" class="btn-mini grading-remove" title="supprimer">✕</button>
-          {% endif %}
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-
-    {% elif b.kind == 'question_freeform' %}
-    {# Question à réponse libre auto-gradée par HTR (extra [htr]).
-       Le PDF imprime un \AMCOpen ; le HTR transcrit la réponse de
-       l'étudiant et la compare à `expected_answer` selon `match_mode`.
-       Sans [htr] installé, la case 0/points reste cochable manuellement
-       par le correcteur sur la feuille (rétrocompat). #}
-    <header class="sujet-q-head">
-      <div class="sujet-q-id">
-        <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
-               title="identifiant LaTeX">
-        <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
-          lignes
-          <input type="number" class="ff-lines" min="1" max="20" step="1"
-                 value="{{ b.data.lines }}"></label>
-        <label class="q-horiz" title="note attribuée si la réponse est correcte">
-          points
-          <input type="number" class="ff-points" min="0" step="0.5"
-                 value="{{ b.data.points }}"></label>
-      </div>
-      <div class="sujet-q-bareme">
-        <span class="badge" style="background:#e0d4f5;color:#6533c0;border:1px solid #c8b8ee;">🪄 HTR</span>
-        <span class="q-max">max&nbsp;<strong class="q-max-val">{{ "%.2f"|format(b.data.points) }}</strong></span>
-      </div>
-    </header>
-
-    <div class="sujet-field">
-      <div class="field-label">Énoncé <span class="field-tag">LaTeX</span></div>
-      <div class="md-pair">
-        <textarea class="md-src stmt-src" rows="3" spellcheck="false">{{ b.data.statement }}</textarea>
-        <div class="md-view"></div>
-      </div>
-    </div>
-
-    <div class="sujet-field">
-      <div class="field-label">Réponse attendue <span class="field-tag">expected_answer</span></div>
-      <input type="text" class="ff-expected" spellcheck="false"
-             value="{% if b.data.expected_answer is string %}{{ b.data.expected_answer }}{% else %}{{ b.data.expected_answer|join(' | ') }}{% endif %}"
-             placeholder="ex. 42  ·  (sépare par | pour plusieurs réponses acceptées : Bernoulli | bernoulli)">
-    </div>
-
-    <div class="sujet-field" style="display:flex;gap:14px;align-items:end;">
-      <label class="ab-field" title="comment comparer la lecture OCR à expected_answer">
-        mode de match
-        <select class="ff-match-mode">
-          <option value="exact"{% if b.data.match_mode == 'exact' %} selected{% endif %}>exact (égal après strip+lower)</option>
-          <option value="numeric_tol"{% if b.data.match_mode == 'numeric_tol' %} selected{% endif %}>numeric_tol (nombre, écart ≤ tol)</option>
-          <option value="contains"{% if b.data.match_mode == 'contains' %} selected{% endif %}>contains (substring lower)</option>
-          <option value="regex"{% if b.data.match_mode == 'regex' %} selected{% endif %}>regex</option>
-        </select>
-      </label>
-      <label class="ab-field" title="tolérance numérique (utilisée seulement si mode = numeric_tol)">
-        numeric_tol
-        <input type="number" class="ff-numeric-tol" min="0" step="0.01" value="{{ b.data.numeric_tol }}">
-      </label>
-    </div>
-
-    {% elif b.kind == 'answerbox' %}
-    {# Cadre `\begin{answerbox}` (correction manuelle, pas de cases AMC).
-       Le placement détermine où le bloc apparaîtra dans le .tex compilé. #}
-    <header class="sujet-q-head">
-      <div class="sujet-q-id">
-        <label class="ab-field" title="hauteur du cadre (ex. 4cm, 5cm, 10cm)">
-          hauteur
-          <input type="text" class="ab-height" value="{{ b.data.height }}"
-                 placeholder="5cm" spellcheck="false"></label>
-        <label class="ab-field" title="où apparaît le cadre dans le PDF">
-          placement
-          <select class="ab-placement">
-            <option value="inline"{% if b.data.placement == 'inline' %} selected{% endif %}>dans le flux des questions</option>
-            <option value="end"{% if b.data.placement == 'end' %} selected{% endif %}>sur la feuille de réponses (en fin)</option>
-          </select>
-        </label>
-        <label class="ab-field" title="grille AMC à cocher par le correcteur (0 = aucune). Détectable a posteriori via le tag « bareme-<bid> » dans exam.xy.">
-          barème max
-          <input type="number" class="ab-bareme-max" min="0" max="99" step="0.25"
-                 value="{{ b.data.bareme_max or 0 }}"></label>
-        <label class="ab-field" title="pas entre 2 cases consécutives. Ex. max=1 + step=0.25 → 5 cases (scores 0, 0.25, 0.5, 0.75, 1). Les labels affichés restent 0, 1, 2, …">
-          pas
-          <input type="number" class="ab-bareme-step" min="0.01" max="99" step="0.25"
-                 value="{{ b.data.bareme_step or 1 }}"></label>
-      </div>
-    </header>
-
-    <div class="sujet-field">
-      <div class="field-label">Titre (optionnel) <span class="field-tag">au-dessus du cadre</span></div>
-      <input type="text" class="ab-title" value="{{ b.data.title }}"
-             placeholder="ex. Justifie ta réponse">
-    </div>
-
-    <div class="sujet-field">
-      <div class="field-label">Instructions (optionnel) <span class="field-tag">LaTeX</span></div>
-      <div class="md-pair">
-        <textarea class="md-src ab-instructions" rows="2" spellcheck="false">{{ b.data.instructions }}</textarea>
-        <div class="md-view"></div>
-      </div>
-    </div>
-    {% endif %}
-  </section>
+  {# Bloc <section.sujet-block> : extrait dans _sujet_block.html pour
+     que /banque puisse réutiliser EXACTEMENT le même rendu. #}
+  {% include '_sujet_block.html' %}
   {% endfor %}
+
 
   </div><!-- /sujet-left -->
 
@@ -826,6 +547,8 @@ const SUJET_MODE = '{{ mode }}';
 const IS_CANONICAL = SUJET_MODE === 'canonical';
 
 // === Toggle aperçu PDF (état persisté dans localStorage) ===================
+// Désactivé par défaut → édition plein écran. L'utilisateur réactive via
+// le bouton « 👁 Aperçu » de la toolbar.
 (function () {
   const split = document.querySelector('.sujet-split');
   const btn = document.getElementById('sujet-preview-toggle');
@@ -851,9 +574,14 @@ const IS_CANONICAL = SUJET_MODE === 'canonical';
 // === Renderer LaTeX → MD → KaTeX : fourni par static/render.js =============
 // (latexToMd, renderMd, escapeHtml, mdToHtmlSafe sont des globales injectées
 // par render.js chargé dans base.html. Anciennement définies ici.)
+// L'aperçu inline (`.md-view` à côté de chaque textarea) a été retiré
+// (un seul bloc d'édition par champ). Fonction conservée en no-op
+// défensif si un vieux `.md-view` traîne encore.
 function renderPreview(ta) {
   const pair = ta.closest('.md-pair');
-  if (pair) pair.querySelector('.md-view').innerHTML = renderMd(latexToMd(ta.value));
+  if (!pair) return;
+  const view = pair.querySelector('.md-view');
+  if (view) view.innerHTML = renderMd(latexToMd(ta.value));
 }
 
 // === barème (QCM uniquement) ================================================
@@ -934,6 +662,31 @@ function updateSaveBtn() {
   btn.classList.toggle('has-dirty', n > 0);
 }
 
+// Un `location.reload()` jette les blocs édités non sauvegardés. Avant tout
+// rechargement, proposer de les enregistrer ; « Annuler » abandonne l'action.
+// Retourne true si on peut recharger.
+async function ensureSavedBeforeReload() {
+  const dirty = dirtyBlocks();
+  if (!dirty.length) return true;
+  const n = dirty.length;
+  if (!confirm(n + (n > 1 ? ' blocs modifiés ne sont pas enregistrés.'
+                          : ' bloc modifié n\'est pas enregistré.')
+               + '\n\nOK : enregistrer puis continuer.'
+               + '\nAnnuler : ne rien faire.')) return false;
+  return await saveBlocks(dirty);
+}
+
+// Filet de sécurité pour toutes les autres sorties de page (fermeture d'onglet,
+// navigation, rechargement manuel).
+window.addEventListener('beforeunload', function (e) {
+  if (!_allowUnload && dirtyBlocks().length) { e.preventDefault(); e.returnValue = ''; }
+});
+let _allowUnload = false;
+function reloadPage(delay) {
+  _allowUnload = true;                    // rechargement volontaire : pas d'alerte
+  setTimeout(() => location.reload(), delay || 300);
+}
+
 // === collecte & sauvegarde des blocs ========================================
 function collectQcmData(blk) {
   const envCb = blk.querySelector('.q-env-horiz');
@@ -944,12 +697,18 @@ function collectQcmData(blk) {
             correct: row.dataset.correct === '1',
             bareme: bar ? bar.value : ''};
   });
+  const fEl = blk.querySelector('.q-floor');
+  const cEl = blk.querySelector('.q-ceiling');
+  const fv = fEl && fEl.value.trim() !== '' ? parseFloat(fEl.value) : null;
+  const cv = cEl && cEl.value.trim() !== '' ? parseFloat(cEl.value) : null;
   return {tag: blk.querySelector('.q-tag-input').value.trim(),
           qtype: qType(blk),
           env: (envCb && envCb.checked) ? 'reponseshoriz' : 'reponses',
           statement: blk.querySelector('.stmt-src').value,
           answers: answers,
-          value: valEl ? valEl.value : '1'};
+          value: valEl ? valEl.value : '1',
+          floor: (fv !== null && !isNaN(fv)) ? fv : null,
+          ceiling: (cv !== null && !isNaN(cv)) ? cv : null};
 }
 function collectOpenData(blk) {
   const cases = [].map.call(blk.querySelectorAll('.grading-case'), function (gc) {
@@ -1028,7 +787,7 @@ async function saveOneBlock(blk) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return false; }
     const sel = blk.querySelector('.q-type-select');
-    if (sel && sel.value !== blk.dataset.type) { location.reload(); return true; }
+    if (sel && sel.value !== blk.dataset.type) { _reloadAfterSave = true; return true; }
     document.getElementById('total-max').textContent = Number(j.total_max).toFixed(2);
     Object.keys(j.max || {}).forEach(function (q) {
       const el = document.querySelector('.sujet-block[data-q="' + q + '"] .q-max-val');
@@ -1044,14 +803,18 @@ async function saveOneBlock(blk) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return false; }
   // Changement de type → reload pour rafraîchir le rendu (toggle mult ↔ single).
+  // Différé : recharger ici abandonnerait les blocs suivants de la boucle.
   const sel = blk.querySelector('.q-type-select');
-  if (sel && sel.value !== blk.dataset.type) { location.reload(); return true; }
+  if (sel && sel.value !== blk.dataset.type) _reloadAfterSave = true;
   return true;
 }
+
+let _reloadAfterSave = false;   // un changement de type impose un re-rendu
 
 async function saveBlocks(blks) {
   if (!blks.length) { setStatus('Rien à sauvegarder.', ''); return true; }
   setStatus('Sauvegarde…', 'pending');
+  _reloadAfterSave = false;
   let ok = true;
   let outlineDirty = false;
   for (const blk of blks) {
@@ -1065,7 +828,9 @@ async function saveBlocks(blks) {
     if (blk.dataset.kind === 'answerbox') outlineDirty = true;
   }
   if (outlineDirty) buildOutline();
-  if (ok) setStatus(blks.length + ' bloc(s) sauvegardé(s) dans exam.tex ✓', 'ok');
+  if (ok) setStatus(blks.length + ' bloc(s) sauvegardé(s) ✓', 'ok');
+  // Tous les blocs sont enregistrés : le rechargement ne perd plus rien.
+  if (ok && _reloadAfterSave) { _reloadAfterSave = false; reloadPage(); }
   return ok;
 }
 
@@ -1108,10 +873,10 @@ function _setPreviewActiveBlock(blk) {
 }
 
 function showPreview(blk) {
-  // `data-preview-q` (numéro AMC global) est posé par le serveur sur tous les
-  // blocs qui registrent une `\question{}` AMC : question_qcm, question_open,
-  // answerbox AVEC un barème. Les blocs text et les answerbox sans barème n'ont
-  // rien dans `.xy` à montrer.
+  // Le panneau droit a été retiré ; cette fonction reste pour compatibilité
+  // (les blocs ont encore des listeners mouseenter/focusin) mais ne fait rien
+  // tant que `previewBody` est absent.
+  if (!previewBody) return;
   _setPreviewActiveBlock(blk);
   const q = blk.dataset.previewQ;
   if (!q) {
@@ -1347,6 +1112,8 @@ function _defaultDataFor(kind, qtype) {
   };
 }
 async function addBlock(kind, qtype) {
+  // L'ajout recharge la page : sauver d'abord les blocs en cours d'édition.
+  if (!(await ensureSavedBeforeReload())) return;
   const data = _defaultDataFor(kind, qtype);
   const r = await fetch('/api/sujet/blocks/add', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1357,7 +1124,7 @@ async function addBlock(kind, qtype) {
     setStatus('Échec ajout : ' + (j.error || 'erreur'), 'err'); return;
   }
   setStatus('Bloc ajouté ✓ — rechargement…', 'ok');
-  setTimeout(() => location.reload(), 300);
+  reloadPage();
 }
 
 async function deleteBlock(blk) {
@@ -1374,6 +1141,7 @@ async function deleteBlock(blk) {
 }
 
 async function duplicateBlock(blk) {
+  if (!(await ensureSavedBeforeReload())) return;
   const r = await fetch('/api/sujet/blocks/duplicate', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({bid: blk.dataset.bid})
@@ -1381,7 +1149,7 @@ async function duplicateBlock(blk) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { setStatus('Échec duplication : ' + (j.error || 'erreur'), 'err'); return; }
   setStatus('Bloc dupliqué ✓ — rechargement…', 'ok');
-  setTimeout(() => location.reload(), 300);
+  reloadPage();
 }
 
 async function moveBlock(blk, direction) {
@@ -1424,9 +1192,7 @@ function addAnswer(blk) {
         : '<span class="ans-score"></span>')
     + '<button type="button" class="btn-mini ans-remove" title="supprimer">✕</button>'
     + '</div>'
-    + '<div class="md-pair">'
-    + '<textarea class="md-src ans-src" rows="2" spellcheck="false">Nouvelle réponse</textarea>'
-    + '<div class="md-view"></div></div>';
+    + '<textarea class="md-src ans-src" rows="2" spellcheck="false">Nouvelle réponse</textarea>';
   list.appendChild(div);
   // Rebind handlers sur les nouveaux éléments
   div.querySelector('.ans-badge').addEventListener('click', function () { toggleCorrect(blk, div); });
@@ -1608,7 +1374,7 @@ if (migrateBtn) migrateBtn.addEventListener('click', async function () {
     return;
   }
   setStatus(j.log + ' — rechargement…', 'ok');
-  setTimeout(() => location.reload(), 800);
+  reloadPage(800);
 });
 
 // Header (canonique seul, sinon les inputs sont disabled)
@@ -1636,6 +1402,38 @@ if (IS_CANONICAL) {
     if (el) el.addEventListener('input', _hdrSave);
   });
 
+  // Génération des exemples de barème → insérés (éditables) dans les Instructions.
+  const _genBaremeBtn = document.getElementById('gen-bareme-ex');
+  if (_genBaremeBtn) {
+    const START = '% --- AMCx:bareme-exemples';      // début de zone (préfixe)
+    const END = '% --- AMCx:bareme-exemples-fin ---';
+    _genBaremeBtn.addEventListener('click', async function () {
+      const st = document.getElementById('gen-bareme-status');
+      st.textContent = 'génération…';
+      try {
+        const r = await fetch('/api/sujet/bareme-examples', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) { st.textContent = '✗ ' + (j.error || 'erreur'); return; }
+        const ta = document.getElementById('hdr-instructions');
+        const cur = ta.value;
+        const s = cur.indexOf(START);
+        const e = cur.indexOf(END);
+        if (s !== -1 && e !== -1 && e > s) {
+          // Remplace la zone générée existante (idempotent).
+          ta.value = cur.slice(0, s) + j.tex + cur.slice(e + END.length);
+        } else {
+          ta.value = (cur.trim() ? cur.trimEnd() + '\n\n' : '') + j.tex;
+        }
+        patchHeader(_readHdrFields());   // sauvegarde (subject.json), ne touche pas au .tex
+        st.textContent = '✓ inséré dans les Instructions';
+      } catch (err) {
+        st.textContent = '✗ ' + err;
+      }
+    });
+  }
+
   const _asSave = debounce(function () {
     patchAnswerSheet({
       id_grid_digits: parseInt(document.getElementById('as-id-grid-digits').value) || 4,
@@ -1657,6 +1455,9 @@ if (IS_CANONICAL) {
     const _asRawSave = debounce(async function () {
       await patchAnswerSheet({answer_sheet_tex: asRaw.value});
       const nowFilled = !!asRaw.value.trim();
+      // Rechargement non routé par `reloadPage()` volontairement : il n'est pas
+      // précédé d'une sauvegarde des blocs, donc `beforeunload` doit prévenir
+      // si des éditions sont en cours.
       if (wasFilled !== nowFilled) location.reload();
     }, 600);
     asRaw.addEventListener('input', _asRawSave);
@@ -1697,12 +1498,19 @@ function _blockTitle(blk) {
     return t ? (t.length > 36 ? t.slice(0, 35) + '…' : t) : 'Texte libre';
   }
   if (kind === 'question_qcm') {
+    // La pastille d'icône affiche déjà « Q3 » en gras → le label = la légende
+    // (le tag) seule. Repli : aperçu d'énoncé court, sinon « (sans tag) ».
     const tag = blk.querySelector('.q-tag-input');
-    return 'Q' + (blk.dataset.q || '?') + ' — ' + (tag ? tag.value : '');
+    const t = tag ? tag.value.trim() : '';
+    if (t) return t;
+    const st = blk.querySelector('.stmt-src');
+    const s = (st ? st.value : '').replace(/\s+/g, ' ').trim();
+    return s ? (s.length > 36 ? s.slice(0, 35) + '…' : s) : '(sans tag)';
   }
   if (kind === 'question_open') {
     const tag = blk.querySelector('.q-tag-input');
-    return 'OPEN — ' + (tag ? tag.value : 'question ouverte');
+    const t = tag ? tag.value.trim() : '';
+    return t || 'question ouverte';
   }
   if (kind === 'answerbox') {
     const title = blk.querySelector('.ab-title');
@@ -1830,6 +1638,12 @@ function _setupOutlineRename(labelEl, blk) {
     e.preventDefault();
     const original = labelEl.textContent;
     const parent = labelEl.parentNode;
+    // Le <li> parent est `draggable=true` (drag&drop de l'outline). Un input
+    // dans un ancêtre draggable empêche de repositionner le curseur au reclic
+    // (le navigateur traite le mousedown comme un début de drag). On désactive
+    // donc le drag pendant l'édition, restauré dans finalize().
+    const wasDraggable = parent.draggable;
+    parent.draggable = false;
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'outline-rename-input';
@@ -1847,6 +1661,7 @@ function _setupOutlineRename(labelEl, blk) {
       done = true;
       const newVal = input.value.trim();
       input.remove();
+      parent.draggable = wasDraggable;
       labelEl.style.display = '';
       if (commit && newVal && newVal !== input.defaultValue) {
         try {
@@ -2222,7 +2037,7 @@ updateSaveBtn();
       return;
     }
     setStatus('Bloc ajouté ✓ — rechargement…', 'ok');
-    setTimeout(() => location.reload(), 300);
+    reloadPage();
   });
 })();
 
@@ -2370,7 +2185,14 @@ updateSaveBtn();
   function renderBankList(items, err) {
     const host = document.getElementById('bank-list');
     const cnt = document.getElementById('bank-count');
-    if (err) { host.innerHTML = '<p class="bank-empty bank-err">' + err + '</p>'; cnt.textContent = ''; return; }
+    if (err) {
+      host.textContent = '';
+      const pe = document.createElement('p');
+      pe.className = 'bank-empty bank-err';
+      pe.textContent = String(err);   // texte : le message peut venir de la banque
+      host.appendChild(pe);
+      cnt.textContent = ''; return;
+    }
     cnt.textContent = items.length + ' question(s)';
     if (!items.length) {
       host.innerHTML = '<p class="bank-empty">Aucune question dans la banque (ou aucun filtre ne correspond).</p>';
@@ -2715,7 +2537,7 @@ updateSaveBtn();
       if (!r.ok || !j.ok) { setStatus('Échec import : ' + (j.error || 'erreur'), 'err'); return; }
       closeBankModal();
       setStatus('Question importée ✓ — rechargement…', 'ok');
-      setTimeout(() => location.reload(), 300);
+      reloadPage();
     } catch (e) {
       setStatus('Erreur réseau : ' + e, 'err');
     }
@@ -3089,7 +2911,7 @@ updateSaveBtn();
         }
         _closeAi();
         setStatus(blocks.length + ' question(s) ajoutée(s) ✓ — rechargement…', 'ok');
-        setTimeout(() => location.reload(), 250);
+        reloadPage(250);
       } else {
         // action=edit : remplace via /api/sujet/blocks/update
         const r = await fetch('/api/sujet/blocks/update', {
@@ -3104,7 +2926,7 @@ updateSaveBtn();
         }
         _closeAi();
         setStatus('Modification appliquée ✓ — rechargement…', 'ok');
-        setTimeout(() => location.reload(), 250);
+        reloadPage(250);
       }
     } catch (e) {
       errEl.textContent = '✘ ' + e;

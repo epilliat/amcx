@@ -10,6 +10,7 @@
  *   - latexToMd(s)         : conversion LaTeX → Markdown best-effort
  *   - renderMd(src)        : Markdown + maths → HTML (marked.js + KaTeX)
  *   - escapeHtml(s)
+ *   - sanitizeHtml(html)   : liste blanche (contenu de banque = non fiable)
  *   - mdToHtmlSafe(md)     : fallback si marked.js indispo
  *   - renderQuestion(host, data, opts)  : rend une question complète
  *
@@ -78,6 +79,62 @@
               .replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  // === Sanitisation du HTML produit par marked ==============================
+  //
+  // Le contenu d'une question peut venir d'une banque PARTAGÉE : une question
+  // publique écrite par quelqu'un d'autre est une entrée non fiable. marked
+  // laisse passer le HTML brut, donc `<img src=x onerror=…>` s'exécuterait chez
+  // tout prof qui prévisualise la question. On filtre par liste blanche.
+  //
+  // Appliqué AVANT la réinsertion du HTML KaTeX : celui-ci est généré
+  // localement à partir du TeX (KaTeX n'émet pas de HTML brut sans
+  // `trust: true`) et n'a pas à traverser le filtre, qui casserait son balisage.
+
+  var ALLOWED_TAGS = {
+    a: ['href', 'title'], p: [], br: [], hr: [], span: [], div: [],
+    b: [], strong: [], i: [], em: [], u: [], s: [], del: [], sub: [], sup: [],
+    code: [], pre: [], blockquote: [], ul: [], ol: [], li: [],
+    h1: [], h2: [], h3: [], h4: [], h5: [], h6: [],
+    table: [], thead: [], tbody: [], tr: [],
+    th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'],
+    img: ['src', 'alt', 'title'],
+  };
+  // Supprimés avec leur contenu (le reste est « déballé » : balise retirée,
+  // texte conservé).
+  var DROP_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form',
+                   'input', 'button', 'link', 'meta', 'base', 'svg', 'math'];
+  var BAD_URL = /^\s*(javascript|vbscript|data)\s*:/i;
+
+  function sanitizeHtml(html) {
+    var tpl = document.createElement('template');
+    tpl.innerHTML = String(html || '');   // inerte : ni script exécuté ni image chargée
+    DROP_TAGS.forEach(function (t) {
+      Array.prototype.slice.call(tpl.content.querySelectorAll(t))
+        .forEach(function (el) { el.remove(); });
+    });
+    (function walk(node) {
+      Array.prototype.slice.call(node.children).forEach(function (el) {
+        var tag = el.tagName.toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(ALLOWED_TAGS, tag)) {
+          walk(el);
+          while (el.firstChild) el.parentNode.insertBefore(el.firstChild, el);
+          el.remove();
+          return;
+        }
+        Array.prototype.slice.call(el.attributes).forEach(function (a) {
+          var n = a.name.toLowerCase();
+          if (ALLOWED_TAGS[tag].indexOf(n) === -1) {
+            el.removeAttribute(a.name);           // retire aussi tous les on*
+          } else if ((n === 'href' || n === 'src') && BAD_URL.test(a.value)) {
+            el.removeAttribute(a.name);
+          }
+        });
+        walk(el);
+      });
+    })(tpl.content);
+    return tpl.innerHTML;
+  }
+
   // === markdown + maths → HTML ===============================================
 
   function renderMd(src) {
@@ -89,7 +146,9 @@
       .replace(/\$([^\$\n]+?)\$/g, function (_, m) {
         math.push({tex: m, display: false}); return tok(math.length - 1); });
     let html;
-    try { html = window.marked ? window.marked.parse(s) : s; } catch (e) { html = s; }
+    try { html = window.marked ? window.marked.parse(s) : escapeHtml(s); }
+    catch (e) { html = escapeHtml(s); }
+    html = sanitizeHtml(html);
     return html.replace(/@@KX(\d+)XK@@/g, function (_, i) {
       const it = math[+i];
       try { return window.katex.renderToString(it.tex, {displayMode: it.display, throwOnError: false}); }
@@ -105,8 +164,9 @@
   }
 
   function mdToHtmlSafe(md) {
-    try { return window.marked ? window.marked.parse(md) : escapeHtml(md); }
-    catch (e) { return escapeHtml(md); }
+    try {
+      return sanitizeHtml(window.marked ? window.marked.parse(md) : escapeHtml(md));
+    } catch (e) { return escapeHtml(md); }
   }
 
   // === renderQuestion : rend une question dans un container =================
@@ -239,6 +299,7 @@
     latexToMd:      latexToMd,
     renderMd:       renderMd,
     escapeHtml:     escapeHtml,
+    sanitizeHtml:   sanitizeHtml,
     mdToHtmlSafe:   mdToHtmlSafe,
     renderQuestion: renderQuestion,
   };

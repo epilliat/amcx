@@ -14,7 +14,9 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+import config
+
+ROOT = config.project_root()  # projet actif : pour les données
 TO_REVIEW = ROOT / "to_review"
 CV_DIR = ROOT / "raw_responses_cv"
 

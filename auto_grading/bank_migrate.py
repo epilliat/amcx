@@ -183,7 +183,7 @@ def main():
 
     print(f"AMCx — migration banque locale → online")
     print(f"  source : {bank.question_dir()}")
-    print(f"  cible  : {config.load_config().get('bank_supabase_url')}")
+    print(f"  cible  : {config.active_bank_cfg().get('supabase_url')}")
     print()
 
     print("1/2 Upload des questions…")

@@ -68,32 +68,34 @@ class BankNotFoundError(KeyError):
 # --------------------------------------------------------------------------
 
 def is_configured() -> bool:
-    """True si l'URL + clé anon Supabase sont posées dans la config."""
-    cfg = config.load_config()
-    return bool(cfg.get("bank_supabase_url") and cfg.get("bank_supabase_anon_key"))
+    """True si l'URL + clé anon Supabase sont posées sur la banque active."""
+    entry = config.active_bank_cfg()
+    return entry.get("type") == "online" and bool(
+        entry.get("supabase_url") and entry.get("supabase_anon_key"))
 
 
 def is_logged_in() -> bool:
-    """True si un token user JWT est posé. (Ne valide pas l'expiration ici —
-    `_request()` refresh à la volée si 401.)"""
-    return bool(config.load_config().get("bank_user_token"))
+    """True si un token user JWT est posé sur la banque active. (Ne valide
+    pas l'expiration ici — `_request()` refresh à la volée si 401.)"""
+    return bool(config.active_bank_cfg().get("user_token"))
 
 
 def current_user_id() -> str | None:
-    """UUID de l'user connecté (None si pas connecté)."""
-    return config.load_config().get("bank_user_id") or None
+    """UUID de l'user connecté sur la banque active (None si pas connecté)."""
+    return config.active_bank_cfg().get("user_id") or None
 
 
 def current_user_email() -> str | None:
-    return config.load_config().get("bank_user_email") or None
+    return config.active_bank_cfg().get("user_email") or None
 
 
 def _require_auth() -> tuple[str, str, str]:
-    """Retourne (base_url, anon_key, user_jwt). Lève BankAuthError sinon."""
-    cfg = config.load_config()
-    url = (cfg.get("bank_supabase_url") or "").rstrip("/")
-    anon = cfg.get("bank_supabase_anon_key") or ""
-    jwt = cfg.get("bank_user_token") or ""
+    """Retourne (base_url, anon_key, user_jwt) pour la banque active.
+    Lève BankAuthError sinon."""
+    entry = config.active_bank_cfg()
+    url = (entry.get("supabase_url") or "").rstrip("/")
+    anon = entry.get("supabase_anon_key") or ""
+    jwt = entry.get("user_token") or ""
     if not (url and anon):
         raise BankAuthError("Banque en ligne non configurée (URL + clé anon manquantes).")
     if not jwt:
@@ -194,7 +196,8 @@ def save(question: dict) -> dict:
     if question.get("bank_id"):
         # Update
         rows = _request("PATCH",
-                        f"/rest/v1/bank_questions?id=eq.{question['bank_id']}",
+                        "/rest/v1/bank_questions?"
+                        + urlencode({"id": f"eq.{question['bank_id']}"}),
                         body=payload,
                         extra_headers={"Prefer": "return=representation"})
     else:
@@ -212,7 +215,8 @@ def save(question: dict) -> dict:
 
 def delete(bank_id: str) -> None:
     """Supprime définitivement (RLS : seul l'auteur peut)."""
-    _request("DELETE", f"/rest/v1/bank_questions?id=eq.{bank_id}")
+    _request("DELETE", "/rest/v1/bank_questions?"
+             + urlencode({"id": f"eq.{bank_id}"}))
 
 
 def list_questions(filters: dict | None = None) -> list[dict]:
@@ -412,7 +416,7 @@ def update_my_profile(updates: dict) -> dict:
         payload["institution"] = (updates["institution"] or "").strip()
     if not payload:
         return get_my_profile()
-    rows = _request("PATCH", f"/rest/v1/profiles?user_id=eq.{uid}",
+    rows = _request("PATCH", "/rest/v1/profiles?" + urlencode({"user_id": f"eq.{uid}"}),
                     body=payload,
                     extra_headers={"Prefer": "return=representation"})
     return (rows or [{}])[0]
@@ -560,7 +564,7 @@ def set_status(bank_id: str, status: str) -> dict:
     """Change le `status` d'une question (RLS : auteur seul peut)."""
     if status not in ("draft", "public", "archived"):
         raise ValueError(f"status invalide : {status}")
-    rows = _request("PATCH", f"/rest/v1/bank_questions?id=eq.{bank_id}",
+    rows = _request("PATCH", "/rest/v1/bank_questions?" + urlencode({"id": f"eq.{bank_id}"}),
                     body={"status": status},
                     extra_headers={"Prefer": "return=representation"})
     if not rows:
@@ -590,7 +594,7 @@ def update_question_content(bank_id: str, data: dict, *,
             "select": "version", "id": f"eq.{bank_id}"}) or []
         if cur:
             payload["version"] = int(cur[0].get("version", 1)) + 1
-    rows = _request("PATCH", f"/rest/v1/bank_questions?id=eq.{bank_id}",
+    rows = _request("PATCH", "/rest/v1/bank_questions?" + urlencode({"id": f"eq.{bank_id}"}),
                     body=payload,
                     extra_headers={"Prefer": "return=representation"})
     if not rows:

@@ -10,6 +10,7 @@
      window.katex au moment de l'appel à renderMd, pas à l'init. Donc l'ordre
      est : render.js (def) puis marked + katex (par page) puis usage. -->
 <script src="{{ url_for('static', filename='render.js') }}"></script>
+<script src="{{ url_for('static', filename='block_editor.js') }}"></script>
 {% block head %}{% endblock %}
 </head>
 <body>
@@ -25,6 +26,7 @@
     <div class="project-menu-dropdown" id="projectMenuDropdown" hidden>
       <button type="button" class="pm-item" data-action="open">📂&nbsp; Ouvrir un projet…</button>
       <button type="button" class="pm-item" data-action="create">➕&nbsp; Créer un nouveau projet…</button>
+      <button type="button" class="pm-item" data-action="import-tex">📥&nbsp; Importer un fichier LaTeX…</button>
       <div class="pm-sep">Récents</div>
       <div id="pmRecents" class="pm-recents">
         {% for r in project_recent %}
@@ -110,6 +112,29 @@
   </div>
 </div>
 
+<!-- Modale : importer un .tex dans le projet ouvert -->
+<div class="pm-modal" id="importTexModal" hidden role="dialog" aria-labelledby="importTexTitle">
+  <div class="pm-modal-backdrop" data-close></div>
+  <div class="pm-modal-card">
+    <h2 id="importTexTitle">Importer un fichier LaTeX</h2>
+    <div class="pm-modal-field">
+      <label for="importTexFile">Fichier <code>.tex</code></label>
+      <input type="file" id="importTexFile" accept=".tex">
+      <div class="pm-modal-hint">
+        Les questions du <code>.tex</code> (QCM, ouvertes, libres) seront
+        <strong>ajoutées à la fin</strong> du sujet de ce projet. Les blocs
+        texte et zones de réponse seront ignorés.
+        <br>Le sujet courant doit être en mode <em>canonique</em>.
+      </div>
+    </div>
+    <div class="pm-modal-error" id="importTexError" hidden></div>
+    <div class="pm-modal-actions">
+      <button type="button" class="pm-btn-secondary" data-close>Annuler</button>
+      <button type="button" class="pm-btn-primary" id="importTexSubmit">Importer</button>
+    </div>
+  </div>
+</div>
+
 {% block content %}{% endblock %}
 {% block scripts %}{% endblock %}
 
@@ -137,6 +162,12 @@
     const action = e.target.closest('[data-action]')?.dataset.action;
     if (action === 'open')   { closeMenu(); openOpenModal(); }
     if (action === 'create') { closeMenu(); showModal('createProjectModal'); document.getElementById('createProjectName').focus(); }
+    if (action === 'import-tex') {
+      closeMenu();
+      document.getElementById('importTexError').hidden = true;
+      document.getElementById('importTexFile').value = '';
+      showModal('importTexModal');
+    }
     const recent = e.target.closest('.pm-recent-open');
     if (recent) { closeMenu(); switchProject(recent.dataset.path); }
     const forget = e.target.closest('.pm-recent-forget');
@@ -286,6 +317,59 @@
     r.addEventListener('change', () => { amcRow.hidden = (r.value === 'blank' || !r.checked); });
   });
   createSubmit?.addEventListener('click', () => createProject(createError));
+
+  // --- Importer un .tex dans le projet ouvert ----------------------------
+  const importTexSubmit = document.getElementById('importTexSubmit');
+  const importTexError  = document.getElementById('importTexError');
+  const importTexFile   = document.getElementById('importTexFile');
+  importTexSubmit?.addEventListener('click', async () => {
+    importTexError.hidden = true;
+    const f = importTexFile?.files?.[0];
+    if (!f) {
+      importTexError.hidden = false;
+      importTexError.textContent = 'Choisis un fichier .tex.';
+      return;
+    }
+    const fd = new FormData();
+    fd.append('file', f);
+    importTexSubmit.disabled = true;
+    importTexSubmit.textContent = 'Import en cours…';
+    let r, j;
+    try {
+      r = await fetch('/api/sujet/import-tex', {method: 'POST', body: fd});
+      j = await r.json().catch(() => ({}));
+    } catch (err) {
+      importTexError.hidden = false;
+      importTexError.textContent = 'Erreur réseau : ' + err;
+      importTexSubmit.disabled = false;
+      importTexSubmit.textContent = 'Importer';
+      return;
+    }
+    if (!r.ok) {
+      importTexError.hidden = false;
+      importTexError.textContent = j.error || ('HTTP ' + r.status);
+      if (j.legacy) {
+        importTexError.innerHTML += ' <a href="/sujet">→ ouvrir l\'onglet Sujet</a>';
+      }
+      importTexSubmit.disabled = false;
+      importTexSubmit.textContent = 'Importer';
+      return;
+    }
+    if (j.added === 0) {
+      importTexError.hidden = false;
+      importTexError.textContent =
+        'Aucune question trouvée dans ce .tex (source : ' + (j.source_mode || '?') +
+        '). Vérifie qu\'il contient bien des \\begin{question*}…\\end ou des blocs canoniques.';
+      importTexSubmit.disabled = false;
+      importTexSubmit.textContent = 'Importer';
+      return;
+    }
+    const skipMsg = j.skipped > 0
+      ? ' (' + j.skipped + ' bloc(s) non-question ignoré(s))' : '';
+    alert('✓ ' + j.added + ' question(s) importée(s) depuis le .tex (source : '
+          + (j.source_mode || '?') + ')' + skipMsg + '.');
+    window.location.reload();
+  });
 
   async function createProject(errorEl) {
     errorEl.hidden = true;

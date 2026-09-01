@@ -9,7 +9,9 @@ Modèle de données par JSON :
   - _cv_amc_diff     = liste {q, char, cv, amc} des cases qui divergent (si AMC)
   - _source          = "cv"
   - _flags           = ["cv_differs_amc(N)", "amc_unvalidated", "ambiguous",
-                        "id_incomplet", "no_mires", "manually_edited", "validated"]
+                        "id_incomplet", "no_mires", "manually_edited", "validated",
+                        "id_corrige", "open_answer_edited"]
+  - _student_override / _cv_student_id = identité relue à la main (préservées)
 
 Sans `capture.sqlite` (examen non analysé par AMC) → mode **CV-seul** : les
 champs/flags `_amc_*` sont simplement omis.
@@ -27,15 +29,23 @@ import sqlite3
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # install : pour importer config/layout_store
 import config
 import layout_store
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = config.project_root()  # projet actif : pour les données (pages, raw_responses, …)
 RAW_DIR = ROOT / "raw_responses"
 CV_DIR = ROOT / "raw_responses_cv"
 
 AMC_SEUIL = 0.5  # seuil de noirceur AMC (options.xml <seuil>)
+
+# Flags qui marquent du travail de relecture utilisateur dans raw_responses/.
+# Toute copie qui en porte un est préservée par --preserve-manual : c'est la
+# source de vérité de l'utilisateur, jamais écrasée par un re-grading (piège #3
+# du CLAUDE.md). `id_corrige` / `open_answer_edited` manquaient → une copie
+# seulement ré-identifiée (drag&drop dans /identites) était réécrite.
+USER_FLAGS = frozenset({"manually_edited", "validated", "id_corrige",
+                        "open_answer_edited"})
 
 
 def src_to_batch_page(src: str) -> tuple[str, int] | None:
@@ -140,9 +150,8 @@ def compute_diff(cv_answers: dict, amc_answers: dict, options: dict) -> list:
 
 
 def write_json(path: Path, data: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Écriture atomique (tmp + os.replace) — cf. config.write_json_atomic."""
+    config.write_json_atomic(path, data)
 
 
 def main():
@@ -169,7 +178,7 @@ def main():
             for img in sorted(batch_dir.glob("page_*.jpg")):
                 all_pages.append((batch_dir.name, int(img.stem.split("_")[1])))
 
-    n_total = n_amc = n_diff = n_unvalidated = n_preserved = n_no_cv = 0
+    n_total = n_amc = n_diff = n_unvalidated = n_preserved = n_no_cv = n_not_sheet = 0
 
     for batch, page in all_pages:
         out_path = RAW_DIR / batch / f"page_{page:03d}.json"
@@ -179,13 +188,26 @@ def main():
         if args.preserve_manual and out_path.exists():
             with open(out_path, encoding="utf-8") as f:
                 existing = json.load(f)
-            if {"manually_edited", "validated"} & set(existing.get("_flags", [])):
+            if (USER_FLAGS & set(existing.get("_flags", []))
+                    or existing.get("_student_override")
+                    or existing.get("_cv_student_id")):
                 preserve_answers = True
                 n_preserved += 1
 
         cv = load_cv_for_copy(batch, page)
         if cv is None:
             n_no_cv += 1
+            continue
+
+        # Copies multi-pages : une page sans grille de cases (recto sujet, page
+        # blanche…) n'est pas une copie. cv_grade la marque `_is_answer_sheet=False`.
+        # On l'écarte — sauf si l'utilisateur l'a déjà relue (preserve_answers).
+        # Idempotent : si une telle page avait été écrite par un seed antérieur,
+        # on la supprime de raw_responses/ pour converger vers « 1 copie = 1 feuille ».
+        if not preserve_answers and not cv.get("_is_answer_sheet", True):
+            n_not_sheet += 1
+            if out_path.exists():
+                out_path.unlink()
             continue
 
         cv_answers = cv.get("answers", {})
@@ -246,9 +268,21 @@ def main():
         if preserve_answers and existing is not None:
             data["answers"] = {str(k): v for k, v in existing.get("answers", {}).items()}
             data["student_name"] = existing.get("student_name", "")
-            user_marks = {"manually_edited", "validated"}
-            existing_user_flags = [f for f in existing.get("_flags", []) if f in user_marks]
+            existing_user_flags = [f for f in existing.get("_flags", [])
+                                   if f in USER_FLAGS]
             data["_flags"] = list(set(flags + existing_user_flags))
+            # Identité relue à la main — `_student_override` (nom assigné dans
+            # /identites) et le numéro corrigé chiffre par chiffre. La présence
+            # de `_cv_student_id` signale que `student_id` a été édité au moins
+            # une fois : la valeur utilisateur prime sur la relecture CV.
+            if existing.get("_student_override"):
+                data["_student_override"] = existing["_student_override"]
+            if existing.get("_cv_student_id"):
+                data["_cv_student_id"] = existing["_cv_student_id"]
+                data["student_id"] = existing.get("student_id",
+                                                  data["student_id"])
+                if "?" not in data["student_id"] and "id_incomplet" in data["_flags"]:
+                    data["_flags"].remove("id_incomplet")
             # Préserve aussi l'override manuel des open_answers s'il existe.
             if existing.get("open_answers"):
                 data["open_answers"] = existing["open_answers"]
@@ -262,6 +296,7 @@ def main():
     print(f"  AMC non validé (manual=0):   {n_unvalidated}")
     print(f"  Préservés (manually_edited): {n_preserved}")
     print(f"  Sans CV (skip):              {n_no_cv}")
+    print(f"  Pages sans grille (écartées):{n_not_sheet}")
 
 
 if __name__ == "__main__":

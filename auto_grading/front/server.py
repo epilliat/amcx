@@ -18,13 +18,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from threading import Lock
@@ -32,7 +35,7 @@ from threading import Lock
 import cv2
 import fitz  # PyMuPDF — rendu des aperçus PDF
 import numpy as np
-from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
 # Bootstrap : ajout du dossier d'installation sur sys.path pour importer
@@ -50,7 +53,9 @@ from cv_grade import (detect_mires, warp_to_canonical, load_layout,
 from student_list import StudentMatcher
 from score import score_copy, score_question
 from sujet_store import (parse_tex, save_questions, compile_pdf, SUJET_DIR,
-                         effective_spec, pdf_regions,
+                         amc_question_map, check_layout_consistency,
+                         pop_store_warnings,
+                         effective_spec, pdf_regions, render_bareme_examples,
                          max_score as sujet_max_score, total_max as sujet_total_max,
                          parse_subject, subject_to_dict,
                          add_block as sujet_add_block,
@@ -70,13 +75,14 @@ from config import load_config, save_config
 
 
 def _bank():
-    """Dispatcher banque locale ↔ Supabase selon `config.bank_mode`.
+    """Dispatcher banque locale ↔ Supabase selon le `type` de la banque active.
 
     Le module retourné expose les mêmes fonctions (load, save, delete,
     list_questions, update_project_stats, from_block, to_block). Switch à
-    chaud par l'user via Réglages → Banque sans redémarrer le serveur.
+    chaud par l'user via le dropdown Banque (POST /api/banks/<slug>/activate)
+    sans redémarrer le serveur.
     """
-    return bank_online if load_config().get("bank_mode") == "online" else bank
+    return bank_online if config.active_bank_cfg().get("type") == "online" else bank
 from grade_imports import (read_table, analyze_table, match_report, set_name_override,
                            jsonable_cell, build_all_series, add_grade_file,
                            remove_grade_file, ensure_imports_dir, IMPORTS_DIR)
@@ -108,6 +114,60 @@ def _inject_project_context():
     }
 
 
+@app.errorhandler(ValueError)
+def _bad_request(e):
+    """Entrée invalide (nom de batch, numéro non entier…) → 400, pas 500."""
+    return jsonify({"error": str(e)}), 400
+
+
+@app.before_request
+def _same_origin_only():
+    """Refuse les requêtes mutantes venant d'une autre origine.
+
+    Le serveur écoute en local sans authentification et toutes les routes POST
+    acceptent `get_json(force=True)` : une page web tierce ouverte dans le même
+    navigateur peut viser http://127.0.0.1:5050 et déclencher n'importe quelle
+    mutation. Les navigateurs envoient `Origin` sur les requêtes non-GET ; on
+    exige qu'elle corresponde à l'hôte servi. Absence d'`Origin` (curl, tests,
+    client non-navigateur) : accepté, ces appels ne sont pas des drive-by.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin = request.headers.get("Origin")
+    if not origin:
+        return None
+    from urllib.parse import urlparse
+    if urlparse(origin).netloc != urlparse(request.host_url).netloc:
+        return jsonify({"error": "origine non autorisée"}), 403
+    return None
+
+
+# Clés de config à ne jamais renvoyer au navigateur (secrets en clair).
+_SECRET_CFG_KEYS = ("anthropic_api_key",)
+_SECRET_BANK_KEYS = ("user_token", "refresh_token")
+
+
+def public_config(cfg: dict) -> dict:
+    """Copie de la config sans les secrets, pour l'envoi au front.
+
+    `anthropic_api_key` et les jetons Supabase des banques n'ont aucune raison
+    d'atteindre le navigateur : `/api/ai/auth-status` expose déjà `has_api_key`
+    et `/api/banks` le `logged_in` de chaque banque.
+    """
+    out = dict(cfg)
+    for k in _SECRET_CFG_KEYS:
+        if out.get(k):
+            out[k] = "***"          # présence signalée, valeur masquée
+    banks = out.get("banks")
+    if isinstance(banks, dict):
+        out["banks"] = {
+            slug: {k: v for k, v in (entry or {}).items()
+                   if k not in _SECRET_BANK_KEYS}
+            for slug, entry in banks.items()
+        }
+    return out
+
+
 # Caches
 _layout_cache = None
 _layout_by_qchar = None
@@ -116,6 +176,21 @@ _offsets_cache = {}  # (batch, page) -> {q: (dx, dy)}
 _warp_lock = Lock()
 _matcher_cache = None
 _series_cache = None   # séries de notes importées, jointes aux étudiants
+
+
+def invalidate_layout_caches() -> None:
+    """Vide les caches dérivés du calage.
+
+    À appeler après toute recompilation : `compile_pdf` régénère `exam.xy`, donc
+    la géométrie des cases change, mais ces caches (remplis une fois par
+    process) continuaient à servir l'ancien calage jusqu'au redémarrage —
+    crops et overlays décalés après un « Compiler ».
+    """
+    global _layout_cache, _layout_by_qchar
+    _layout_cache = None
+    _layout_by_qchar = None
+    _warp_cache.clear()
+    _offsets_cache.clear()
 
 
 def get_layout():
@@ -129,18 +204,25 @@ def get_layout():
 
 
 def question_numbers() -> tuple[list, list]:
-    """(questions QCM, colonnes du code étudiant) dérivées du calage.
+    """(questions QCM notées, colonnes du code étudiant) dérivées du calage.
 
-    Une « question » est une colonne de code si ses cases portent des chiffres."""
-    layout, _ = get_layout()
-    by_q: dict[int, list] = {}
-    for b in layout:
-        by_q.setdefault(b.question, []).append(b)
-    qcm, ids = [], []
-    for q, bs in sorted(by_q.items()):
-        chars = [b.char for b in bs if b.char]
-        (ids if (chars and all(c.isdigit() for c in chars)) else qcm).append(q)
-    return qcm, ids
+    S'appuie sur `sujet_store.amc_question_map()` : les cases à lettres d'un
+    bloc à cases de notation (`\\AMCOpen`, answerbox) portent aussi des lettres
+    et étaient comptées comme un QCM fantôme, noté avec une spec vide.
+    """
+    m = amc_question_map()
+    return sorted(m["qcm"]), list(m["id"])
+
+
+def id_columns() -> list:
+    """Numéros AMC des colonnes du code étudiant, dérivés du calage.
+
+    ⚠ Ne JAMAIS coder ces numéros en dur : ils dépendent du sujet (31 QCM →
+    [32..35] sur EXAM_2026, mais [3,4,5,6] sur un sujet à 2 QCM et [33..36] sur
+    un sujet à 32 QCM), et `id_grid_digits` est configurable — le nombre de
+    colonnes n'est pas figé à 4. Cf. piège #8 du CLAUDE.md.
+    """
+    return question_numbers()[1]
 
 
 def get_matcher():
@@ -166,7 +248,7 @@ def get_warped(batch: str, page: int) -> tuple[np.ndarray, dict]:
     with _warp_lock:
         if key in _warp_cache:
             return _warp_cache[key], _offsets_cache[key]
-        img_path = PAGES_DIR / batch / f"page_{page:03d}.jpg"
+        img_path = PAGES_DIR / safe_batch(batch) / f"page_{page:03d}.jpg"
         img = cv2.imread(str(img_path))
         if img is None:
             raise FileNotFoundError(img_path)
@@ -190,8 +272,49 @@ def get_warped(batch: str, page: int) -> tuple[np.ndarray, dict]:
         return warped, offsets
 
 
+# Un nom de batch vient d'un dossier de `pages/` — donc d'un nom de PDF scanné.
+# Il arrive aussi par le corps JSON d'une requête : sans validation,
+# `batch="../../.."` sort du projet (lecture ET écriture, `save_copy_json` crée
+# les dossiers manquants). Validé au plus près du disque plutôt que dans chaque
+# route, pour qu'aucun nouvel appelant ne puisse l'oublier.
+_BATCH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._\- ]*$")
+
+
+def required(body, *keys):
+    """Extrait des champs obligatoires d'un corps JSON.
+
+    Lève ValueError (→ 400 via l'errorhandler) plutôt que de laisser un KeyError
+    remonter en 500. Volontairement explicite plutôt qu'un errorhandler global
+    sur KeyError, qui masquerait aussi les vrais bugs internes.
+    """
+    body = body or {}
+    missing = [k for k in keys if k not in body]
+    if missing:
+        raise ValueError("champ(s) manquant(s) : " + ", ".join(missing))
+    return [body[k] for k in keys]
+
+
+def safe_batch(batch) -> str:
+    """Valide un nom de batch. Lève ValueError si suspect."""
+    b = str(batch or "")
+    if not _BATCH_RE.match(b) or ".." in b:
+        raise ValueError(f"nom de batch invalide : {b!r}")
+    return b
+
+
+# Le cache de crops vit dans l'installation, partagée par tous les projets :
+# sans espace de noms, deux projets ayant un batch `scan1` se marchent dessus
+# et affichent les cases du mauvais examen après un changement de projet.
+_ZOOM_NS = hashlib.sha1(str(ROOT).encode("utf-8")).hexdigest()[:10]
+
+
+def zoom_cache_dir(batch: str, page: int) -> Path:
+    """Dossier de cache des crops d'une copie (isolé par projet, batch validé)."""
+    return ZOOM_CACHE / _ZOOM_NS / f"{safe_batch(batch)}_page_{page:03d}"
+
+
 def load_copy_json(batch: str, page: int) -> dict | None:
-    p = RAW_DIR / batch / f"page_{page:03d}.json"
+    p = RAW_DIR / safe_batch(batch) / f"page_{page:03d}.json"
     if not p.exists():
         return None
     with open(p, encoding="utf-8") as f:
@@ -199,10 +322,13 @@ def load_copy_json(batch: str, page: int) -> dict | None:
 
 
 def save_copy_json(batch: str, page: int, data: dict):
-    p = RAW_DIR / batch / f"page_{page:03d}.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Écrit un JSON de `raw_responses/` — la source de vérité de la relecture.
+
+    Écriture atomique : un crash (ou le `os._exit(0)` du changement de projet)
+    en plein dump laisserait sinon un fichier tronqué.
+    """
+    config.write_json_atomic(
+        RAW_DIR / safe_batch(batch) / f"page_{page:03d}.json", data)
 
 
 def copy_id_of(d: dict) -> int:
@@ -765,6 +891,14 @@ def _pos_float(body, key, allow_zero=False):
     return v
 
 
+def _opt_signed_float(body, key):
+    """Float signé optionnel : "" / None → None ; sinon float (négatif autorisé)."""
+    v = body.get(key)
+    if v is None or v == "":
+        return None
+    return float(v)
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     """GET → config courante ; POST → granularité + paramètres seuil/max/poids."""
@@ -788,6 +922,14 @@ def api_config():
                 updates["final_threshold"] = _pos_float(body, "final_threshold")
             if "pass_mark" in body:
                 updates["pass_mark"] = _pos_float(body, "pass_mark", allow_zero=True)
+            if "question_floor" in body:
+                updates["question_floor"] = _opt_signed_float(body, "question_floor")
+            if "question_ceiling" in body:
+                updates["question_ceiling"] = _opt_signed_float(body, "question_ceiling")
+            if "total_floor" in body:
+                updates["total_floor"] = _opt_signed_float(body, "total_floor")
+            if "show_score_range" in body:
+                updates["show_score_range"] = bool(body["show_score_range"])
             if "anthropic_api_key" in body:
                 updates["anthropic_api_key"] = str(body["anthropic_api_key"] or "").strip()
             if "ai_model" in body:
@@ -796,17 +938,9 @@ def api_config():
                 if m and m not in allowed:
                     return jsonify({"error": f"Modèle inconnu : {m}"}), 400
                 updates["ai_model"] = m or "claude-sonnet-4-6"
-            # Banque (mode + credentials Supabase). Les tokens user (bank_user_token,
-            # bank_refresh_token, etc.) sont posés par bank_auth, pas via cette route.
-            if "bank_mode" in body:
-                m = str(body["bank_mode"] or "local").strip()
-                if m not in ("local", "online"):
-                    return jsonify({"error": f"bank_mode invalide : {m}"}), 400
-                updates["bank_mode"] = m
-            if "bank_supabase_url" in body:
-                updates["bank_supabase_url"] = str(body["bank_supabase_url"] or "").strip()
-            if "bank_supabase_anon_key" in body:
-                updates["bank_supabase_anon_key"] = str(body["bank_supabase_anon_key"] or "").strip()
+            # Banque : la config (mode + credentials Supabase) vit dans `banks[active]`.
+            # Pour modifier ces champs, utiliser /api/banks (POST/DELETE/activate)
+            # et /api/bank/auth/* (login). Aucune écriture flat ici.
             col_updates = body.get("columns", [])
             if col_updates:
                 files = load_config().get("grade_files", [])
@@ -829,8 +963,8 @@ def api_config():
         except (TypeError, ValueError, KeyError):
             return jsonify({"error": "paramètre invalide"}), 400
         cfg = save_config(updates)
-        return jsonify({"ok": True, "config": cfg})
-    return jsonify(load_config())
+        return jsonify({"ok": True, "config": public_config(cfg)})
+    return jsonify(public_config(load_config()))
 
 
 @app.route("/api/save-report", methods=["POST"])
@@ -1117,22 +1251,32 @@ def identites():
 
 @app.route("/api/set-id-digit", methods=["POST"])
 def api_set_id_digit():
-    """Fixe un chiffre du numéro étudiant (Q32-35) — single-select par colonne, persisté."""
-    body = request.get_json(force=True)
-    batch, page = body["batch"], int(body["page"])
-    q = int(body["q"])
+    """Fixe un chiffre du numéro étudiant — single-select par colonne, persisté.
+
+    Les colonnes sont celles du calage (`id_columns()`), pas les Q32-35 figées
+    d'EXAM_2026 : sur un autre sujet ce sont p.ex. [3,4,5,6].
+    """
+    body = request.get_json(force=True, silent=True)
+    batch, page, raw_q = required(body, "batch", "page", "q")
+    page = int(page)
+    try:
+        q = int(raw_q)
+    except (TypeError, ValueError):
+        return jsonify({"error": "paramètres invalides"}), 400
     char = str(body["char"])
+    cols = id_columns()
     # "?" = effacer le chiffre (colonne marquée comme non-lue)
-    if not (32 <= q <= 35) or (char not in "0123456789" and char != "?"):
+    if q not in cols or (char not in "0123456789" and char != "?"):
         return jsonify({"error": "paramètres invalides"}), 400
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "copie introuvable"}), 404
-    cur = d.get("student_id", "????") or "????"
+    n = len(cols)
+    cur = d.get("student_id", "") or ""
     if "_cv_student_id" not in d:        # garder la lecture CV originale (immuable)
-        d["_cv_student_id"] = cur
-    digits = list((cur + "????")[:4])
-    digits[q - 32] = char
+        d["_cv_student_id"] = cur or "?" * n
+    digits = list((cur + "?" * n)[:n])
+    digits[cols.index(q)] = char
     d["student_id"] = "".join(digits)
     if "manually_edited" not in d.get("_flags", []):
         d.setdefault("_flags", []).append("manually_edited")
@@ -1584,9 +1728,10 @@ def api_htr_verify_all_status(task_id):
 @app.route("/api/assign-student", methods=["POST"])
 def api_assign_student():
     """Assigne (ou retire si student_id vide) un étudiant à une copie — override d'identité."""
-    body = request.get_json(force=True)
-    batch, page = body["batch"], int(body["page"])
-    sid = str(body.get("student_id", "")).strip()
+    body = request.get_json(force=True, silent=True)
+    batch, page = required(body, "batch", "page")
+    page = int(page)
+    sid = str((body or {}).get("student_id", "")).strip()
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "copie introuvable"}), 404
@@ -1657,7 +1802,7 @@ def student(batch, page):
         _warped, offsets = get_warped(batch, page)
     except Exception:
         offsets = {}
-    sid = (d.get("student_id") or "????")
+    sid = (d.get("student_id") or "?" * len(id_qs))
     cells = []
     for b in lay.sheet_boxes():
         dx, dy = offsets.get(b.question, (0, 0))
@@ -1671,7 +1816,7 @@ def student(batch, page):
             cells.append({**common, "kind": "qcm",
                           "selected": b.char in answers_int.get(b.question, [])})
         elif b.question in id_set:
-            col_idx = b.question - 32      # 0..3 (set-id-digit attend q ∈ [32,35])
+            col_idx = id_qs.index(b.question)   # position dans les colonnes du calage
             cur = sid[col_idx] if 0 <= col_idx < len(sid) else "?"
             cells.append({**common, "kind": "id",
                           "selected": b.char == cur})
@@ -1796,7 +1941,6 @@ def flagged():
                            filter_mode=filter_mode, counts=counts, active="flagged")
 
 
-import re  # noqa: E402  -- pour le parsing des notes ambigus
 
 
 def build_zoom_questions(d: dict) -> list:
@@ -1829,7 +1973,8 @@ def build_zoom_questions(d: dict) -> list:
 
 
 def build_id_questions(d: dict) -> list:
-    """Colonnes du numéro étudiant (Q32-35) : 10 cases-chiffres, le chiffre lu surligné."""
+    """Colonnes du numéro étudiant (cf. `id_columns()`) : 10 cases-chiffres
+    par colonne, le chiffre lu surligné."""
     sid = d.get("student_id", "") or ""
     cols = []
     for i, q in enumerate(question_numbers()[1]):
@@ -1862,14 +2007,18 @@ def api_copy(batch, page):
 
 @app.route("/api/toggle", methods=["POST"])
 def api_toggle():
-    body = request.get_json()
-    batch = body["batch"]
-    page = int(body["page"])
-    q = str(body["q"])
-    char = body["char"]
+    body = request.get_json(force=True, silent=True)
+    batch, page, q, char = required(body, "batch", "page", "q", "char")
+    page, q = int(page), str(q)
+    # Une question hors du calage écrirait une entrée fantôme dans
+    # `answers` — c'est la source de vérité de la relecture.
+    if not q.isdigit() or int(q) not in set(question_numbers()[0]):
+        return jsonify({"error": f"question inconnue : {q}"}), 400
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "not found"}), 404
+    if char not in effective_spec(int(q), copy=copy_id_of(d))["options"]:
+        return jsonify({"error": f"lettre hors options : {char}"}), 400
     ans = d.get("answers", {}).get(q, [])
     if char in ans:
         ans = [c for c in ans if c != char]
@@ -1885,21 +2034,11 @@ def api_toggle():
     return jsonify({"ok": True, "answers": d["answers"]})
 
 
-@app.route("/api/save", methods=["POST"])
-def api_save():
-    body = request.get_json()
-    batch = body["batch"]
-    page = int(body["page"])
-    payload = body["payload"]
-    save_copy_json(batch, page, payload)
-    return jsonify({"ok": True})
-
-
 @app.route("/api/mark_validated", methods=["POST"])
 def api_mark_validated():
-    body = request.get_json()
-    batch = body["batch"]
-    page = int(body["page"])
+    body = request.get_json(force=True, silent=True)
+    batch, page = required(body, "batch", "page")
+    page = int(page)
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "not found"}), 404
@@ -1913,7 +2052,7 @@ def api_mark_validated():
 
 @app.route("/img/<batch>/<int:page>.jpg")
 def img(batch, page):
-    p = PAGES_DIR / batch / f"page_{page:03d}.jpg"
+    p = PAGES_DIR / safe_batch(batch) / f"page_{page:03d}.jpg"
     if not p.exists():
         abort(404)
     return send_file(p, mimetype="image/jpeg")
@@ -1925,10 +2064,10 @@ def img_canon(batch, page):
 
     Sert pour l'overlay SVG de la vue copie (ronds magenta sur les cases cochées).
     Cache disque, invalidé au mtime du JPEG source."""
-    src = PAGES_DIR / batch / f"page_{page:03d}.jpg"
+    src = PAGES_DIR / safe_batch(batch) / f"page_{page:03d}.jpg"
     if not src.exists():
         abort(404)
-    cache_dir = ZOOM_CACHE / f"{batch}_page_{page:03d}"
+    cache_dir = zoom_cache_dir(batch, page)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / "canon.jpg"
     if cache_path.exists() and cache_path.stat().st_mtime >= src.stat().st_mtime:
@@ -1940,10 +2079,18 @@ def img_canon(batch, page):
 
 @app.route("/zoom_img/<batch>/<int:page>/<q>_<char>.jpg")
 def zoom_img(batch, page, q, char):
-    cache_dir = ZOOM_CACHE / f"{batch}_page_{page:03d}"
+    # `q` et `char` entrent dans un nom de fichier : les valider AVANT de
+    # construire le chemin (sinon `char="../.."` sort du cache).
+    if not str(q).isdigit() or not (len(str(char)) == 1 and str(char).isalnum()):
+        abort(404)
+    src = PAGES_DIR / safe_batch(batch) / f"page_{page:03d}.jpg"
+    cache_dir = zoom_cache_dir(batch, page)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"Q{q}_{char}.jpg"
-    if cache_path.exists():
+    # Invalidation au mtime de la page source : une ré-extraction des PDF doit
+    # produire de nouveaux crops, pas resservir les anciens.
+    if (cache_path.exists() and src.exists()
+            and cache_path.stat().st_mtime >= src.stat().st_mtime):
         return send_file(cache_path, mimetype="image/jpeg")
 
     layout, by_qchar = get_layout()
@@ -2059,6 +2206,12 @@ def sujet_page():
         available_copies = list(layout_store.get_available_copies())
     except Exception:
         available_copies = []
+    _cfg = load_config()
+    score_defaults = {
+        "floor": _cfg.get("question_floor"),
+        "ceiling": _cfg.get("question_ceiling"),
+        "show_range": bool(_cfg.get("show_score_range")),
+    }
     return render_template(
         "sujet.html",
         blocks=enriched,
@@ -2069,6 +2222,7 @@ def sujet_page():
         mode=sub["mode"],                            # 'canonical' | 'legacy' | 'empty'
         available_copies=available_copies,
         total_max=sujet_total_max(),
+        score_defaults=score_defaults,               # défauts globaux plancher/plafond (placeholders)
         has_pdf=pdf.exists(),
         pdf_mtime=int(pdf.stat().st_mtime) if pdf.exists() else 0,
         active="sujet",
@@ -2124,10 +2278,31 @@ def api_sujet_save():
                     "max": {q: sujet_max_score(q) for q in parse_tex()}})
 
 
+@app.route("/api/sujet/bareme-examples", methods=["POST"])
+def api_sujet_bareme_examples():
+    """Génère le bloc LaTeX « Barème » (explication + exemples chiffrés) à partir
+    des structures de barème du sujet, clampé au plancher/plafond globaux.
+
+    Renvoie `{ok, tex}` — l'UI insère le tex (éditable) dans les instructions."""
+    cfg = load_config()
+    floor = cfg.get("question_floor")
+    ceiling = cfg.get("question_ceiling")
+    try:
+        sub = parse_subject()
+        tex = render_bareme_examples(sub, floor=floor, ceiling=ceiling, n=2)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"Génération impossible : {e}"}), 500
+    return jsonify({"ok": True, "tex": tex})
+
+
 @app.route("/api/sujet/compile", methods=["POST"])
 def api_sujet_compile():
     """Recompile exam.tex → sujet/DOC-sujet.pdf. Renvoie {ok, log, pdf_mtime}."""
     result = compile_pdf()
+    if result.get("ok"):
+        # Nouveau calage → les caches de géométrie et les images warpées
+        # deviennent obsolètes.
+        invalidate_layout_caches()
     pdf = SUJET_DIR / "DOC-sujet.pdf"
     result["pdf_mtime"] = int(pdf.stat().st_mtime) if pdf.exists() else 0
     return jsonify(result)
@@ -2178,6 +2353,14 @@ def api_sujet():
     except Exception:
         out["total_max"] = 0.0
         out["max"] = {}
+    # Anomalies à remonter à l'utilisateur : store illisible (édition perdue)
+    # et sujet désaccordé du calage (notes potentiellement fausses).
+    warnings = pop_store_warnings()
+    try:
+        warnings += check_layout_consistency(verbose=False)
+    except Exception:
+        pass
+    out["warnings"] = warnings
     return jsonify(out)
 
 
@@ -2233,6 +2416,58 @@ def api_sujet_blocks_add():
         return jsonify({"ok": True, "bid": bid})
     except Exception as e:
         return _crud_error(e)
+
+
+@app.route("/api/sujet/import-tex", methods=["POST"])
+def api_sujet_import_tex():
+    """Importe les questions d'un fichier `.tex` (legacy ou canonique) dans le
+    sujet du projet actif. Append à la fin — les blocs existants sont intacts.
+
+    Multipart : `file=<exam.tex>`. Renvoie `{ok, added, skipped, skipped_reasons}`.
+    409 si le sujet actif est en mode legacy (faut migrer d'abord)."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "Fichier .tex manquant."}), 400
+    try:
+        raw = f.read()
+        content = raw.decode("utf-8", errors="replace")
+    except Exception as e:
+        return jsonify({"error": f"Lecture du fichier : {e}"}), 400
+    if not content.strip():
+        return jsonify({"error": ".tex vide ou non reconnu."}), 400
+    try:
+        parsed = parse_subject(tex=content)
+    except Exception as e:
+        return jsonify({"error": f"Parse .tex : {e}"}), 400
+    if parsed.get("mode") == "empty":
+        return jsonify({"error": ".tex vide ou non reconnu."}), 400
+
+    IMPORTABLE = {"question_qcm", "question_open", "question_freeform"}
+    added, skipped = 0, 0
+    skipped_kinds: dict[str, int] = {}
+    for b in parsed.get("blocks", []):
+        if b.kind not in IMPORTABLE:
+            skipped += 1
+            skipped_kinds[b.kind] = skipped_kinds.get(b.kind, 0) + 1
+            continue
+        try:
+            sujet_add_block(b.kind, after_bid=None, data=b.data)
+            added += 1
+        except PermissionError:
+            return jsonify({
+                "error": ("Le sujet de ce projet est en mode legacy. "
+                          "Migre-le d'abord vers le format canonique "
+                          "(onglet Sujet → bouton 🔥 Migrer)."),
+                "legacy": True,
+            }), 409
+        except Exception as e:
+            return jsonify({
+                "error": f"Échec ajout d'un bloc {b.kind} : {e}",
+                "added_before_error": added,
+            }), 500
+    return jsonify({"ok": True, "added": added, "skipped": skipped,
+                    "skipped_kinds": skipped_kinds,
+                    "source_mode": parsed.get("mode", "")})
 
 
 @app.route("/api/sujet/blocks/delete", methods=["POST"])
@@ -2312,16 +2547,139 @@ def api_sujet_migrate():
 # --------------------------------------------------------------------------
 
 def _bank_author_default() -> str:
-    """Auteur par défaut : email connecté en mode online, sinon
+    """Auteur par défaut : email connecté à la banque active (online), sinon
     header.author du sujet courant, sinon vide."""
-    cfg = load_config()
-    if cfg.get("bank_mode") == "online" and cfg.get("bank_user_email"):
-        return cfg["bank_user_email"]
+    entry = config.active_bank_cfg()
+    if entry.get("type") == "online" and entry.get("user_email"):
+        return entry["user_email"]
     try:
         sub = parse_subject()
         return (sub["config"].header.author or "").strip()
     except Exception:
         return ""
+
+
+# --------------------------------------------------------------------------
+# Multi-banques : CRUD sur le dict `banks` + switch d'active_bank
+# --------------------------------------------------------------------------
+
+def _slugify_bank(name: str) -> str:
+    """Kebab-case ascii, max 40 chars. Pour clé `banks[<slug>]`."""
+    import re as _re
+    import unicodedata as _ud
+    s = _ud.normalize("NFKD", name or "").encode("ascii", "ignore").decode("ascii")
+    s = _re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
+    return (s or "banque")[:40]
+
+
+def _bank_summary(slug: str, entry: dict) -> dict:
+    """Vue allégée d'une banque (pour la liste UI). Pas de tokens, pas de clé."""
+    typ = entry.get("type", "local")
+    out = {
+        "slug":   slug,
+        "name":   entry.get("name") or slug,
+        "type":   typ,
+    }
+    if typ == "local":
+        out["path"] = entry.get("path") or ""
+    else:
+        out["supabase_url"] = entry.get("supabase_url") or ""
+        out["user_email"]   = entry.get("user_email") or ""
+        out["logged_in"]    = bool(entry.get("user_token"))
+    return out
+
+
+@app.route("/api/banks")
+def api_banks_list():
+    """Liste les banques configurées + la banque active."""
+    cfg = load_config()
+    banks = cfg.get("banks") or {}
+    items = [_bank_summary(slug, e) for slug, e in banks.items()]
+    items.sort(key=lambda b: b["name"].lower())
+    return jsonify({
+        "ok":     True,
+        "active": config.active_bank_slug(),
+        "banks":  items,
+    })
+
+
+@app.route("/api/banks", methods=["POST"])
+def api_banks_create():
+    """Crée une banque. Body : {name, type:'local'|'online', path? |
+    supabase_url?, supabase_anon_key?}.
+
+    Refuse si un slug équivalent existe déjà. Online : entry créée sans
+    tokens (l'user doit ensuite login via /api/bank/auth/*)."""
+    body = _json_body()
+    name = (body.get("name") or "").strip()
+    typ  = (body.get("type") or "local").strip()
+    if not name:
+        return jsonify({"error": "Nom requis."}), 400
+    if typ not in ("local", "online"):
+        return jsonify({"error": f"type invalide : {typ}"}), 400
+
+    entry: dict = {"name": name, "type": typ}
+    if typ == "local":
+        path = (body.get("path") or "").strip()
+        if not path:
+            return jsonify({"error": "Chemin du dossier requis pour une banque locale."}), 400
+        entry["path"] = str(Path(path).expanduser())
+    else:
+        url = (body.get("supabase_url") or "").strip().rstrip("/")
+        anon = (body.get("supabase_anon_key") or "").strip()
+        if not (url and anon):
+            return jsonify({"error": "URL Supabase + clé anon requis pour une banque en ligne."}), 400
+        entry["supabase_url"] = url
+        entry["supabase_anon_key"] = anon
+
+    cfg = load_config()
+    banks = dict(cfg.get("banks") or {})
+    slug = _slugify_bank(name)
+    base_slug = slug
+    n = 2
+    while slug in banks:
+        slug = f"{base_slug}-{n}"
+        n += 1
+    banks[slug] = entry
+    save_config({"banks": banks})
+    return jsonify({"ok": True, "slug": slug, "bank": _bank_summary(slug, entry)})
+
+
+@app.route("/api/banks/<slug>", methods=["DELETE"])
+def api_banks_delete(slug):
+    """Supprime une banque. Le contenu sur disque/Supabase n'est PAS touché —
+    seule la référence dans AMCx disparaît. Si c'était la banque active,
+    repointe vers la 1ère banque restante (ou recrée un default vide)."""
+    cfg = load_config()
+    banks = dict(cfg.get("banks") or {})
+    if slug not in banks:
+        return jsonify({"error": f"banque inconnue : {slug}"}), 404
+    del banks[slug]
+    updates: dict = {"banks": banks}
+    if cfg.get("active_bank") == slug:
+        new_active = next(iter(banks), "default")
+        if new_active not in banks:
+            # Plus aucune banque : recrée le default minimal local
+            banks[new_active] = {
+                "name": "Banque par défaut", "type": "local",
+                "path": str(Path.home() / "Documents" / "AMCx-banque"),
+            }
+            updates["banks"] = banks
+        updates["active_bank"] = new_active
+    save_config(updates)
+    return jsonify({"ok": True, "active": updates.get("active_bank", cfg.get("active_bank"))})
+
+
+@app.route("/api/banks/<slug>/activate", methods=["POST"])
+def api_banks_activate(slug):
+    """Switche la banque active. Le serveur reste up — au prochain request
+    le dispatcher `_bank()` lira la nouvelle banque."""
+    cfg = load_config()
+    banks = cfg.get("banks") or {}
+    if slug not in banks:
+        return jsonify({"error": f"banque inconnue : {slug}"}), 404
+    save_config({"active_bank": slug})
+    return jsonify({"ok": True, "active": slug, "bank": _bank_summary(slug, banks[slug])})
 
 
 @app.route("/api/bank")
@@ -2359,6 +2717,127 @@ def api_bank_load(bank_id):
     """Charge une question complète (avec data)."""
     try:
         return jsonify({"ok": True, "question": _bank().load(bank_id)})
+    except KeyError:
+        return jsonify({"error": f"question inconnue : {bank_id}"}), 404
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# --------------------------------------------------------------------------
+# Édition d'une question de banque : rendu identique à un bloc Sujet
+# --------------------------------------------------------------------------
+
+def _frac(s) -> float:
+    s = str(s or "").strip()
+    if not s:
+        return 0.0
+    if "/" in s:
+        a, b = s.split("/", 1)
+        try: return float(a) / float(b)
+        except (ValueError, ZeroDivisionError): return 0.0
+    try: return float(s)
+    except ValueError: return 0.0
+
+
+def _bank_question_max(kind: str, data: dict) -> float:
+    """Calcule le `max` d'une question banque (sans dépendre du sujet/AMC).
+
+    Reproduit la logique de score.py / sujet_store.max_score() :
+    - single QCM    → `value` (float, défaut 1)
+    - mult   QCM    → Σ bareme des réponses correctes (≥ 0)
+    - open / freeform → `points`
+    - text / answerbox → 0
+    """
+    data = data or {}
+    if kind == "question_qcm":
+        if data.get("qtype") == "mult":
+            return sum(_frac(a.get("bareme")) for a in (data.get("answers") or [])
+                       if a.get("correct"))
+        return _frac(data.get("value") or 1)
+    if kind in ("question_open", "question_freeform"):
+        try: return float(data.get("points") or 0)
+        except (TypeError, ValueError): return 0.0
+    return 0.0
+
+
+def _bank_to_sujet_block(question: dict) -> dict:
+    """Convertit une question de banque → dict `b` au format attendu par
+    `_sujet_block.html` (mêmes champs que les blocs renvoyés par
+    `parse_subject()`). Pas de `q` (numéro), pas de `preview_q`, pas de
+    `answers_with_char` (les lettres AMC ne sont définies que dans le
+    contexte d'un sujet).
+    """
+    kind = question.get("kind", "")
+    data = question.get("data") or {}
+    return {
+        "bid":  question.get("bank_id", ""),
+        "kind": kind,
+        "data": data,
+        "q":    None,
+        "max":  _bank_question_max(kind, data),
+        "answers_with_char": [],
+        "preview_q": None,
+    }
+
+
+@app.route("/api/bank/<bank_id>/block-html")
+def api_bank_block_html(bank_id):
+    """Retourne le HTML d'un bloc sujet pour une question de banque.
+
+    Render exact du partiel `_sujet_block.html` avec `mode='canonical'` →
+    l'édition (textareas, badges bonne/mauvaise, ans-add/remove, etc.) est
+    disponible côté UI. Le DOM est strictement identique à un bloc Sujet.
+    """
+    try:
+        q = _bank().load(bank_id)
+    except KeyError:
+        return jsonify({"error": f"question inconnue : {bank_id}"}), 404
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    b = _bank_to_sujet_block(q)
+    html = render_template("_sujet_block.html", b=b, mode="canonical")
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/bank/<bank_id>/save-data", methods=["POST"])
+def api_bank_save_data(bank_id):
+    """Met à jour le `data` d'une question de banque (édition depuis l'UI).
+
+    Body : `{data, title?, tags?}`. Préserve les autres champs (auteur,
+    created_at, source_project, stats…).
+    """
+    body = _json_body()
+    data = body.get("data") or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "data doit être un objet"}), 400
+    title = body.get("title")
+    tags = body.get("tags")
+    b = _bank()
+    try:
+        if b is bank_online:
+            updated = b.update_question_content(bank_id, data,
+                                                 title=title, tags=tags,
+                                                 bump_version=True)
+        else:
+            # bank.py local : update via load+save (le module ne fournit
+            # pas d'update dédié — on patche les champs en place).
+            q = b.load(bank_id)
+            q["data"] = data
+            if title is not None: q["title"] = title.strip()
+            if tags is not None:  q["tags"]  = [t.strip() for t in tags if t and t.strip()]
+            q["modified_at"] = __import__("datetime").datetime.now().replace(
+                microsecond=0).isoformat()
+            q["version"] = int(q.get("version", 1)) + 1
+            b.save(q)
+            updated = q
+        new_max = _bank_question_max(updated.get("kind", ""), updated.get("data") or {})
+        return jsonify({"ok": True, "bank_id": bank_id,
+                        "version": updated.get("version"),
+                        "max": round(new_max, 4)})
     except KeyError:
         return jsonify({"error": f"question inconnue : {bank_id}"}), 404
     except bank_online.BankAuthError as e:
@@ -2542,10 +3021,17 @@ def api_bank_import(bank_id):
 
 @app.route("/api/bank/auth-status")
 def api_bank_auth_status():
-    """Retourne {mode, configured, logged_in, user_id, email, ...}."""
-    cfg = load_config()
+    """Retourne {mode, configured, logged_in, user_id, email, ...} pour la
+    banque active. `mode` = type de la banque active (`local` ou `online`)."""
+    entry = config.active_bank_cfg()
     st = bank_auth.auth_status()
-    st["mode"] = cfg.get("bank_mode", "local")
+    st["mode"] = entry.get("type", "local")
+    st["slug"] = config.active_bank_slug()
+    st["name"] = entry.get("name", "")
+    if st["mode"] == "online":
+        st["supabase_url"] = entry.get("supabase_url", "")
+    else:
+        st["path"] = entry.get("path", "")
     return jsonify({"ok": True, **st})
 
 
@@ -2604,9 +3090,9 @@ def api_bank_profile():
 # --------------------------------------------------------------------------
 
 def _require_online() -> None:
-    if load_config().get("bank_mode") != "online":
-        raise RuntimeError("Cette fonctionnalité nécessite le mode 'En ligne' "
-                           "(Réglages → Banque).")
+    if config.active_bank_cfg().get("type") != "online":
+        raise RuntimeError("Cette fonctionnalité nécessite une banque en ligne "
+                           "active (dropdown Banque).")
 
 
 @app.route("/api/bank/<bank_id>/rating", methods=["GET", "POST", "DELETE"])
@@ -3196,6 +3682,48 @@ import uuid as _uuid
 _PIPE_TASKS: dict = {}
 
 
+def _task_registries():
+    """Tous les registres de tâches asynchrones : (libellé, dict)."""
+    return (("traitement des scans", _PIPE_TASKS),
+            ("reconnaissance des noms", _HTR_TASKS),
+            ("vérification des noms", _HTR_VERIFY_TASKS))
+
+
+def running_tasks() -> list[str]:
+    """Libellés des tâches en cours, tous registres confondus.
+
+    Sert à refuser (a) un 2e pipeline concurrent — deux threads qui écrivent
+    les mêmes JPG puis deux `seed_raw_responses` en parallèle sur les mêmes
+    JSON — et (b) un changement de projet pendant une écriture, le switch
+    faisant un `os._exit(0)` brutal.
+    """
+    out = []
+    for label, reg in _task_registries():
+        for tid, t in list(reg.items()):
+            if (t or {}).get("status") == "running":
+                out.append(f"{label} ({tid})")
+    return out
+
+
+def _purge_finished_tasks(max_age_s: int = 3600) -> None:
+    """Oublie les tâches terminées depuis plus d'une heure (registres en mémoire)."""
+    from datetime import datetime as _dt
+    now = _dt.now()
+    for _label, reg in _task_registries():
+        for tid, t in list(reg.items()):
+            if (t or {}).get("status") == "running":
+                continue
+            fin = (t or {}).get("finished_at")
+            if not fin:
+                continue
+            try:
+                age = (now - _dt.fromisoformat(fin)).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if age > max_age_s:
+                reg.pop(tid, None)
+
+
 def _safe_filename(name: str) -> str:
     """Empêche les chemins ../ et caractères farfelus. Garde le nom + extension."""
     name = name.strip().replace("\\", "/").split("/")[-1]
@@ -3371,6 +3899,12 @@ def _run_pipeline(task_id: str):
 @app.route("/api/process-scans", methods=["POST"])
 def api_process_scans():
     """Lance le pipeline async. Retourne `{ok, task_id}`."""
+    # Réentrance : deux pipelines concurrents écrivent les mêmes JPG puis
+    # lancent deux `seed_raw_responses` en parallèle sur les mêmes JSON.
+    _purge_finished_tasks()
+    if any((t or {}).get("status") == "running" for t in _PIPE_TASKS.values()):
+        return jsonify({"error": "Un traitement des scans est déjà en cours. "
+                                 "Attends qu'il finisse avant d'en relancer un."}), 409
     # Vérifie qu'il y a au moins un PDF
     info = _project_files_info()
     if not info["scan_pdfs"]:
@@ -3394,7 +3928,6 @@ def api_process_scans_status(task_id):
     t = _PIPE_TASKS.get(task_id)
     if t is None:
         return jsonify({"error": "task_id inconnu (probablement terminé+expiré)"}), 404
-    # Garbage collect : si terminée depuis > 1h, on peut purger
     return jsonify({"ok": True, **t})
 
 
@@ -3607,6 +4140,12 @@ def api_projects_open():
             p = alt
     if not project_state.is_valid_project(p):
         return jsonify({"error": f"Dossier invalide : pas de sujet/exam.tex dans {p}."}), 400
+    # Le switch de projet tue le process (`os._exit(0)`) : refuser tant qu'une
+    # tâche écrit dans raw_responses/ ou pages/.
+    busy = running_tasks()
+    if busy:
+        return jsonify({"error": "Tâche en cours : " + ", ".join(busy)
+                                 + ". Attends la fin avant de changer de projet."}), 409
     # Réponse renvoyée AVANT le restart : Flask flushe la réponse, puis on exec.
     # On utilise un after_request pour différer le restart d'un petit délai
     # via un thread daemon (le request handler doit retourner pour que la
@@ -3686,7 +4225,9 @@ def api_templates():
 
 
 # Dossier temporaire pour stocker les .tex importés avant la création.
-_AMC_UPLOAD_DIR = Path("/tmp/amcx_uploads")
+# Dossier d'upload temporaire : `mkdtemp` (0700, nom imprévisible) plutôt qu'un
+# chemin fixe et partagé de /tmp, squattable par un autre utilisateur.
+_AMC_UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="amcx_uploads_"))
 
 
 @app.route("/api/projects/create", methods=["POST"])
@@ -3722,6 +4263,12 @@ def api_projects_create():
     import re as _re
     if not name or not _re.match(r"^[A-Za-z0-9_\-. ]+$", name) or name in {".", ".."}:
         return jsonify({"error": "Nom invalide (lettres, chiffres, espace, _ - .)."}), 400
+
+    # Comme /api/projects/open : la création se termine par un restart.
+    busy = running_tasks()
+    if busy:
+        return jsonify({"error": "Tâche en cours : " + ", ".join(busy)
+                                 + ". Attends la fin avant de créer un projet."}), 409
 
     project_state.ensure_default_root()
     dest = project_state.DEFAULT_PROJECTS_ROOT / name
@@ -3767,6 +4314,11 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
     _check_pdflatex()
+    # Sujet ↔ calage : un décalage ici fausse silencieusement toutes les notes.
+    try:
+        check_layout_consistency()
+    except Exception as e:  # noqa: BLE001 — jamais bloquant au démarrage
+        print(f"⚠ vérification du calage impossible : {e}")
     print(f"Serving on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 
