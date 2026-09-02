@@ -28,8 +28,12 @@ if ! command -v pdflatex >/dev/null; then
    mais le bouton « Compiler » de l'onglet Sujet sera en erreur.
    Pour l'installer :
      Ubuntu/Debian : sudo apt install texlive-latex-extra texlive-lang-french
-     macOS         : brew install --cask mactex-no-gui
+     macOS         : brew install --cask basictex   (~100 Mo ; MacTeX = 5 Go)
      Windows       : https://miktex.org/download
+
+   Le style AMC (automultiplechoice.sty) est fourni avec AMCx — rien d'autre
+   à installer. Les paquets LaTeX manquants (tikz, hyperref…) sont des paquets
+   standards que MiKTeX installe automatiquement à la première compilation.
 
 EOF
 fi
@@ -43,7 +47,13 @@ echo "→ Installation des dépendances…"
 .venv/bin/pip install -e .
 
 echo ""
+echo "→ Diagnostic de l'installation…"
+echo ""
+.venv/bin/python auto_grading/doctor.py || true
+
+echo ""
 echo "✓ Installé. Pour lancer le serveur :"
 echo "    ./run.sh"
 echo ""
 echo "  Puis ouvrir http://localhost:5050/ dans le navigateur."
+echo "  En cas de souci : page /diagnostic, ou .venv/bin/python auto_grading/doctor.py"

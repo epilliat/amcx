@@ -37,6 +37,90 @@ voir *Store du sujet* plus bas ; `exam.tex` en est un **produit**, régénéré 
 compilation). Le
 code vit dans [auto_grading/](auto_grading/). `pyproject.toml` est à la racine.
 
+## Installation (Linux, macOS, Windows)
+
+AMCx est du Python pur (wheels uniquement) + `pdflatex`. Aucun paquet système
+au-delà de TeX, et **le binaire `auto-multiple-choice` n'est jamais requis**.
+
+### Les 2 prérequis
+
+| | Rôle | Installation |
+|---|---|---|
+| **Python 3.10+** | tout le pipeline | [python.org](https://www.python.org/downloads/) (Windows : cocher « Add python.exe to PATH ») |
+| **pdflatex** | compiler le sujet (PDF + calage `.xy`) | Debian/Ubuntu : `sudo apt install texlive-latex-extra texlive-lang-french` · macOS : `brew install --cask basictex` (~100 Mo, préférer à MacTeX qui pèse 5 Go) · Windows : [MiKTeX](https://miktex.org/download) |
+
+### Installation
+
+```bash
+git clone https://github.com/epilliat/amcx.git
+cd amcx
+./install.sh          # Linux / macOS
+install.bat           # Windows (double-clic)
+```
+
+Le script crée `.venv/`, installe les dépendances, puis **lance le diagnostic**
+(voir plus bas). Lancer ensuite `./run.sh` (ou `run.bat`) et ouvrir
+<http://localhost:5050/>.
+
+### ⚠ `automultiplechoice.sty` est vendorisé — ne pas le retirer
+
+Le style LaTeX d'AMC **n'est pas sur CTAN** (`ctan.org/pkg/automultiplechoice`
+→ 404) : il est livré avec le logiciel AMC, donc empaqueté pour Debian/Ubuntu
+seulement. **Ni MiKTeX ni MacTeX ne peuvent l'installer.** Sans lui, `pdflatex`
+échoue sur `File 'automultiplechoice.sty' not found` → pas de PDF, pas de
+calage, donc aucun sujet créable hors Debian.
+
+Il est donc versionné dans [auto_grading/tex/](auto_grading/tex/) (v1.7.0,
+GPL — en-tête de licence à conserver) et `compile_pdf()` le copie dans son
+dossier temporaire de compilation. `pdflatex` cherche le répertoire courant en
+premier : **cette copie prime sur une éventuelle installation AMC du système**,
+ce qui est voulu — deux versions du style peuvent produire des positions de
+cases différentes, donc un `.xy` différent, donc des copies imprimées qui ne
+correspondent plus au calage. Panne silencieuse, découverte en corrigeant.
+
+Toutes les *autres* dépendances du style (`tikz`, `hyperref`, `fancybox`,
+`csvsimple`, `environ`, `storebox`, `rotating`, `xkeyval`…) sont des paquets
+CTAN standards, que MiKTeX télécharge automatiquement à la première
+compilation. Détails et procédure de mise à jour : [auto_grading/tex/README.md](auto_grading/tex/README.md).
+
+### Diagnostic — le réflexe support
+
+```bash
+.venv/bin/python auto_grading/doctor.py     # ou : page /diagnostic dans l'UI
+```
+
+[doctor.py](auto_grading/doctor.py) contrôle : OS, version de Python,
+dépendances, `pdflatex`, présence et version du style AMC vendorisé,
+**compatibilité scikit-learn ↔ modèle picklé**, chemins résolus, projet actif,
+et cohérence sujet ↔ calage. Chaque contrôle est `ok` / `warn` / `fail`, le
+code de sortie vaut 1 s'il y a un `fail`.
+
+Quand un collègue signale un problème, demander la sortie de cette commande
+(ou le bouton « 📋 Copier le rapport » de `/diagnostic`) plutôt que d'engager
+un échange de mails. Routes : `GET /diagnostic` (page), `GET /api/doctor` (JSON).
+
+### Pièges connus par plateforme
+
+- **scikit-learn est épinglé** (`>=1.8,<1.9` dans `pyproject.toml`) : les
+  modèles `models/*.pkl` ont été picklés avec la 1.8 et sklearn ne garantit pas
+  la compatibilité entre versions mineures. Pour changer de version, ré-entraîner
+  (`build_dataset.py` puis `train_classifier.py`) et déplacer la borne.
+  `doctor.py` détecte le décalage.
+- **Windows — changement de projet non testé.** `project_state._spawn_relauncher()`
+  utilise `start_new_session=True`, qui est POSIX seulement. Ça ne lève pas
+  d'erreur mais le détachement n'a pas lieu comme prévu ; il faudra sans doute
+  une branche `DETACHED_PROCESS`. À corriger quand le cas se présentera.
+- **Windows — chemins.** L'état vit dans `~/.config/amcx` (fonctionne, mais
+  l'idiome Windows serait `%APPDATA%`) et les projets dans `~/Documents/AMCx`
+  (attention à une redirection OneDrive du dossier Documents).
+- **Partager un projet sans TeX** : un collègue qui reçoit un dossier de projet
+  déjà compilé (`exam.tex` + `exam.xy` + `DOC-sujet.pdf`) peut scanner et
+  corriger **sans pdflatex**. Seule la *création* de sujet exige TeX.
+- **Pas de mode multi-utilisateur.** Le projet actif est global
+  (`~/.config/amcx/active_project`) et en changer redémarre le process : une
+  instance partagée servirait le même examen à tout le monde, et il n'y a
+  aucune authentification. AMCx s'installe sur le poste de chacun.
+
 ## Démarrer un nouveau projet
 
 **Le plus simple : par l'UI** (recommandé pour un nouvel utilisateur).
@@ -269,6 +353,8 @@ L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent ja
 pyproject.toml                 ← deps (wheels pures, zéro poppler) + extra [api]
 auto_grading/
 ├── config.py / config.json    ← config runtime partagée (amc_dir, etc.)
+├── doctor.py                  ← diagnostic d'installation (CLI + /api/doctor)
+├── tex/                       ← automultiplechoice.sty vendorisé (hors CTAN !)
 ├── layout_store.py            ← géométrie des cases : parseur .xy (port de meptex)
 │                                 + lecteur layout.sqlite ; get_layout() (précédence)
 ├── new_project.py             ← crée un projet vierge DONNÉES SEULES (config + sujet gabarit, aucun code copié)
@@ -310,6 +396,9 @@ auto_grading/
 uv pip install -e .                # ou .venv/bin/pip install -e .
 .venv/bin/pip install -e ".[api]"  # + voie Claude-vision optionnelle
 
+# Diagnostic (à demander en premier quand « ça ne marche pas »)
+.venv/bin/python auto_grading/doctor.py
+
 # UI (port 5050) — Jinja n'auto-reload PAS (debug off) : redémarrer après édition de template
 .venv/bin/python auto_grading/front/server.py --port 5050
 pkill -f "front/server.py"
@@ -348,6 +437,8 @@ pkill -f "front/server.py"
 | `/student/<b>/<p>/zoom` | Onglets *Réponses* (2 zones) / *Identité* (crop nom + grille ID) |
 | `/identites` | Review finale : copies non reliées ↔ noms, drag&drop |
 | `/sujet/pdf` | PDF du sujet (`sujet/DOC-sujet.pdf`), inline |
+| `/diagnostic` | Diagnostic d'installation (à envoyer au support) |
+| `/api/doctor` | GET : mêmes contrôles en JSON `{ok, checks:[{status,label,detail}]}` |
 | `/sujet/region/<q>.png` | crop PNG de la région d'une question (aperçu) |
 | **API Sujet — édition** | |
 | `/api/sujet` | GET : `{config, header, answer_sheet, blocks, mode, available_copies, total_max, max}` |

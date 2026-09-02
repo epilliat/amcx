@@ -53,6 +53,14 @@ from config import project_root as _project_root  # noqa: E402
 
 ROOT = _project_root()
 SUJET_DIR = ROOT / "sujet"
+
+# `automultiplechoice.sty` vendorisé — vit dans l'INSTALLATION (comme les
+# modèles ML), pas dans le projet : c'est du code, pas de la donnée.
+# Il n'est pas sur CTAN, donc ni MiKTeX ni MacTeX ne peuvent l'installer ;
+# sans lui, aucun sujet n'est compilable hors Debian/Ubuntu.
+# Cf. auto_grading/tex/README.md.
+TEX_DIR = Path(__file__).resolve().parent / "tex"
+AMC_STY = TEX_DIR / "automultiplechoice.sty"
 EXAM_TEX = SUJET_DIR / "exam.tex"
 SUJET_PDF = SUJET_DIR / "DOC-sujet.pdf"
 EXAM_XY = SUJET_DIR / "exam.xy"
@@ -2880,6 +2888,11 @@ def compile_pdf():
             # le fichier de calage exam.xy (positions des cases) en plus du PDF.
             (tmp / "exam-config.tex").write_text(
                 "\\def\\SujetExterne{1}\n", encoding="utf-8")
+            # Style AMC vendorisé, copié à côté d'exam.tex : pdflatex cherche le
+            # répertoire courant en premier, donc cette version fait foi même si
+            # le système a une installation AMC. Déterminisme du calage voulu.
+            if AMC_STY.exists():
+                shutil.copy(AMC_STY, tmp / AMC_STY.name)
             rc, out = 1, ""
             for _ in range(2):
                 try:

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Diagnostic — AMCx{% endblock %}
+
+{% block content %}
+<div class="diag-page">
+  <h1>Diagnostic d'installation</h1>
+  <p class="diag-intro">
+    En cas de problème, copie cette page (bouton ci-dessous) et envoie-la —
+    elle contient tout ce qu'il faut pour identifier la panne sans allers-retours.
+  </p>
+
+  <table class="diag-table">
+    {% for c in checks %}
+    <tr class="diag-{{ c.status }}">
+      <td class="diag-icon">{% if c.status == 'ok' %}✔{% elif c.status == 'warn' %}!{% else %}✘{% endif %}</td>
+      <td class="diag-label">{{ c.label }}</td>
+      <td class="diag-detail">{{ c.detail }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% set n_fail = checks | selectattr('status', 'equalto', 'fail') | list | length %}
+  {% set n_warn = checks | selectattr('status', 'equalto', 'warn') | list | length %}
+  <p class="diag-summary diag-{{ 'fail' if n_fail else ('warn' if n_warn else 'ok') }}">
+    {% if n_fail %}{{ n_fail }} problème(s) bloquant(s){% if n_warn %}, {{ n_warn }} avertissement(s){% endif %}.
+    {% elif n_warn %}Installation utilisable — {{ n_warn }} avertissement(s).
+    {% else %}Installation complète et cohérente.{% endif %}
+  </p>
+
+  <button class="btn" id="diag-copy" type="button">📋 Copier le rapport</button>
+  <span id="diag-copied" class="diag-copied" hidden>copié ✓</span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('diag-copy').addEventListener('click', async function () {
+  const lines = [].map.call(document.querySelectorAll('.diag-table tr'), function (tr) {
+    const c = tr.querySelectorAll('td');
+    return c[0].textContent.trim() + ' ' + c[1].textContent.trim() + ' : '
+         + c[2].textContent.trim().replace(/\s+/g, ' ');
+  });
+  const txt = 'AMCx — diagnostic\n' + lines.join('\n');
+  try { await navigator.clipboard.writeText(txt); }
+  catch (e) {
+    // Presse-papiers refusé (http non sécurisé selon le navigateur) : repli
+    // sur une sélection manuelle.
+    const ta = document.createElement('textarea');
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) {}
+    ta.remove();
+  }
+  const ok = document.getElementById('diag-copied');
+  ok.hidden = false; setTimeout(() => { ok.hidden = true; }, 2000);
+});
+</script>
+{% endblock %}

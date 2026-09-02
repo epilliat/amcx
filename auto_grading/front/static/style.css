@@ -3586,3 +3586,24 @@ img.case.correct + .case-label { font-weight: bold; }
 
 
 
+
+/* === Page de diagnostic (/diagnostic) ==================================== */
+.diag-page { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+.diag-intro { color: var(--muted, #666); margin-bottom: 18px; }
+.diag-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.diag-table td { padding: 8px 10px; border-bottom: 1px solid var(--border, #e3e3e3);
+                 vertical-align: top; }
+.diag-icon { width: 1.6em; text-align: center; font-weight: 700; }
+.diag-label { width: 13em; font-weight: 600; }
+.diag-detail { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular,
+               Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-word; }
+.diag-ok   .diag-icon { color: #2e7d32; }
+.diag-warn .diag-icon { color: #ef6c00; }
+.diag-fail .diag-icon { color: #c62828; }
+.diag-warn { background: #fff8e1; }
+.diag-fail { background: #ffebee; }
+.diag-summary { margin: 18px 0; padding: 10px 14px; border-radius: 6px; font-weight: 600; }
+.diag-summary.diag-ok   { background: #e8f5e9; color: #2e7d32; }
+.diag-summary.diag-warn { background: #fff8e1; color: #ef6c00; }
+.diag-summary.diag-fail { background: #ffebee; color: #c62828; }
+.diag-copied { margin-left: 10px; color: #2e7d32; font-size: 13px; }

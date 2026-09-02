@@ -17,6 +17,8 @@ if errorlevel 1 (
   echo.
   echo /!\ pdflatex introuvable. Pour compiler le sujet, installer MiKTeX :
   echo     https://miktex.org/download
+  echo     Le style AMC est fourni avec AMCx : rien d'autre a installer.
+  echo     MiKTeX telechargera tout seul les paquets LaTeX manquants.
   echo.
 )
 
@@ -29,7 +31,13 @@ echo --^> Installation des dependances...
 .venv\Scripts\pip install -e .
 
 echo.
+echo --^> Diagnostic de l'installation...
+echo.
+.venv\Scripts\python auto_grading\doctor.py
+
+echo.
 echo OK Installe. Pour lancer le serveur :
 echo     run.bat
 echo.
 echo   Puis ouvrir http://localhost:5050/ dans le navigateur.
+echo   En cas de souci : page /diagnostic, ou .venv\Scripts\python auto_grading\doctor.py

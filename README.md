@@ -11,8 +11,16 @@ Pas besoin du logiciel `auto-multiple-choice` — seul `pdflatex` est utilisé.
 - **Python 3.10+** ([python.org/downloads](https://www.python.org/downloads/))
 - **pdflatex** (pour générer le PDF du sujet) :
   - Ubuntu / Debian : `sudo apt install texlive-latex-extra texlive-lang-french`
-  - macOS : `brew install --cask mactex-no-gui`
+  - macOS : `brew install --cask basictex` (~100 Mo ; MacTeX pèse 5 Go)
   - Windows : [MiKTeX](https://miktex.org/download)
+
+  Le style AMC (`automultiplechoice.sty`) est **fourni avec AMCx** — il n'est
+  pas sur CTAN, donc ni MiKTeX ni MacTeX ne sauraient l'installer. Les autres
+  paquets LaTeX manquants sont téléchargés automatiquement par MiKTeX à la
+  première compilation.
+
+Un collègue qui reçoit un projet **déjà compilé** peut scanner et corriger sans
+pdflatex : seule la création d'un sujet exige TeX.
 
 ### Installation en 3 commandes
 
@@ -29,6 +37,10 @@ Lance ensuite :
 ./run.sh            # Linux/macOS
 # Windows : double-clic sur run.bat
 ```
+
+L'installation se termine par un **diagnostic** ; en cas de souci plus tard,
+le relancer avec `.venv/bin/python auto_grading/doctor.py` (ou la page
+`/diagnostic` de l'UI, avec un bouton « copier le rapport ») et l'envoyer.
 
 Ouvre [http://localhost:5050/](http://localhost:5050/). Au premier lancement,
 l'écran d'accueil te propose de **créer un nouveau projet** (template *Examen

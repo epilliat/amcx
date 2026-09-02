@@ -4107,6 +4107,25 @@ def sujet_region_info(q):
 # que le serveur revienne (~500-1500 ms) puis recharger la page.
 # ---------------------------------------------------------------------------
 
+@app.route("/api/doctor")
+def api_doctor():
+    """Diagnostic d'installation en JSON (cf. auto_grading/doctor.py)."""
+    import doctor as _doctor
+    checks = _doctor.run_checks()
+    return jsonify({
+        "ok": not any(c["status"] == "fail" for c in checks),
+        "checks": checks,
+    })
+
+
+@app.route("/diagnostic")
+def diagnostic_page():
+    """Page de diagnostic — à envoyer au support quand « ça ne marche pas »."""
+    import doctor as _doctor
+    return render_template("diagnostic.html", checks=_doctor.run_checks(),
+                           active="")
+
+
 @app.route("/api/projects")
 def api_projects():
     """État courant : projet actif (ou None) + liste des récents."""
