@@ -8,75 +8,100 @@ Pas besoin du logiciel `auto-multiple-choice` — seul `pdflatex` est utilisé.
 
 ## Installation
 
-### Prérequis
+**Une seule ligne à copier-coller.** Aucun prérequis : ni Python, ni git. Rien
+n'est installé en dehors de ton dossier personnel, aucun droit administrateur
+n'est demandé.
 
-| | Pourquoi | Comment |
-|---|---|---|
-| **Python 3.10+** | tout le pipeline | [python.org/downloads](https://www.python.org/downloads/) — **Windows : cocher « Add python.exe to PATH »** pendant l'installation |
-| **pdflatex** | générer le PDF du sujet | Ubuntu/Debian : `sudo apt install texlive-latex-extra texlive-lang-french` · macOS : `brew install --cask basictex` (~100 Mo ; MacTeX pèse 5 Go) · Windows : [MiKTeX](https://miktex.org/download) |
+**Linux / macOS** — dans un terminal :
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.sh | sh
+```
+
+**Windows** — dans PowerShell :
+
+```powershell
+irm https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.ps1 | iex
+```
+
+Puis, dans un **nouveau** terminal :
+
+```sh
+amcx                  # démarre le serveur → http://localhost:5050/
+```
+
+<details>
+<summary>Que fait exactement cette commande ?</summary>
+
+Elle télécharge [uv](https://docs.astral.sh/uv/) (un gestionnaire
+d'environnements Python, ~30 Mo, dans ton dossier personnel), qui installe
+Python **si tu ne l'as pas**, puis installe AMCx dans un environnement isolé et
+place la commande `amcx` sur ton `PATH`. Elle finit par un diagnostic.
+
+Rien n'est modifié à l'échelle du système, et rien n'écrase un Python existant.
+Pour tout désinstaller : `uv tool uninstall amcx`.
+</details>
+
+### Les commandes
+
+| | |
+|---|---|
+| `amcx` | démarre le serveur (option `--port 5051` pour changer de port) |
+| `amcx --version` | version installée |
+| `amcx doctor` | diagnostic — **à envoyer en cas de problème** |
+| `amcx update` | met à jour AMCx |
+| `amcx where` | où vivent le code, les projets et la configuration |
+
+### pdflatex — pour créer un sujet
+
+La **création** d'un sujet a besoin de `pdflatex` (la correction de copies, non) :
+
+- Ubuntu/Debian : `sudo apt install texlive-latex-extra texlive-lang-french`
+- macOS : `brew install --cask basictex` (~100 Mo ; MacTeX pèse 5 Go)
+- Windows : [MiKTeX](https://miktex.org/download)
 
 Le style AMC (`automultiplechoice.sty`) est **fourni avec AMCx** : il n'est pas
 sur CTAN, donc ni MiKTeX ni MacTeX ne sauraient l'installer. Les autres paquets
 LaTeX manquants sont téléchargés automatiquement par MiKTeX à la première
 compilation.
 
-> **Sans pdflatex, AMCx fonctionne quand même** pour scanner et corriger un
-> projet **déjà compilé** que quelqu'un t'a transmis. Seule la *création* d'un
-> sujet exige TeX.
+> Un collègue qui reçoit un projet **déjà compilé** peut scanner et corriger
+> sans pdflatex. Seule la création d'un sujet exige TeX.
 
-### Installation
+### Mettre à jour
 
-**Avec git** (Linux, macOS, Windows) :
+```sh
+amcx update
+```
+
+**Tes données ne sont jamais touchées** : sujets, copies et notes vivent dans
+`~/Documents/AMCx/`, en dehors de l'installation.
+
+### En cas de problème
+
+```sh
+amcx doctor
+```
+
+Ou la page **`/diagnostic`** de l'interface, avec un bouton « 📋 Copier le
+rapport ». Le diagnostic contrôle Python, les dépendances, `pdflatex`, le style
+AMC, la compatibilité du modèle de correction, les chemins et la cohérence
+sujet ↔ calage. **Envoyer ce rapport** plutôt que « ça ne marche pas ».
+
+### Installation pour développer
+
+Pour modifier AMCx, cloner plutôt que d'installer l'outil :
 
 ```bash
 git clone https://github.com/epilliat/amcx.git
 cd amcx
-./install.sh          # Linux / macOS
-install.bat           # Windows : double-clic dans l'explorateur
+./install.sh          # Linux/macOS — Windows : install.bat
+./run.sh              # Windows : run.bat
+./update.sh           # git pull + dépendances — Windows : update.bat
 ```
 
-**Sans git** (Windows, le plus simple) : sur
-[github.com/epilliat/amcx](https://github.com/epilliat/amcx), bouton vert
-**Code → Download ZIP**, décompresser, puis double-cliquer sur `install.bat`.
-⚠ Dans ce cas `update.bat` ne fonctionnera pas — il faudra retélécharger le ZIP
-pour mettre à jour.
-
-Le script crée `.venv/`, installe les dépendances et termine par un
-**diagnostic**. Lancer ensuite :
-
-```bash
-./run.sh              # Linux / macOS
-run.bat               # Windows : double-clic
-```
-
-puis ouvrir <http://localhost:5050/>.
-
-### En cas de problème
-
-```bash
-.venv/bin/python auto_grading/doctor.py         # Linux / macOS
-.venv\Scripts\python auto_grading\doctor.py     # Windows
-```
-
-Ou la page **`/diagnostic`** dans l'interface, qui a un bouton « 📋 Copier le
-rapport ». Elle contrôle Python, les dépendances, `pdflatex`, le style AMC, la
-compatibilité du modèle de correction, les chemins et la cohérence
-sujet ↔ calage. **En cas de souci, envoyer ce rapport** plutôt que « ça ne
-marche pas ».
-
-### Mettre à jour
-
-```bash
-./update.sh           # Linux / macOS
-update.bat            # Windows
-```
-
-Le script récupère la dernière version, réinstalle les dépendances et relance
-le diagnostic. Il **refuse de tourner** si tu as modifié des fichiers du dépôt,
-pour ne rien écraser.
-
-**Tes données ne sont jamais touchées par une mise à jour** : sujets, copies et
-notes vivent dans `~/Documents/AMCx/`, en dehors du dépôt.
+`amcx update` reconnaît ce mode et fait alors `git pull` (en refusant de
+tourner si tu as des modifications locales).
 
 ---
 

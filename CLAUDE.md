@@ -49,18 +49,56 @@ au-delà de TeX, et **le binaire `auto-multiple-choice` n'est jamais requis**.
 | **Python 3.10+** | tout le pipeline | [python.org](https://www.python.org/downloads/) (Windows : cocher « Add python.exe to PATH ») |
 | **pdflatex** | compiler le sujet (PDF + calage `.xy`) | Debian/Ubuntu : `sudo apt install texlive-latex-extra texlive-lang-french` · macOS : `brew install --cask basictex` (~100 Mo, préférer à MacTeX qui pèse 5 Go) · Windows : [MiKTeX](https://miktex.org/download) |
 
-### Installation
+### Installation utilisateur : une ligne, zéro prérequis
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.sh | sh   # Linux/macOS
+irm https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.ps1 | iex        # Windows
+```
+
+[bootstrap.sh](bootstrap.sh) / [bootstrap.ps1](bootstrap.ps1) installent `uv`
+s'il manque (dossier personnel, sans droits admin), qui installe **Python si
+besoin** — c'est ce qui rend l'installation possible sur un Windows nu — puis
+`uv tool install git+…` pose AMCx dans un environnement isolé et met la commande
+`amcx` sur le PATH.
+
+### La commande `amcx`
+
+`[project.scripts] amcx = "auto_grading.cli:main"` → [cli.py](auto_grading/cli.py) :
+
+| | |
+|---|---|
+| `amcx` | démarre le serveur (tout argument non reconnu est passé à `server.main()`, donc `amcx --port 5051`) |
+| `amcx --version` | version, source unique dans [_version.py](auto_grading/_version.py) (lue aussi par hatch, `dynamic = ["version"]`) |
+| `amcx doctor` | délègue à [doctor.py](auto_grading/doctor.py) |
+| `amcx update` | détecte le mode d'installation et lance la bonne commande |
+| `amcx where` | chemins du code, des projets, de la config |
+
+**Détection du mode d'installation** (`cli.install_kind()`) : par
+**fichier-marqueur** à la racine de l'environnement — `uv-receipt.toml` (uv),
+`pipx_metadata.json` (pipx), `.git` du dépôt (clone) — et non par
+reconnaissance du chemin, qui casse dès que l'utilisateur configure
+`UV_TOOL_DIR` ou `PIPX_HOME`. Repli sur le chemin si les marqueurs changent.
+
+⚠ **Le relanceur doit rester compatible commande console.**
+`project_state._spawn_relauncher()` re-exécute la commande d'origine au
+changement de projet : si `sys.argv[0]` n'est pas un `.py` (cas d'un point
+d'entrée console, et **`.exe` sous Windows**), il faut ré-exécuter `argv[0]`
+directement et non le passer à `python`. Le détachement utilise
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` sous Windows,
+`start_new_session` ailleurs (POSIX seulement).
+
+### Installation pour développer
 
 ```bash
 git clone https://github.com/epilliat/amcx.git
 cd amcx
-./install.sh          # Linux / macOS
-install.bat           # Windows (double-clic)
+./install.sh          # Linux / macOS — Windows : install.bat
 ```
 
-Le script crée `.venv/`, installe les dépendances, puis **lance le diagnostic**
-(voir plus bas). Lancer ensuite `./run.sh` (ou `run.bat`) et ouvrir
-<http://localhost:5050/>.
+Le script crée `.venv/`, installe les dépendances, puis **lance le diagnostic**.
+Lancer ensuite `./run.sh` (ou `run.bat`) et ouvrir <http://localhost:5050/>.
+`./update.sh` fait `git pull` + dépendances.
 
 ### ⚠ `automultiplechoice.sty` est vendorisé — ne pas le retirer
 
@@ -86,7 +124,8 @@ compilation. Détails et procédure de mise à jour : [auto_grading/tex/README.m
 ### Diagnostic — le réflexe support
 
 ```bash
-.venv/bin/python auto_grading/doctor.py     # ou : page /diagnostic dans l'UI
+amcx doctor                                  # ou : page /diagnostic dans l'UI
+.venv/bin/python auto_grading/doctor.py      # depuis un clone non installé
 ```
 
 [doctor.py](auto_grading/doctor.py) contrôle : OS, version de Python,
@@ -106,10 +145,10 @@ un échange de mails. Routes : `GET /diagnostic` (page), `GET /api/doctor` (JSON
   la compatibilité entre versions mineures. Pour changer de version, ré-entraîner
   (`build_dataset.py` puis `train_classifier.py`) et déplacer la borne.
   `doctor.py` détecte le décalage.
-- **Windows — changement de projet non testé.** `project_state._spawn_relauncher()`
-  utilise `start_new_session=True`, qui est POSIX seulement. Ça ne lève pas
-  d'erreur mais le détachement n'a pas lieu comme prévu ; il faudra sans doute
-  une branche `DETACHED_PROCESS`. À corriger quand le cas se présentera.
+- **Windows — changement de projet non testé sur une vraie machine.** Le code
+  gère désormais les deux cas (drapeaux `DETACHED_PROCESS`, ré-exécution de
+  `argv[0]` quand ce n'est pas un `.py`), mais rien n'a pu être vérifié sous
+  Windows depuis l'environnement de développement Linux.
 - **Windows — chemins.** L'état vit dans `~/.config/amcx` (fonctionne, mais
   l'idiome Windows serait `%APPDATA%`) et les projets dans `~/Documents/AMCx`
   (attention à une redirection OneDrive du dossier Documents).
@@ -254,7 +293,7 @@ colonnes du code étudiant. `check_layout_consistency()` tourne au démarrage du
 serveur et signale tout décalage sujet ↔ calage.
 
 ### 2. Q8 vaut 2 pts → total 32
-Q8 a 6 bonnes réponses (`\bareme{b=1/3,m=-1/3}` dans [exam.tex](EXAM_2026/exam.tex)). Total max = **32**.
+Q8 a 6 bonnes réponses (`\bareme{b=1/3,m=-1/3}` dans l'`exam.tex` d'EXAM_2026 — dossier d'examen externe, hors dépôt). Total max = **32**.
 
 **Le barème est piloté par `auto_grading/sujet/subject.json`** (source de vérité unique, éditée via l'onglet *Sujet*). [score.py](auto_grading/score.py) lit `b`/`m`/`value` via [sujet_store.py](auto_grading/sujet_store.py)`.get_bareme()` (qui lit `subject.json`, cache `mtime`). Il n'y a **aucun repli** : une question absente du sujet vaut 0 (`answer_key.py`, figé sur EXAM_2026, a été supprimé — il produisait des notes fausses et silencieuses dans les autres projets, cf. [archive/](auto_grading/archive/)). Modifier le barème dans l'UI recalcule toutes les notes (le total max n'est donc plus figé à 32). Voir la section *Onglet Sujet*.
 
@@ -353,6 +392,8 @@ L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent ja
 pyproject.toml                 ← deps (wheels pures, zéro poppler) + extra [api]
 auto_grading/
 ├── config.py / config.json    ← config runtime partagée (amc_dir, etc.)
+├── cli.py                     ← commande `amcx` (run / doctor / update / where)
+├── _version.py                ← version, source unique (lue par hatch)
 ├── doctor.py                  ← diagnostic d'installation (CLI + /api/doctor)
 ├── tex/                       ← automultiplechoice.sty vendorisé (hors CTAN !)
 ├── layout_store.py            ← géométrie des cases : parseur .xy (port de meptex)

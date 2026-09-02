@@ -9,6 +9,10 @@
 
 Sans sous-commande, tout argument est passé au serveur : `amcx --port 5051`
 équivaut à l'ancien `python auto_grading/front/server.py --port 5051`.
+
+Installation (une ligne, sans prérequis) :
+    curl -LsSf https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.sh | sh
+    irm https://raw.githubusercontent.com/epilliat/amcx/main/bootstrap.ps1 | iex
 """
 
 from __future__ import annotations
