@@ -50,18 +50,26 @@ def get_version() -> str:
 def install_kind() -> tuple[str, Path]:
     """Comment AMCx a été installé : ('uv'|'pipx'|'git'|'venv', chemin).
 
-    Déterminé par l'emplacement de l'environnement Python courant : les outils
-    déposent leurs environnements dans des dossiers reconnaissables.
+    Détecté par les fichiers-marqueurs que les outils déposent à la racine de
+    l'environnement — `uv-receipt.toml` pour uv, `pipx_metadata.json` pour
+    pipx. Plus fiable qu'une reconnaissance du chemin, qui dépend de la
+    configuration de l'utilisateur (UV_TOOL_DIR, PIPX_HOME…).
     """
     prefix = Path(sys.prefix).resolve()
-    parts = {p.lower() for p in prefix.parts}
-    if "uv" in parts and "tools" in parts:
+    if (prefix / "uv-receipt.toml").exists():
         return ("uv", prefix)
-    if "pipx" in parts:
+    if (prefix / "pipx_metadata.json").exists() or (
+            prefix.parent / "pipx_metadata.json").exists():
         return ("pipx", prefix)
     repo = _HERE.parent
     if (repo / ".git").exists():
         return ("git", repo)
+    # Repli : reconnaissance par chemin, si un outil change ses marqueurs.
+    parts = {x.lower() for x in prefix.parts}
+    if "uv" in parts and "tools" in parts:
+        return ("uv", prefix)
+    if "pipx" in parts:
+        return ("pipx", prefix)
     return ("venv", prefix)
 
 
