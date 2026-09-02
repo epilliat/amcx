@@ -464,10 +464,14 @@ def amc_question_map(copy: int = 1) -> dict:
     free_blocks = [b.bid for b in open_blocks if b.bid not in out["open"].values()]
     for num, bid in zip(leftover, free_blocks):
         out["open"][num] = bid
-    if len(rest) != len(open_blocks):
+    # On ne signale que le SURPLUS côté calage : des questions à lettres qu'on
+    # n'arrive à rattacher à aucun bloc du sujet. L'inverse est normal — un bloc
+    # ouvert peut n'avoir aucune case de notation sur la feuille de réponses
+    # (AMCOpen sans barème, cases rendues sur une autre page…).
+    if len(rest) > len(open_blocks):
         out["issues"].append(
-            f"{len(rest)} question(s) de calage non attribuée(s) pour "
-            f"{len(open_blocks)} bloc(s) à cases de notation")
+            f"{len(rest) - len(open_blocks)} question(s) du calage ne "
+            f"correspondent à aucun bloc du sujet")
     _qmap_by_copy[copy] = out
     return out
 

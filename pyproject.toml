@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amcx"
-version = "0.1.0"
+dynamic = ["version"]          # lue depuis auto_grading/_version.py
 description = "AMCx — AMC eXtended : éditeur de sujet QCM + correction automatique (CV + classifieur, UI Flask de relecture, sans dépendance au binaire AMC)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,13 @@ dependencies = [
     "pyarrow>=15.0",
     "joblib>=1.3",
 ]
+
+# La commande `amcx` : démarre le serveur, ou `amcx doctor` / `amcx update`.
+[project.scripts]
+amcx = "auto_grading.cli:main"
+
+[tool.hatch.version]
+path = "auto_grading/_version.py"
 
 [project.optional-dependencies]
 # Voie Claude-vision héritée (grader.py) — non requise par le pipeline CV/ML.

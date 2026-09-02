@@ -243,9 +243,17 @@ def _spawn_relauncher() -> None:
     import shlex
 
     # Code Python que le watcher exécute (détaché).
+    #
+    # Le relancement doit marcher dans les deux modes de lancement :
+    #   - `python auto_grading/front/server.py --port N`  → argv[0] est un .py,
+    #     on relance via l'interpréteur ;
+    #   - commande console `amcx --port N` (uv tool / pipx / pip) → argv[0] est
+    #     un script généré, voire un .exe sous Windows : le passer à `python`
+    #     échouerait. On ré-exécute alors argv[0] directement.
     code = (
         "import socket, sys, time, os\n"
         f"argv = {sys.argv!r}\n"
+        f"exe = {sys.executable!r}\n"
         # Devine le port (--port N) ; défaut 5000.
         "port = 5000\n"
         "for i, a in enumerate(argv):\n"
@@ -259,13 +267,26 @@ def _spawn_relauncher() -> None:
         "    except OSError:\n"
         "        time.sleep(0.1)\n"
         # Exec la commande d'origine — process unique, hérite stdio si parent en a.
-        f"os.execv({sys.executable!r}, [{sys.executable!r}] + argv)\n"
+        "prog = argv[0] if argv else ''\n"
+        "if prog.endswith('.py'):\n"
+        "    os.execv(exe, [exe] + argv)\n"
+        "else:\n"
+        "    os.execv(prog, argv)\n"
     )
+
+    # Détacher le watcher du process courant, qui va mourir juste après.
+    # `start_new_session` est POSIX seulement ; Windows a ses propres drapeaux.
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        kwargs["start_new_session"] = True
 
     subprocess.Popen(
         [sys.executable, "-c", code],
-        start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **kwargs,
     )
