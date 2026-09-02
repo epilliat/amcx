@@ -31,7 +31,7 @@
       {% if b.kind == 'text' %}TEXTE
       {% elif b.kind == 'question_qcm' %}QCM{% if b.q %} Q{{ b.q }}{% endif %}
       {% elif b.kind == 'question_open' %}OPEN
-      {% elif b.kind == 'question_freeform' %}LIBRE 🪄
+      {% elif b.kind == 'question_freeform' %}LIBRE — DÉSACTIVÉ
       {% elif b.kind == 'answerbox' %}RÉPONSE{% if b.data.placement == 'end' %} ← fin{% endif %}
       {% endif %}
     </span>
@@ -134,18 +134,24 @@
         <div class="ans-mark">
           <button type="button" class="ans-badge"
                   title="cliquer pour basculer bonne / mauvaise">{{ '✔ bonne' if a.correct else '✗ mauvaise' }}</button>
-          {% if char %}<span class="ans-char">case {{ char }}</span>{% endif %}
-          {% if b.data.qtype == 'mult' %}
-          <input type="text" class="ans-bareme" spellcheck="false"
-                 title="barème de cette réponse" value="{{ a.bareme }}">
-          {% else %}
-          <span class="ans-score"></span>
-          {% endif %}
+          <div class="ans-meta">
+            {# La lettre vient du calage compilé et ne vaut que pour UN
+               exemplaire (celui du sélecteur en haut de page). Elle est
+               retirée quand le nombre de réponses a changé depuis la dernière
+               compilation — cf. `_attach_chars`. #}
+            {% if char %}<span class="ans-char">case {{ char }}</span>{% endif %}
+            {% if b.data.qtype == 'mult' %}
+            <input type="text" class="ans-bareme" spellcheck="false"
+                   title="barème de cette réponse" value="{{ a.bareme }}">
+            {% else %}
+            <span class="ans-score"></span>
+            {% endif %}
+          </div>
           {% if mode == 'canonical' %}
           <button type="button" class="btn-mini ans-remove" title="supprimer cette réponse">✕</button>
           {% endif %}
         </div>
-        <textarea class="md-src ans-src" rows="2" spellcheck="false">{{ a.text }}</textarea>
+        <textarea class="md-src ans-src" rows="1" spellcheck="false">{{ a.text }}</textarea>
       </div>
       {% endfor %}
     </div>
@@ -156,11 +162,11 @@
     <div class="sujet-q-id">
       <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
              title="identifiant LaTeX de la question ouverte">
-      <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+      <label class="bar-field" title="hauteur du cadre de réponse (en lignes)">
         lignes
         <input type="number" class="open-lines" min="1" max="40" step="1"
                value="{{ b.data.lines }}"></label>
-      <label class="q-horiz" title="barème total possible">
+      <label class="bar-field" title="barème total possible">
         points max
         <input type="number" class="open-points" min="0" step="0.5"
                value="{{ b.data.points }}"></label>
@@ -200,15 +206,23 @@
   </div>
 
   {% elif b.kind == 'question_freeform' %}
+  {# Type désactivé (cf. sujet_store.DISABLED_KINDS) : on ne peut plus en
+     créer, mais les blocs existants restent éditables et supprimables. #}
+  <div class="block-disabled-note">
+    ⚠ <strong>Question libre désactivée.</strong> Ce bloc ne s'imprime pas dans
+    le PDF compilé — il est ignoré à la compilation. Supprimez-le, ou
+    remplacez-le par une <strong>zone réponse</strong> (cadre manuscrit noté
+    par le correcteur).
+  </div>
   <header class="sujet-q-head">
     <div class="sujet-q-id">
       <input type="text" class="q-tag-input" spellcheck="false" value="{{ b.data.tag }}"
              title="identifiant LaTeX">
-      <label class="q-horiz" title="hauteur du cadre de réponse (en lignes)">
+      <label class="bar-field" title="hauteur du cadre de réponse (en lignes)">
         lignes
         <input type="number" class="ff-lines" min="1" max="20" step="1"
                value="{{ b.data.lines }}"></label>
-      <label class="q-horiz" title="note attribuée si la réponse est correcte">
+      <label class="bar-field" title="note attribuée si la réponse est correcte">
         points
         <input type="number" class="ff-points" min="0" step="0.5"
                value="{{ b.data.points }}"></label>
@@ -232,7 +246,7 @@
   </div>
 
   <div class="sujet-field" style="display:flex;gap:14px;align-items:end;">
-    <label class="ab-field" title="comment comparer la lecture OCR à expected_answer">
+    <label class="bar-field ab-field" title="comment comparer la lecture OCR à expected_answer">
       mode de match
       <select class="ff-match-mode">
         <option value="exact"{% if b.data.match_mode == 'exact' %} selected{% endif %}>exact (égal après strip+lower)</option>
@@ -241,7 +255,7 @@
         <option value="regex"{% if b.data.match_mode == 'regex' %} selected{% endif %}>regex</option>
       </select>
     </label>
-    <label class="ab-field" title="tolérance numérique (utilisée seulement si mode = numeric_tol)">
+    <label class="bar-field ab-field" title="tolérance numérique (utilisée seulement si mode = numeric_tol)">
       numeric_tol
       <input type="number" class="ff-numeric-tol" min="0" step="0.01" value="{{ b.data.numeric_tol }}">
     </label>
@@ -250,22 +264,22 @@
   {% elif b.kind == 'answerbox' %}
   <header class="sujet-q-head">
     <div class="sujet-q-id">
-      <label class="ab-field" title="hauteur du cadre (ex. 4cm, 5cm, 10cm)">
+      <label class="bar-field ab-field" title="hauteur du cadre (ex. 4cm, 5cm, 10cm)">
         hauteur
         <input type="text" class="ab-height" value="{{ b.data.height }}"
                placeholder="5cm" spellcheck="false"></label>
-      <label class="ab-field" title="où apparaît le cadre dans le PDF">
+      <label class="bar-field ab-field" title="où apparaît le cadre dans le PDF">
         placement
         <select class="ab-placement">
           <option value="inline"{% if b.data.placement == 'inline' %} selected{% endif %}>dans le flux des questions</option>
           <option value="end"{% if b.data.placement == 'end' %} selected{% endif %}>sur la feuille de réponses (en fin)</option>
         </select>
       </label>
-      <label class="ab-field" title="grille AMC à cocher par le correcteur (0 = aucune). Détectable a posteriori via le tag « bareme-<bid> » dans exam.xy.">
+      <label class="bar-field ab-field" title="grille AMC à cocher par le correcteur (0 = aucune). Détectable a posteriori via le tag « bareme-<bid> » dans exam.xy.">
         barème max
         <input type="number" class="ab-bareme-max" min="0" max="99" step="0.25"
                value="{{ b.data.bareme_max or 0 }}"></label>
-      <label class="ab-field" title="pas entre 2 cases consécutives. Ex. max=1 + step=0.25 → 5 cases (scores 0, 0.25, 0.5, 0.75, 1). Les labels affichés restent 0, 1, 2, …">
+      <label class="bar-field ab-field" title="pas entre 2 cases consécutives. Ex. max=1 + step=0.25 → 5 cases (scores 0, 0.25, 0.5, 0.75, 1). Les labels affichés restent 0, 1, 2, …">
         pas
         <input type="number" class="ab-bareme-step" min="0.01" max="99" step="0.25"
                value="{{ b.data.bareme_step or 1 }}"></label>

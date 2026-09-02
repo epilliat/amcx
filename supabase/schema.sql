@@ -232,3 +232,143 @@ $$;
 
 -- Permettre l'appel depuis PostgREST par tout user authentifié.
 grant execute on function get_question_eval_stats(uuid) to authenticated, anon;
+
+-- ============================================================================
+-- 8) Catégories hiérarchiques (arbre partagé de la banque)
+-- ============================================================================
+-- Voir auto_grading/BANK_CATEGORIES_PLAN.md.
+--
+-- ⚠ L'identité d'une catégorie est son `id`, jamais son nom ni son chemin :
+-- renommer ou déplacer un nœud ne touche à aucune affectation. Les `tags`
+-- publics restent des facettes transversales (facile, L2) et ne sont PAS
+-- convertis en catégories.
+
+create table if not exists bank_categories (
+  id          uuid primary key default gen_random_uuid(),
+  -- `restrict` : supprimer un nœud qui a des enfants doit échouer côté base,
+  -- même si un client contourne le serveur AMCx.
+  parent_id   uuid references bank_categories(id) on delete restrict,
+  name        text not null check (char_length(btrim(name)) between 1 and 80),
+  position    int  not null default 0,
+  created_by  uuid references profiles(user_id) on delete set null,
+  created_at  timestamptz default now(),
+  modified_at timestamptz default now()
+);
+
+-- Unicité des noms entre frères, RACINE INCLUSE. `parent_id` étant NULL à la
+-- racine et NULL n'entrant dans aucune contrainte d'unicité, il faut le
+-- remplacer par une sentinelle — sinon deux chapitres « Inférence » à la
+-- racine passeraient.
+create unique index if not exists bank_categories_sibling_name_idx
+  on bank_categories (
+    coalesce(parent_id, '00000000-0000-0000-0000-000000000000'::uuid),
+    lower(btrim(name)));
+create index if not exists bank_categories_parent_idx on bank_categories (parent_id);
+
+-- Intégrité de l'arbre : pas de cycle, pas plus de 4 niveaux.
+-- ⚠ La constante 4 double `bank_taxonomy.MAX_DEPTH` côté Python. Les deux
+-- doivent bouger ensemble.
+create or replace function bank_categories_check_tree()
+returns trigger language plpgsql as $$
+declare
+  cur uuid;
+  d   int := 1;   -- profondeur du nœud lui-même (racine = 1)
+  h   int := 1;   -- hauteur de son sous-arbre (le nœud seul = 1)
+begin
+  if new.parent_id = new.id then
+    raise exception 'Une catégorie ne peut pas être son propre parent.'
+      using errcode = 'P0001';
+  end if;
+
+  -- Remonte la chaîne des parents : détecte un cycle et mesure la profondeur.
+  cur := new.parent_id;
+  while cur is not null loop
+    if cur = new.id then
+      raise exception 'Cycle détecté : « % » serait sous l''une de ses propres sous-catégories.', new.name
+        using errcode = 'P0001';
+    end if;
+    d := d + 1;
+    if d > 4 then
+      raise exception 'Profondeur maximale dépassée (4 niveaux).'
+        using errcode = 'P0001';
+    end if;
+    select parent_id into cur from bank_categories where id = cur;
+  end loop;
+
+  -- Un déplacement emmène le sous-arbre avec lui : vérifier la seule
+  -- profondeur du nœud déplacé laisserait passer un déplacement qui enfonce
+  -- ses descendants au-delà de la limite.
+  if tg_op = 'UPDATE' and new.parent_id is distinct from old.parent_id then
+    with recursive sub as (
+      select id, 2 as lvl from bank_categories where parent_id = new.id
+      union all
+      select c.id, s.lvl + 1 from bank_categories c join sub s on c.parent_id = s.id
+    )
+    select coalesce(max(lvl), 1) into h from sub;
+    if d + h - 1 > 4 then
+      raise exception 'Ce déplacement dépasserait 4 niveaux.'
+        using errcode = 'P0001';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists bank_categories_tree on bank_categories;
+create trigger bank_categories_tree
+  before insert or update on bank_categories
+  for each row execute function bank_categories_check_tree();
+
+drop trigger if exists bank_categories_touch on bank_categories;
+create trigger bank_categories_touch
+  before update on bank_categories
+  for each row execute function touch_modified_at();
+
+-- Affectations : une question peut être dans PLUSIEURS catégories, y compris
+-- dans des branches différentes. `cascade` des deux côtés : supprimer une
+-- catégorie ne supprime jamais une question, et réciproquement.
+create table if not exists question_categories (
+  question_id uuid references bank_questions(id)  on delete cascade,
+  category_id uuid references bank_categories(id) on delete cascade,
+  added_by    uuid references profiles(user_id)   on delete set null,
+  added_at    timestamptz default now(),
+  primary key (question_id, category_id)
+);
+create index if not exists question_categories_category_idx
+  on question_categories (category_id);
+
+-- RLS -----------------------------------------------------------------------
+-- L'arbre est la table des matières partagée de la banque : tout utilisateur
+-- authentifié le lit et l'édite (mode « wiki », communauté invite-only). Pas
+-- de `using (true)` : inutile de l'exposer au rôle anon.
+alter table bank_categories enable row level security;
+drop policy if exists "categories lecture" on bank_categories;
+create policy "categories lecture" on bank_categories for select
+  using (auth.uid() is not null);
+drop policy if exists "categories insert" on bank_categories;
+create policy "categories insert" on bank_categories for insert
+  with check (auth.uid() is not null and created_by = auth.uid());
+drop policy if exists "categories update" on bank_categories;
+create policy "categories update" on bank_categories for update
+  using (auth.uid() is not null);
+drop policy if exists "categories delete" on bank_categories;
+create policy "categories delete" on bank_categories for delete
+  using (auth.uid() is not null);
+
+-- Une affectation est visible ssi la question l'est : la sous-requête sur
+-- bank_questions est elle-même soumise à sa propre RLS, donc les brouillons
+-- d'autrui restent invisibles, classement compris.
+alter table question_categories enable row level security;
+drop policy if exists "affectations lecture" on question_categories;
+create policy "affectations lecture" on question_categories for select
+  using (exists (select 1 from bank_questions q where q.id = question_id));
+drop policy if exists "affectations insert" on question_categories;
+create policy "affectations insert" on question_categories for insert
+  with check (added_by = auth.uid()
+              and exists (select 1 from bank_questions q where q.id = question_id));
+-- On retire son propre classement, ou n'importe lequel sur ses propres questions.
+drop policy if exists "affectations delete" on question_categories;
+create policy "affectations delete" on question_categories for delete
+  using (added_by = auth.uid()
+         or exists (select 1 from bank_questions q
+                    where q.id = question_id and q.author_id = auth.uid()));

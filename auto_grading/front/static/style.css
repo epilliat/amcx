@@ -1,3 +1,61 @@
+/* ==========================================================================
+   Jetons de design
+   --------------------------------------------------------------------------
+   Le reste de la feuille écrit encore ses couleurs en dur (≈980 occurrences,
+   265 valeurs distinctes) — la migration se fait par zone, au fur et à mesure
+   qu'on retouche une partie de l'interface. La zone « éditeur de sujet »
+   (blocs, réponses, barres d'outils) est migrée ; le tableau de bord et les
+   pages de correction ne le sont pas encore.
+
+   ⚠ Ne pas remplacer les couleurs restantes en masse par recherche du code
+   hexa : la même valeur sert à des rôles différents (#fff est tantôt un fond
+   de carte, tantôt du texte sur la barre sombre). Les coupler sous un même
+   jeton créerait une dépendance fausse, pire que pas de jeton du tout.
+   ========================================================================== */
+:root {
+  /* Texte */
+  --tx-strong:   #14213d;   /* titres, valeurs mises en avant */
+  --tx:          #3a4150;   /* texte courant de l'interface */
+  --tx-soft:     #4b5563;   /* texte secondaire */
+  --tx-muted:    #6b7280;   /* libellés de champ — 4,83:1 sur blanc (AA) */
+
+  /* Surfaces */
+  --sf:          #fff;      /* fond des cartes / champs actifs */
+  --sf-sunken:   #fcfcfc;   /* fond d'une zone de saisie au repos */
+  --sf-row:      #fafafa;   /* fond d'une ligne (réponse neutre) */
+  --sf-bar:      #f5f5f5;   /* barre d'outils d'un bloc */
+  --sf-tag:      #e8e8e8;   /* pastille de type de bloc */
+
+  /* Bordures */
+  --bd:          #c3c7cf;   /* bordure de contrôle (bouton, input) */
+  --bd-soft:     #d8d8d8;   /* bordure de bloc */
+  --bd-faint:    #e0e0e0;   /* séparateurs */
+
+  /* Accent principal (bleu) */
+  --ac:          #2769d8;   /* accent — aussi « question courante » */
+  --ac-strong:   #06c;      /* accent appuyé (bloc modifié) */
+  --ac-weak:     #9bf;      /* halo / bordure douce */
+  --ac-bg:       #eef2f8;   /* fond au survol d'un contrôle */
+  --ac-bd:       #93a3bd;   /* bordure au survol d'un contrôle */
+  --focus:       #6af;      /* anneau de focus */
+
+  /* Sémantique */
+  --ok:          #2a7d2a;   /* bonne réponse */
+  --ok-bd:       #4a8;
+  --ok-bg:       #f1f9f1;
+  --bad:         #b04040;   /* mauvaise réponse */
+  --bad-bd:      #d99;
+  --bad-bg:      #fbf4f4;
+  --danger:      #c0271a;   /* action destructive */
+  --danger-bd:   #dd8b83;
+  --danger-bg:   #fdecec;
+  --warn-bd:     #e8820c;   /* barème surchargé */
+  --warn-bg:     #fff6e9;
+
+  /* Sélection dans l'aperçu PDF — même magenta que la correction */
+  --sel:         #c026a8;
+}
+
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -1144,12 +1202,65 @@ img.case.correct + .case-label { font-weight: bold; }
   background: #f6f7f9; border: 1px solid #e5e8ed; border-radius: 4px;
   position: relative;
 }
-.preview-body img {
-  display: block; width: 100%; height: auto;
-  background: #fff; cursor: zoom-in;
-}
-.preview-body img:hover { outline: 2px solid #2769d8; outline-offset: -2px; }
 .preview-hint { color: #999; font-size: 13px; line-height: 1.5; padding: 10px; }
+
+/* Pages du PDF empilées verticalement. `aspect-ratio` est posé en JS depuis
+   les dimensions réelles de la page : la hauteur du conteneur est donc juste
+   AVANT le chargement de l'image (`loading=lazy`), ce qui garde le scroll-spy
+   et le recentrage exacts sur les pages pas encore téléchargées. */
+.pv-page {
+  position: relative;
+  display: block;
+  background: #fff;
+  border-bottom: 1px solid #dfe3ea;
+  cursor: zoom-in;
+}
+.pv-page img {
+  display: block;
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+.pv-page-num {
+  position: absolute; right: 4px; bottom: 4px;
+  font-size: 10px; color: #98a0ac;
+  background: rgba(255,255,255,.75); border-radius: 3px;
+  padding: 0 4px; pointer-events: none;
+}
+
+/* Rectangle d'une question dans l'aperçu. Invisible au repos (un liseré très
+   léger au survol du panneau suffit à montrer que c'est cliquable) ; prend la
+   couleur de l'état comme le bloc correspondant dans l'éditeur :
+   bleu = question courante, magenta = question sélectionnée. */
+.pv-zone {
+  position: absolute;
+  border: 2px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: border-color .12s, background-color .12s;
+}
+.preview-body:hover .pv-zone { border-color: rgba(39,105,216,.14); }
+.pv-zone.is-current {
+  border-color: var(--ac);
+  background: rgba(39,105,216,.08);
+}
+.pv-zone.is-selected {
+  border-color: var(--sel);
+  background: rgba(192,38,168,.10);
+  box-shadow: 0 0 0 2px rgba(192,38,168,.20);
+}
+.pv-zone-tag {
+  position: absolute; top: -1px; left: -1px;
+  transform: translateY(-100%);
+  font-size: 10px; line-height: 1.4;
+  padding: 0 5px; border-radius: 3px 3px 0 0;
+  color: #fff; white-space: nowrap;
+  opacity: 0; transition: opacity .12s;
+  pointer-events: none;
+}
+.pv-zone.is-current .pv-zone-tag { background: var(--ac); opacity: 1; }
+.pv-zone.is-selected .pv-zone-tag { background: var(--sel); opacity: 1; }
 
 /* Lightbox plein écran : on embed directement le PDF (navigation native du
    navigateur, ouvert sur la page de la question via `#page=N`). */
@@ -1180,14 +1291,21 @@ img.case.correct + .case-label { font-weight: bold; }
   cursor: pointer; font-size: 13px;
 }
 .preview-zoom-close:hover { background: #f3f4f7; }
+/* Vue agrandie : mêmes pages + mêmes cadres que le panneau, en plus grand.
+   Le PDF natif reste accessible par « 📄 Voir le PDF » de la toolbar. */
 .preview-zoom-body {
-  flex: 1; min-height: 0; overflow: hidden;
-  background: #444;
+  flex: 1; min-height: 0; overflow: auto;
+  background: #4a4d52; padding: 16px 0;
 }
-.preview-zoom-body embed,
-.preview-zoom-body iframe {
-  width: 100%; height: 100%; border: none;
+.preview-zoom-body .pv-page {
+  max-width: 860px; margin: 0 auto 14px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.45);
+  border-bottom: none;
 }
+.preview-zoom-body .preview-hint { max-width: 860px; margin: 0 auto; color: #cfd3da; }
+.preview-zoom-body .pv-zone { border-width: 3px; }
+.preview-zoom-body:hover .pv-zone { border-color: rgba(255,255,255,.18); }
+.preview-zoom-body .pv-zone-tag { font-size: 12px; padding: 1px 7px; }
 
 .sujet-toolbar {
   display: flex; justify-content: space-between; align-items: center;
@@ -1233,15 +1351,17 @@ img.case.correct + .case-label { font-weight: bold; }
   border: 1px solid #bbb; border-radius: 4px;
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
-.bar-field input:focus { outline: 2px solid #9bf; border-color: #6af; }
-.bar-field.q-bound input { width: 54px; }
+.bar-field input:focus { outline: 2px solid var(--ac-weak); border-color: var(--focus); }
+.bar-field.q-bound input { width: 70px; }
 .q-max { font-size: 12px; color: #555; }
 .q-max strong { color: #222; font-size: 14px; }
 
 .sujet-field { margin-top: 12px; }
 .field-label {
   font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
-  color: #999; margin-bottom: 5px;
+  /* #999 sur blanc = 2,8:1, sous le minimum AA (4,5:1) — or ces libellés sont
+     la seule indication de ce que contient chaque champ. */
+  color: var(--tx-muted); margin-bottom: 3px; line-height: 1.25;
 }
 .md-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .md-src {
@@ -1250,7 +1370,7 @@ img.case.correct + .case-label { font-weight: bold; }
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 12.5px; line-height: 1.45; background: #fcfcfc;
 }
-.md-src:focus { outline: 2px solid #9bf; border-color: #6af; background: #fff; }
+.md-src:focus { outline: 2px solid var(--ac-weak); border-color: var(--focus); background: var(--sf); }
 .md-view {
   padding: 8px 10px; border: 1px solid #e3e3e3; border-radius: 5px;
   background: #fff; font-size: 13.5px; line-height: 1.5;
@@ -1259,29 +1379,41 @@ img.case.correct + .case-label { font-weight: bold; }
 .md-view p { margin: 0 0 6px; }
 .md-view p:last-child { margin-bottom: 0; }
 
-.sujet-answers { display: flex; flex-direction: column; gap: 8px; }
+.sujet-answers { display: flex; flex-direction: column; gap: 6px; }
+/* `position: relative` + `padding-right` : le ✕ de suppression est ancré dans
+   le coin haut droit de la ligne. Avant il vivait dans la colonne de gauche
+   (un flex column en `align-items: stretch`) et s'étirait donc sur ses 134 px
+   — un grand rectangle vide avec un minuscule ✕ perdu au milieu. */
 .md-answer {
-  display: grid; grid-template-columns: 134px 1fr; gap: 10px;
-  align-items: start; padding: 8px; border-radius: 6px;
-  border-left: 4px solid #ccc; background: #fafafa;
+  position: relative;
+  display: grid; grid-template-columns: 108px 1fr; gap: 10px;
+  align-items: start; padding: 6px 34px 6px 8px; border-radius: 6px;
+  border-left: 4px solid var(--bd); background: var(--sf-row);
 }
-.md-answer.is-correct { border-left-color: #4a8; background: #f1f9f1; }
-.md-answer.is-wrong { border-left-color: #d99; background: #fbf4f4; }
-.ans-mark { display: flex; flex-direction: column; gap: 4px; }
+.md-answer.is-correct { border-left-color: var(--ok-bd); background: var(--ok-bg); }
+.md-answer.is-wrong { border-left-color: var(--bad-bd); background: var(--bad-bg); }
+.ans-mark { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+/* « case D » et le barème sur une seule ligne : les mettre sur deux coûtait
+   18 px par réponse. */
+.ans-meta { display: flex; align-items: center; gap: 6px; min-height: 20px; }
+/* Hauteur pilotée par le contenu (`autoGrowAnswer`) : une réponse d'une ligne
+   n'occupe plus la place de deux. D'où `resize: none` — la poignée mentirait,
+   la prochaine frappe recalculerait la hauteur. */
+.ans-src { resize: none; overflow: hidden; min-height: 30px; }
 .ans-badge { font-size: 11px; font-weight: 600; }
-.is-correct .ans-badge { color: #2a7d2a; }
-.is-wrong .ans-badge { color: #b04040; }
+.is-correct .ans-badge { color: var(--ok); }
+.is-wrong .ans-badge { color: var(--bad); }
 .ans-score {
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-weight: 700; font-size: 14px;
 }
-.ans-score.sc-pos { color: #2a7d2a; }
+.ans-score.sc-pos { color: var(--ok); }
 .ans-score.sc-neg { color: #c0392b; }
 .ans-score.sc-zero { color: #999; }
 
 /* barème par réponse */
 .ans-char {
-  font-size: 10px; color: #888;
+  font-size: 10px; color: var(--tx-muted);
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 .ans-bareme {
@@ -1289,17 +1421,17 @@ img.case.correct + .case-label { font-weight: bold; }
   border: 1px solid #bbb; border-radius: 4px;
   font-family: ui-monospace, Menlo, Consolas, monospace;
 }
-.ans-bareme:focus { outline: 2px solid #9bf; border-color: #6af; }
-.ans-bareme.sc-pos { color: #2a7d2a; }
+.ans-bareme:focus { outline: 2px solid var(--ac-weak); border-color: var(--focus); }
+.ans-bareme.sc-pos { color: var(--ok); }
 .ans-bareme.sc-neg { color: #c0392b; }
 .ans-bareme.sc-zero { color: #999; }
 /* réponse dont le barème diffère du global de la question */
 .ans-bareme.is-override {
-  border-color: #e8820c; background: #fff6e9;
+  border-color: var(--warn-bd); background: var(--warn-bg);
   box-shadow: 0 0 0 2px rgba(232,130,12,.25);
 }
-.bar-grouplabel { font-size: 11px; color: #888; }
-.field-note { font-size: 11px; color: #aaa; text-transform: none; letter-spacing: 0; }
+.bar-grouplabel { font-size: 11px; color: var(--tx-muted); }
+.field-note { font-size: 11px; color: var(--tx-muted); text-transform: none; letter-spacing: 0; }
 
 .field-tag {
   font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
@@ -1332,7 +1464,7 @@ img.case.correct + .case-label { font-weight: bold; }
   font-size: 12px; color: #555; width: 190px;
   padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; background: #fafafa;
 }
-.q-tag-input:focus { outline: 2px solid #9bf; border-color: #6af; background: #fff; }
+.q-tag-input:focus { outline: 2px solid var(--ac-weak); border-color: var(--focus); background: var(--sf); }
 .q-type-select {
   font-size: 12px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px;
   background: #fff;
@@ -1472,29 +1604,36 @@ img.case.correct + .case-label { font-weight: bold; }
 
 /* --- Conteneur de bloc unifié (toutes les sortes : text / qcm / open) --- */
 .sujet-block {
-  border: 1px solid #d8d8d8; border-radius: 6px;
-  margin: 0 0 12px 0; padding: 0; background: #fff;
+  border: 1px solid var(--bd-soft); border-radius: 6px;
+  margin: 0 0 12px 0; padding: 0; background: var(--sf);
   transition: border-color 0.1s, box-shadow 0.1s;
 }
 .sujet-block.dirty {
-  border-color: #9bf; box-shadow: inset 3px 0 0 #06c;
+  border-color: var(--ac-weak); box-shadow: inset 3px 0 0 var(--ac-strong);
 }
 .sujet-block.dirty .q-dirty-dot { display: inline; }
-.sujet-block .q-dirty-dot { display: none; color: #06c; font-size: 16px; line-height: 1; }
+.sujet-block .q-dirty-dot { display: none; color: var(--ac-strong); font-size: 16px; line-height: 1; }
 .sujet-block.dragging { opacity: 0.4; }
 .sujet-block.drop-target { border-color: #0a7; box-shadow: 0 0 0 2px #0a780; }
-/* Bloc actuellement affiché dans l'aperçu PDF (panneau droit) : cadre bleu
-   distinctif pour relier visuellement la colonne d'édition et l'aperçu. */
+/* Lien éditeur ↔ aperçu PDF. Les deux mêmes couleurs servent au rectangle
+   `.pv-zone` du panneau droit, pour qu'on relie les deux d'un coup d'œil :
+     · bleu    = question courante (survol, ou traversée en scrollant le PDF)
+     · magenta = question sélectionnée au clic (code couleur de la correction,
+                 où le magenta marque déjà la case sur laquelle on travaille) */
 .sujet-block.is-preview-active {
-  border-color: #2769d8;
+  border-color: var(--ac);
   box-shadow: 0 0 0 2px rgba(39,105,216,.25);
+}
+.sujet-block.is-preview-selected {
+  border-color: var(--sel);
+  box-shadow: 0 0 0 2px rgba(192,38,168,.28);
 }
 .sujet-block[draggable="true"] { cursor: default; }
 
 .block-toolbar {
   display: flex; align-items: center; gap: 8px;
-  padding: 4px 8px; background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0; border-radius: 6px 6px 0 0;
+  padding: 4px 8px; background: var(--sf-bar);
+  border-bottom: 1px solid var(--bd-faint); border-radius: 6px 6px 0 0;
   font-size: 12px;
 }
 .block-handle {
@@ -1509,7 +1648,7 @@ img.case.correct + .case-label { font-weight: bold; }
 .block-kind-tag {
   font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
   padding: 2px 6px; border-radius: 3px;
-  background: #e8e8e8; color: #555;
+  background: var(--sf-tag); color: var(--tx-soft);
 }
 .sujet-block-text .block-kind-tag        { background: #fff4d6; color: #8a6500; }
 .sujet-block-question_qcm .block-kind-tag { background: #d6e8ff; color: #14538f; }
@@ -1519,10 +1658,10 @@ img.case.correct + .case-label { font-weight: bold; }
   background: #fffaf0;
   border-color: #e8d5a8;
 }
-.sujet-block-answerbox .ab-field {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; color: #555;
-}
+/* `.ab-field` ne porte plus que la couleur : la disposition (libellé au-dessus
+   du champ) vient de `.bar-field`, partagée avec l'en-tête des QCM et des
+   questions ouvertes — une seule grammaire de formulaire dans la page. */
+.sujet-block-answerbox .ab-field { color: var(--tx-soft); }
 .sujet-block-answerbox .ab-field input[type=text],
 .sujet-block-answerbox .ab-field select {
   font: inherit; padding: 2px 6px;
@@ -1535,14 +1674,28 @@ img.case.correct + .case-label { font-weight: bold; }
   border: 1px solid #ccc; border-radius: 3px;
 }
 .block-toolbar-spacer { flex: 1; }
+/* Boutons de la barre d'un bloc : même gabarit carré pour tous, pour qu'ils
+   se lisent comme une rangée d'icônes et pas comme des boutons de texte de
+   largeurs différentes. */
 .block-btn {
   font: inherit; font-size: 12px; cursor: pointer;
-  padding: 1px 7px; min-width: 24px;
-  background: #fff; border: 1px solid #bbb; color: #333;
-  border-radius: 3px;
+  width: 26px; height: 23px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--sf); border: 1px solid var(--bd); color: var(--tx);
+  border-radius: 4px;
+  transition: background .12s, border-color .12s, color .12s;
 }
-.block-btn:hover { background: #e8e8e8; }
-.block-btn.block-delete:hover { background: #fee; color: #c00; border-color: #c66; }
+.block-btn:hover { background: var(--ac-bg); border-color: var(--ac-bd); color: var(--tx-strong); }
+.block-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* Le ✕ est la seule action destructive de la rangée : il reste gris au repos
+   (pour ne pas crier) mais s'annonce clairement au survol. */
+.block-btn.block-delete:hover { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-bd); }
+/* ▲/▼ en butée (1er / dernier bloc) : désactivés plutôt que silencieusement
+   sans effet. */
+.block-btn:disabled {
+  opacity: .32; cursor: default;
+  background: #fff; border-color: #d5d8de; color: #8b919c;
+}
 .block-legacy-hint { font-size: 11px; color: #856404; font-style: italic; }
 
 /* --- Header / sujet-q rendu en mode bloc unifié --- */
@@ -1550,7 +1703,7 @@ img.case.correct + .case-label { font-weight: bold; }
   padding: 6px 12px; border-bottom: 1px solid #f0f0f0;
 }
 .sujet-block .sujet-field {
-  padding: 6px 12px;
+  padding: 5px 12px;
 }
 .sujet-block-text .sujet-field { padding-top: 10px; padding-bottom: 10px; }
 
@@ -1583,6 +1736,16 @@ img.case.correct + .case-label { font-weight: bold; }
   background: #fff; border: 1px solid #bbb; color: #333; border-radius: 3px;
 }
 .btn-mini:hover { background: #eef; border-color: #6ba0e0; }
+/* ✕ « supprimer cette réponse » : carré, ancré dans le coin, discret au repos
+   et pleinement visible dès que la ligne est survolée ou éditée. */
+.md-answer .btn-mini.ans-remove {
+  position: absolute; top: 7px; right: 7px;
+  width: 22px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  opacity: .45; transition: opacity .12s, background .12s, border-color .12s;
+}
+.md-answer:hover .btn-mini.ans-remove,
+.md-answer:focus-within .btn-mini.ans-remove { opacity: 1; }
 .btn-mini.ans-remove, .btn-mini.grading-remove {
   color: #c00; border-color: #ccc;
 }
@@ -1700,7 +1863,7 @@ img.case.correct + .case-label { font-weight: bold; }
 .outline-drop-below { box-shadow: inset 0 -2px 0 0 #06c; }
 
 /* --- Outline : menu contextuel (clic droit) --- */
-.outline-ctx-menu {
+.block-ctx-menu {
   position: fixed;
   z-index: 700;
   min-width: 240px;
@@ -1712,8 +1875,8 @@ img.case.correct + .case-label { font-weight: bold; }
   font-size: 13px;
   user-select: none;
 }
-.outline-ctx-menu[hidden] { display: none; }
-.outline-ctx-menu > button {
+.block-ctx-menu[hidden] { display: none; }
+.block-ctx-menu > button {
   display: flex; align-items: center; gap: 8px;
   width: 100%; border: none; background: none;
   padding: 7px 14px;
@@ -1722,21 +1885,21 @@ img.case.correct + .case-label { font-weight: bold; }
   font: inherit;
   color: #222;
 }
-.outline-ctx-menu > button:hover { background: #f0f3f7; }
-.outline-ctx-menu .ctx-icon {
+.block-ctx-menu > button:hover { background: #f0f3f7; }
+.block-ctx-menu .ctx-icon {
   display: inline-block; min-width: 22px; text-align: center;
   font-size: 10px; font-weight: 700;
   padding: 1px 4px; border-radius: 2px;
 }
-.outline-ctx-menu .ctx-sep {
+.block-ctx-menu .ctx-sep {
   border-top: 1px solid #ecedef;
   margin: 4px 0;
 }
-.outline-ctx-menu .ctx-danger {
+.block-ctx-menu .ctx-danger {
   color: #b00;
 }
-.outline-ctx-menu .ctx-danger:hover { background: #fdecec; }
-.outline-ctx-menu .ctx-danger .ctx-icon { background: none; }
+.block-ctx-menu .ctx-danger:hover { background: #fdecec; }
+.block-ctx-menu .ctx-danger .ctx-icon { background: none; }
 .outline-rename-input {
   font: inherit; font-size: 12px;
   padding: 2px 6px; margin-right: 4px;
@@ -2819,7 +2982,14 @@ img.case.correct + .case-label { font-weight: bold; }
   z-index: 1000; display: flex; align-items: center; justify-content: center;
 }
 .bank-modal-bg[hidden] { display: none; }
-.bank-modal {
+/* ⚠ Portée volontairement restreinte à `.bank-modal-bg`. Sans elle, cette
+   règle — écrite pour la CARTE « Ajouter une banque » de /banque — s'applique
+   aussi à `<div class="pm-modal bank-modal">`, l'OVERLAY plein écran de la
+   modale Banque de /sujet : son `inset: 0` était écrasé par `width: 480px`,
+   l'overlay ne faisait plus 480 px de large et la carte de 1100 px débordait
+   de 310 px à GAUCHE de l'écran (mesuré). Deux sens pour un même nom de
+   classe. */
+.bank-modal-bg .bank-modal {
   background: #fff; border-radius: 8px; width: 480px; max-width: 92vw;
   max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;
   box-shadow: 0 12px 48px rgba(0,0,0,0.25);
@@ -3607,3 +3777,187 @@ img.case.correct + .case-label { font-weight: bold; }
 .diag-summary.diag-warn { background: #fff8e1; color: #ef6c00; }
 .diag-summary.diag-fail { background: #ffebee; color: #c62828; }
 .diag-copied { margin-left: 10px; color: #2e7d32; font-size: 13px; }
+
+
+/* --------------------------------------------------------------------------
+   Déplacement d'un bloc (▲ / ▼) — l'animation est jouée en JS par
+   `animateBlockSwap()` (technique FLIP : on mesure avant/après la mutation du
+   DOM, puis on anime l'écart). Sans elle, deux blocs qui échangent leur place
+   changent instantanément et on perd de vue lequel a bougé.
+   -------------------------------------------------------------------------- */
+@keyframes blockMovedFlash {
+  0%   { box-shadow: 0 0 0 3px rgba(39,105,216,.50); }
+  70%  { box-shadow: 0 0 0 3px rgba(39,105,216,.28); }
+  100% { box-shadow: 0 0 0 3px rgba(39,105,216,0); }
+}
+.sujet-block.just-moved { animation: blockMovedFlash 700ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sujet-block.just-moved { animation: none; }
+  .pv-zone, .block-btn, .md-answer .btn-mini.ans-remove { transition: none; }
+}
+
+/* Bouton d'action dans la barre de statut (« ↩ Annuler » après suppression). */
+.status-action {
+  font: inherit; font-size: 12px; cursor: pointer;
+  margin-left: 8px; padding: 2px 10px;
+  background: #fff; border: 1px solid #7ba3d8; color: #14538f;
+  border-radius: 4px;
+}
+.status-action:hover { background: #eaf2fd; border-color: #4a83c8; }
+.status-action:disabled { opacity: .5; cursor: default; }
+
+/* Lettres de case périmées : le sujet a été édité depuis la dernière
+   compilation, donc `case X` peut décrire l'ancien ordre des réponses. On les
+   barre plutôt que de les cacher — l'information reste lisible, mais on ne
+   peut plus la prendre pour argent comptant. */
+body.letters-stale .ans-char {
+  color: #9a6b00; text-decoration: line-through; text-decoration-thickness: 1px;
+}
+body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
+.bd-copy-hint.is-stale { color: #9a6b00; font-weight: 600; }
+
+/* Bloc d'un type désactivé : lisible et supprimable, mais clairement signalé
+   comme inerte (il ne s'imprime pas). */
+.block-disabled-note {
+  margin: 0; padding: 8px 12px;
+  background: #fff6e9; border-bottom: 1px solid #f0d5aa;
+  color: #7a4f0a; font-size: 12px; line-height: 1.45;
+}
+.sujet-block-question_freeform .block-kind-tag {
+  background: #f3d7d7; color: #8a2020;
+}
+
+/* ==========================================================================
+   Arbre de catégories de la banque (static/bank_tree.js)
+   Utilisé par /banque (mode filtre + édition) et par les modales de /sujet
+   (mode filtre en lecture, mode sélection multiple).
+   ========================================================================== */
+.bank-tree { display: flex; flex-direction: column; gap: 1px; }
+
+.bank-tree .bt-row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 4px 3px 6px;
+  border-radius: 3px;
+  font-size: 12.5px; line-height: 1.3;
+  cursor: default;
+}
+.bank-tree .bt-row:hover { background: var(--ac-bg); }
+.bank-tree .bt-row.bt-selected { background: var(--ac); color: #fff; }
+.bank-tree .bt-row.bt-selected .bt-count { color: #dbe6fa; }
+
+/* Le caret est cliquable indépendamment du libellé : plier ≠ filtrer.
+   Sa boîte est réservée même sans enfant, sinon les libellés se décalent. */
+.bank-tree .bt-caret {
+  flex: 0 0 12px; width: 12px; text-align: center;
+  color: var(--tx-muted); font-size: 10px; user-select: none;
+}
+.bank-tree .bt-selected .bt-caret { color: #cfe0ff; }
+.bank-tree .bt-caret-on { cursor: pointer; }
+
+.bank-tree .bt-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+}
+.bank-tree-pick .bt-label { cursor: default; }
+.bank-tree .bt-check { flex: 0 0 auto; margin: 0 2px 0 0; }
+
+.bank-tree .bt-count {
+  flex: 0 0 auto; color: var(--tx-muted);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+
+/* Les outils d'édition n'apparaissent qu'au survol : quatre boutons visibles
+   en permanence sur chaque ligne noieraient l'arbre lui-même. */
+.bank-tree .bt-tools { display: none; gap: 1px; flex: 0 0 auto; }
+.bank-tree .bt-row:hover .bt-tools,
+.bank-tree .bt-row:focus-within .bt-tools { display: flex; }
+.bank-tree .bt-btn {
+  width: 18px; height: 18px; padding: 0;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--tx-soft);
+  font-size: 10px; line-height: 1; cursor: pointer;
+}
+.bank-tree .bt-btn:hover { background: var(--sf); border-color: var(--bd); }
+.bank-tree .bt-btn-del:hover {
+  background: var(--danger-bg); border-color: var(--danger-bd); color: var(--danger);
+}
+
+.bank-tree .bt-name-input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 1px 4px; font-size: 12.5px;
+  border: 1px solid var(--ac); border-radius: 3px;
+}
+.bank-tree .bt-row-new { background: var(--ac-bg); }
+
+.bank-tree .bt-pseudo .bt-label { font-style: italic; color: var(--tx-soft); }
+.bank-tree .bt-selected .bt-label { font-style: normal; color: #fff; }
+.bank-tree .bt-all { border-bottom: 1px solid var(--bd-faint); }
+.bank-tree .bt-none { border-top: 1px solid var(--bd-faint); }
+
+.bank-tree .bt-desc-toggle {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 6px 2px; font-size: 11px; color: var(--tx-muted);
+  cursor: pointer;
+}
+.bank-tree .bt-add-root { align-self: flex-start; margin: 4px 0 0 6px; }
+.bank-tree .bt-empty, .bank-tree .bt-err {
+  margin: 4px 6px; font-size: 11.5px; color: var(--tx-muted);
+}
+.bank-tree .bt-err { color: var(--danger); }
+
+/* Bloc « Catégories » du panneau de gauche de /banque */
+.bq-cats { border-top: 1px solid var(--bd-faint); padding-top: 6px; margin-top: 2px; }
+.bq-cats > summary {
+  font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  cursor: pointer; padding: 2px 4px; list-style: none;
+}
+.bq-cats > summary::-webkit-details-marker { display: none; }
+.bq-cats > summary::before { content: '▸ '; font-size: 9px; }
+.bq-cats[open] > summary::before { content: '▾ '; }
+.bq-cats-status { font-size: 11px; padding: 2px 6px; color: var(--tx-muted); }
+.bq-cats-status.err { color: var(--danger); }
+
+/* Chemins de catégorie : sur une ligne de liste et sur la fiche question */
+.bq-cat-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; margin: 2px 4px 2px 0;
+  border: 1px solid var(--bd-soft); border-radius: 10px;
+  background: var(--sf-row); color: var(--tx-soft); font-size: 11px;
+}
+.bq-cat-chip .bq-cat-x {
+  border: 0; background: none; padding: 0 0 0 2px;
+  color: var(--tx-muted); cursor: pointer; font-size: 11px; line-height: 1;
+}
+.bq-cat-chip .bq-cat-x:hover { color: var(--danger); }
+.bq-detail-cats { margin: 4px 0 2px; display: flex; flex-wrap: wrap; align-items: center; }
+.bq-detail-cats .bq-cats-label { font-size: 11px; color: var(--tx-muted); margin-right: 6px; }
+/* `.banque-q-row` est un flex : le chemin se pose en colonne de droite, pas
+   sur une 2e ligne. Il est borné pour ne jamais écraser le titre. */
+.banque-q-row .bq-cat-path {
+  flex: 0 1 auto; max-width: 45%;
+  font-size: 10.5px; color: var(--tx-muted); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bq-cat-picker {
+  max-height: 210px; overflow: auto; margin-top: 4px;
+  border: 1px solid var(--bd-faint); border-radius: 4px; padding: 4px;
+  background: var(--sf-sunken);
+}
+
+/* Arbre de catégories dans la modale « 📚 Banque » de /sujet : la colonne de
+   filtres est étroite et partagée avec les tags, l'arbre y est donc borné. */
+.bank-cats-tree {
+  max-height: 190px; overflow: auto;
+  border: 1px solid var(--bd-faint); border-radius: 4px;
+  background: var(--sf-sunken); padding: 3px;
+}
+
+/* Cible de dépôt d'une question glissée sur une catégorie. */
+.bank-tree .bt-row.bt-drop {
+  background: var(--ok-bg);
+  outline: 2px solid var(--ok-bd); outline-offset: -2px;
+}
+.banque-q-row[draggable="true"] { cursor: grab; }
+.banque-q-row.is-dragging { opacity: .45; }

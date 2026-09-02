@@ -92,6 +92,23 @@ _QCM_EXEMPLAIRE_CLOSE = "%%QCM-EXEMPLAIRE-CLOSE"
 # Kinds canoniques supportés (la validation amont d'`add_block` les vérifie).
 _VALID_KINDS = ("text", "question_qcm", "question_open", "question_freeform",
                 "answerbox")
+
+# Kinds qu'on sait lire, éditer et sérialiser, mais qu'on n'autorise plus à
+# CRÉER. `question_freeform` est désactivé parce qu'il ne s'imprime pas :
+# `render_block` l'enveloppe dans `\element{open}{…}`, et un `\AMCOpen` ne
+# survit pas au stockage dans ce registre de tokens (vérifié : sorti du groupe,
+# il s'imprime ; dedans, rien — pas même une erreur LaTeX). Une question libre
+# ajoutée au sujet en disparaissait donc silencieusement.
+#
+# ⚠ La liste ne filtre QUE la création : les blocs existants restent lisibles
+# et supprimables, sinon un projet qui en contient deviendrait inéditable.
+DISABLED_KINDS = frozenset({"question_freeform"})
+_DISABLED_MSG = {
+    "question_freeform": (
+        "Les questions libres (HTR) sont désactivées : elles ne s'impriment "
+        "pas dans le PDF compilé. Utilisez « zone réponse » pour un cadre "
+        "manuscrit noté par le correcteur."),
+}
 # Marqueur (commentaire LaTeX) qui transporte le `data` d'un question_freeform
 # entre deux saves : `expected_answer` / `match_mode` / `numeric_tol` / `points`
 # ne sont PAS rendus dans le PDF (le HTR les lit côté serveur). On les sérialise
@@ -364,6 +381,41 @@ def _tex_chars(copy: int = 1) -> dict:
 _OPEN_KINDS = ("question_open", "question_freeform", "answerbox")
 
 _qmap_by_copy: dict[int, dict] = {}
+
+
+def letters_stale() -> bool:
+    """True si les lettres de case affichées peuvent être fausses.
+
+    Les lettres viennent du calage compilé (`exam.xy`). Si le sujet a été édité
+    depuis la dernière compilation, elles décrivent l'ANCIEN sujet : ajouter ou
+    retirer une réponse est sans risque (`_attach_chars` exige que le nombre
+    corresponde et retire la lettre sinon), mais **réordonner** des réponses
+    laisse des lettres silencieusement fausses — elles suivent la position, pas
+    la réponse.
+    """
+    try:
+        if not EXAM_XY.exists():
+            return False          # jamais compilé : aucune lettre n'est affichée
+        src = SUBJECT_JSON if SUBJECT_JSON.exists() else EXAM_TEX
+        return src.exists() and src.stat().st_mtime > EXAM_XY.stat().st_mtime
+    except OSError:
+        return False
+
+
+def charmap_for_copy(copy: int = 1) -> dict:
+    """`{q_tex: [lettre par réponse, dans l'ordre de déclaration LaTeX]}`.
+
+    Sert au sélecteur d'exemplaire de l'onglet Sujet : avec `shuffle_answers`,
+    la lettre imprimée pour une même réponse change d'un exemplaire à l'autre.
+
+    ⚠ Indexé par **numéro de QCM** (1, 2, … dans l'ordre du document, la clé de
+    `parse_tex()`), pas par numéro AMC : `_tex_chars` est indexé par numéro AMC,
+    qui compte aussi les colonnes du code étudiant et les barèmes (piège #1 du
+    CLAUDE.md). Les questions non-QCM sont écartées.
+    """
+    raw = _tex_chars(copy=copy)
+    qcm = (amc_question_map(copy=copy).get("qcm") or {})
+    return {int(q_tex): list(raw[num]) for num, q_tex in qcm.items() if num in raw}
 
 
 def amc_question_map(copy: int = 1) -> dict:
@@ -806,7 +858,8 @@ def _parse_block_body(kind, body, attrs):
         header_re = re.compile(
             r"\s*\\noindent\s*"
             r"(?:\\fbox\{\\small\\bfseries\s+R\d+\}\\quad\s*)?"  # legacy R<n>
-            r"(?:\\textbf\{Question~?\\ref\{q-[^}]+\}\}(?:\s*[—-]+\s*)?)?"  # « Question \ref{} » + séparateur
+            # « Question 3 » (nouveau) ou « Question \ref{q-…} » (ancien) + séparateur
+            r"(?:\\textbf\{Question~?(?:\\ref\{q-[^}]+\}|\d+)\}(?:\s*[—-]+\s*)?)?"
             r"(?:\\textbf\{([^}]*)\})?"                            # titre éventuel
             r"\s*\\par(?:\\vspace\{[^}]*\})?\s*",
             re.DOTALL,
@@ -1618,19 +1671,27 @@ def _render_open_body(data: dict) -> str:
     return f"\\AMCOpen{{%\n  {open_args}\n}}{{%\n{scoring}\n}}"
 
 
-def _render_answerbox_body(data: dict, bid: str = "") -> str:
+def _render_answerbox_body(data: dict, bid: str = "", qnum: int | None = None) -> str:
     """Régénère un cadre `\\begin{answerbox}` avec titre/instructions optionnels.
 
     Format identique inline et en fin — c'est `render_subject` qui choisit où
     le placer dans le .tex en fonction de `data['placement']`.
 
     Si `data['bareme_max'] > 0`, on enregistre une `\\begin{question}` AMC dans
-    le groupe `bareme` (via `\\element{bareme}{…}`) avec un `\\label{q-<bid>}`.
-    Cette question n'apparaît PAS inline (le groupe `bareme` est inséré en
-    fin de feuille de réponses via `\\insertgroup{bareme}` dans
-    `render_answer_sheet`). Inline, on affiche « Question \\ref{q-<bid>} »
-    pour que le prof matche la zone d'écriture inline avec la ligne barème
-    sur la feuille de réponses.
+    le groupe `bareme` (via `\\element{bareme}{…}`). Cette question n'apparaît
+    PAS inline (le groupe `bareme` est inséré en fin de feuille de réponses via
+    `\\insertgroup{bareme}` dans `render_answer_sheet`). Inline, on affiche
+    « Question <qnum> » pour que le prof matche la zone d'écriture avec la
+    ligne barème de la feuille de réponses.
+
+    ⚠ `qnum` est le **numéro d'ordre du bloc parmi les questions du sujet**,
+    calculé par `render_subject`. On n'utilise **plus** `\\ref` sur un `\\label`
+    posé dans le groupe barème : la grille « N° copie » qu'injecte
+    `render_answer_sheet` dès `num_copies > 1` fait avancer le compteur LaTeX,
+    si bien que le `\\ref` se décalait de `num_copies - 1` (mesuré : « Question 5 »
+    inline contre « Question 3 » sur la feuille de réponses, pour 3 exemplaires).
+    `qnum=None` (questions mélangées, cf. `render_subject`) → aucun numéro n'est
+    affiché, seulement le titre.
     """
     height = str(data.get("height") or "5cm").strip() or "5cm"
     title = str(data.get("title") or "").strip()
@@ -1647,11 +1708,10 @@ def _render_answerbox_body(data: dict, bid: str = "") -> str:
         bareme_step = 1
 
     parts: list[str] = []
-    # Inline : « Question N » + titre. Le numéro N est récupéré via `\ref`
-    # à un `\label` posé dans la grille barème (résolu en 2 passes pdflatex).
-    # Pas de barème → juste le titre.
-    if bareme_max > 0 and bid:
-        head_parts = [f"\\textbf{{Question~\\ref{{q-{bid}}}}}"]
+    # Inline : « Question N » + titre, N = numéro d'ordre dans le sujet (cf.
+    # docstring). Pas de barème, ou numéro inconnu → juste le titre.
+    if bareme_max > 0 and bid and qnum:
+        head_parts = [f"\\textbf{{Question~{int(qnum)}}}"]
         if title:
             head_parts.append(f"\\textbf{{{title}}}")
         parts.append("\\noindent " + " — ".join(head_parts) + "\\par\\vspace{2pt}")
@@ -1678,8 +1738,6 @@ def _render_answerbox_body(data: dict, bid: str = "") -> str:
             # par notre `\AMCanswer` redéfini) ; `\scoring{score_str}` est la
             # vraie note octroyée si cette case est cochée.
             choices.append(f"  {cmd}{{{i}}}\\scoring{{{score_str}}}")
-        # `\label{q-<bid>}` après `\begin{question}` capture le numéro AMC
-        # de cette question : `\ref{q-<bid>}` inline le restitue (2 passes).
         # Le libellé sur la feuille de réponses ne contient PAS le titre (qui
         # vit inline avec l'énoncé) — juste « (sur N) » pour le contexte.
         # `\AMC@ordretrue` (via \csname pour contourner le `@` interne) :
@@ -1711,7 +1769,8 @@ def _render_answerbox_body(data: dict, bid: str = "") -> str:
     return "\n".join(parts)
 
 
-def _render_block_body(b: Block, cfg: SubjectConfig | None = None) -> str:
+def _render_block_body(b: Block, cfg: SubjectConfig | None = None,
+                       qnum: int | None = None) -> str:
     if b.kind == "text":
         return b.data.get("tex", "")
     if b.kind == "question_qcm":
@@ -1721,15 +1780,19 @@ def _render_block_body(b: Block, cfg: SubjectConfig | None = None) -> str:
     if b.kind == "question_freeform":
         return _render_freeform_body(b.data, bid=b.bid)
     if b.kind == "answerbox":
-        return _render_answerbox_body(b.data, bid=b.bid)
+        return _render_answerbox_body(b.data, bid=b.bid, qnum=qnum)
     return b.data.get("raw", "")
 
 
-def render_block(b: Block, cfg: SubjectConfig | None = None) -> str:
+def render_block(b: Block, cfg: SubjectConfig | None = None,
+                 qnum: int | None = None) -> str:
     """Sérialise un Block avec ses marqueurs `%%QCM-BLOCK`/`%%QCM-END`.
 
     Si `cfg.shuffle_questions`, les questions sont enveloppées dans
     `\\element{questions}{...}` (cf. piège A du plan).
+
+    `qnum` = numéro d'ordre du bloc parmi les questions du sujet, utilisé par
+    l'en-tête des `answerbox` (cf. `_render_answerbox_body`).
     """
     attrs = [f"bid={b.bid}", f"kind={b.kind}"]
     if b.kind == "question_qcm":
@@ -1763,7 +1826,7 @@ def render_block(b: Block, cfg: SubjectConfig | None = None) -> str:
         attrs.append(f"bank_id={b.data['_bank_id']}")
     head = "%%QCM-BLOCK " + " ".join(attrs)
     tail = f"%%QCM-END bid={b.bid}"
-    body = _render_block_body(b, cfg)
+    body = _render_block_body(b, cfg, qnum=qnum)
     if cfg and cfg.shuffle_questions and b.kind in (
             "question_qcm", "question_open", "question_freeform"):
         body = "\\element{questions}{\n" + body + "\n}"
@@ -1794,6 +1857,28 @@ def render_subject(subject: dict) -> str:
     blocks: list[Block] = subject["blocks"]
     inline_blocks = [b for b in blocks if not _is_answer_end_block(b)]
     end_blocks = [b for b in blocks if _is_answer_end_block(b)]
+    # Numéro imprimé dans l'en-tête de chaque `answerbox`, qui doit être celui
+    # qu'AMC affiche sur sa ligne de barème (cf. `_render_answerbox_body`).
+    #
+    # ⚠ Ce n'est PAS l'ordre du document. AMC numérote les questions dans
+    # l'ordre où la **feuille de réponses** les assemble :
+    #   `\formulaire` (groupe « questions » = les QCM) → `\insertgroup{open}`
+    #   → `\insertgroup{bareme}` (les answerbox).
+    # Un answerbox placé en tête du sujet reste donc numéroté APRÈS tous les
+    # QCM (vérifié : answerbox en 1er → AMC imprime « Question 3 » avec 2 QCM).
+    # Les `question_open` / `question_freeform` ne produisent aucune entrée
+    # numérotée sur la feuille (vérifié) : ils ne décalent rien.
+    #
+    # Si les questions sont mélangées, leur ordre change d'un exemplaire à
+    # l'autre : aucun numéro fixe ne peut être juste, on n'en met aucun.
+    qnums: dict[str, int] = {}
+    if not cfg.shuffle_questions:
+        n_qcm = sum(1 for b in blocks if b.kind == "question_qcm")
+        k = 0
+        for b in blocks:
+            if b.kind == "answerbox":
+                k += 1
+                qnums[b.bid] = n_qcm + k
     parts: list[str] = []
     parts.append(_QCM_PREAMBLE_START)
     parts.append(render_preamble(cfg))
@@ -1810,7 +1895,7 @@ def render_subject(subject: dict) -> str:
     if cfg.shuffle_questions:
         parts.append("\\melangegroupe{questions}")
     for b in inline_blocks:
-        parts.append(render_block(b, cfg))
+        parts.append(render_block(b, cfg, qnum=qnums.get(b.bid)))
         # Ligne vide entre 2 blocs LaTeX = paragraphe break → préserve
         # l'espacement vertical du sujet original. Sans ça, les marqueurs
         # `%%QCM-…` mangent les lignes vides entre blocs et les cases
@@ -1833,7 +1918,7 @@ def render_subject(subject: dict) -> str:
         parts.append("")
         parts.append(_QCM_ANSWER_END_BLOCKS_START)
         for b in end_blocks:
-            parts.append(render_block(b, cfg))
+            parts.append(render_block(b, cfg, qnum=qnums.get(b.bid)))
             parts.append("")
         parts.append(_QCM_ANSWER_END_BLOCKS_END)
     parts.append("}")
@@ -1948,14 +2033,25 @@ def _default_block_data(kind: str, data: dict | None) -> dict:
 
 
 def add_block(kind: str, after_bid: str | None = None,
-              data: dict | None = None) -> str:
-    """Insère un bloc après `after_bid` (None = en fin). Retourne le bid créé."""
+              data: dict | None = None, bid: str | None = None) -> str:
+    """Insère un bloc après `after_bid` (None = en fin). Retourne le bid créé.
+
+    `bid` permet de **réutiliser un identifiant** : c'est ce qui rend
+    l'annulation d'une suppression exacte. Sans lui, le bloc restauré recevrait
+    un identifiant neuf — or le bid est gravé dans le calage compilé
+    (`bareme-<bid>` d'un answerbox, marqueur `ffz<bid>` d'une question libre) :
+    l'aperçu et le HTR perdraient le lien jusqu'à la recompilation suivante.
+    Ignoré si l'identifiant est déjà pris.
+    """
     if kind not in _VALID_KINDS:
         raise ValueError(f"kind invalide: {kind}")
+    if kind in DISABLED_KINDS:
+        raise ValueError(_DISABLED_MSG.get(kind, f"kind désactivé: {kind}"))
     with _io_lock:
         subject = parse_subject()
         _require_canonical(subject)
-        bid = _gen_bid(kind)
+        taken = {b.bid for b in subject["blocks"]}
+        bid = bid if (bid and bid not in taken) else _gen_bid(kind)
         block = Block(bid=bid, kind=kind, data=_default_block_data(kind, data))
         blocks = subject["blocks"]
         if not after_bid:
@@ -2474,11 +2570,125 @@ def save_questions(updates):
 _regions = None
 
 
+def _pdf_region_hints():
+    """Indices tirés du PDF compilé pour resserrer les régions de question.
+
+    Retourne `{"lines": {page: [(y0, y1, size)]}, "body": {page: size},
+    "rects": {page: [(y0, y1, header_text)]}}` en **px 300 dpi** (repère du
+    calage), ou `{}` si le PDF est illisible.
+
+    - `lines` : lignes de texte, triées, avec la taille de police max de la
+      ligne — c'est ce qui distingue un titre de section du corps de texte.
+    - `rects` : rectangles pleine largeur (les cadres `answerbox`), avec le
+      texte de la ligne qui les précède (leur en-tête).
+    """
+    if not SUJET_PDF.exists():
+        return {}
+    try:
+        import fitz
+    except Exception:
+        return {}
+    S = 300.0 / 72.0
+    out = {"lines": {}, "body": {}, "rects": {}}
+    try:
+        doc = fitz.open(str(SUJET_PDF))
+    except Exception:
+        return {}
+    try:
+        for i in range(doc.page_count):
+            page = doc[i]
+            n = i + 1
+            lines = []
+            try:
+                for blk in page.get_text("dict")["blocks"]:
+                    for ln in blk.get("lines", []):
+                        spans = ln.get("spans", [])
+                        if not spans:
+                            continue
+                        txt = "".join(sp.get("text", "") for sp in spans).strip()
+                        if not txt:
+                            continue
+                        size = max(sp.get("size", 0.0) for sp in spans)
+                        lines.append((ln["bbox"][1] * S, ln["bbox"][3] * S, size, txt))
+            except Exception:
+                pass
+            lines.sort(key=lambda t: (t[0], t[1]))
+            out["lines"][n] = lines
+            if lines:
+                sizes = sorted(l[2] for l in lines)
+                out["body"][n] = sizes[len(sizes) // 2]
+
+            # Cadres `answerbox` : rectangles nettement plus larges que hauts,
+            # occupant la largeur du texte. Le `\champnom` de la feuille de
+            # réponses est dans une minipage étroite, il ne passe pas le filtre.
+            rects, seen = [], set()
+            try:
+                pw = float(page.rect.width) * S
+                for dr in page.get_drawings():
+                    r = dr.get("rect")
+                    if r is None:
+                        continue
+                    w, h = r.width * S, r.height * S
+                    if w < 0.60 * pw or h < 150.0:
+                        continue
+                    key = (round(r.y0 * S), round(r.y1 * S))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    y0, y1 = r.y0 * S, r.y1 * S
+                    # En-tête = ligne de texte juste au-dessus du cadre.
+                    head = ""
+                    for ly0, ly1, _sz, txt in lines:
+                        if ly1 <= y0 + 2 and y0 - ly1 < 160:
+                            head = txt
+                    rects.append((y0, y1, head))
+            except Exception:
+                pass
+            rects.sort()
+            out["rects"][n] = rects
+    finally:
+        doc.close()
+    return out
+
+
+def _statement_top(lines, body_size, y_boxes):
+    """Haut de l'énoncé d'une question dont les cases commencent à `y_boxes`.
+
+    Remonte ligne à ligne depuis la dernière ligne au-dessus des cases et
+    s'arrête au premier **saut de paragraphe** ou au premier **titre** (police
+    sensiblement plus grande). Sans ça, la région de la 1re question d'une page
+    part du haut de la feuille et avale l'en-tête et le titre du sujet.
+    """
+    above = [l for l in lines if l[1] <= y_boxes + 2.0]
+    if not above:
+        return None
+    i = len(above) - 1
+    top = above[i][0]
+    while i > 0:
+        cur, prev = above[i], above[i - 1]
+        line_h = max(1.0, cur[1] - cur[0])
+        if cur[0] - prev[1] > 1.15 * line_h:     # saut de paragraphe
+            break
+        if body_size and prev[2] > 1.15 * body_size:   # titre de section
+            break
+        i -= 1
+        top = above[i][0]
+    return top
+
+
 def pdf_regions():
     """{q: {page, x0, y0, x1, y1}} — région de chaque question dans le PDF du
-    sujet, en pixels 300 dpi. Déduite des cases (`layout_box` pages 1-7) :
-    région = de la fin des cases de la question précédente à la fin des cases
-    de la question (englobe énoncé + réponses). Layout d'origine AMC.
+    sujet, en pixels 300 dpi.
+
+    Base = les cases du calage (`layout_box`), affinée avec le texte du PDF :
+    - le haut d'une région est le haut de l'**énoncé** (cf. `_statement_top`),
+      pas la fin de la question précédente — sinon la 1re question d'une page
+      englobe l'en-tête et le titre ;
+    - le bas s'arrête avant l'énoncé de la question suivante ;
+    - pour un bloc `answerbox`, la région devient le **cadre de réponse inline**
+      (celui où l'étudiant écrit) et non la ligne de barème « Réservé
+      correcteur » de la feuille de réponses, qui est ce que désigne son
+      numéro AMC.
 
     Note : les questions QCM/AMCOpen ont leurs cases sur les pages d'énoncé,
     mais les barèmes des answerbox (`tag = bareme-<bid>`) ont leurs cases sur
@@ -2511,25 +2721,283 @@ def pdf_regions():
     by_page = {}
     for q, d in boxes.items():
         by_page.setdefault(d["page"], []).append((q, d))
-    TOP, PAD = 240.0, 70.0
+
+    hints = _pdf_region_hints()
+    TOP, PAD, LEAD = 240.0, 70.0, 14.0
     for page, items in by_page.items():
         items.sort(key=lambda it: it[1]["ymin"])
         w, h = pages.get(page, (2480.0, 3508.0))
-        prev_bottom = TOP
+        lines = hints.get("lines", {}).get(page, [])
+        body = hints.get("body", {}).get(page, 0.0)
+
+        # Haut de l'énoncé de chaque question de la page (None si indisponible).
+        tops = {}
         for q, d in items:
+            if _is_bareme(q) or not lines:
+                continue
+            t = _statement_top(lines, body, d["ymin"])
+            if t is not None and t < d["ymin"]:
+                tops[q] = t
+
+        prev_bottom = TOP
+        for idx, (q, d) in enumerate(items):
             if _is_bareme(q):
                 # Barème : on ne veut PAS hériter du `prev_bottom` (cas QCM
                 # avec énoncé ; ici il n'y a rien d'utile au-dessus). On serre
-                # la région au-tour de la ligne du barème elle-même.
+                # la région autour de la ligne du barème elle-même.
                 y0 = max(0.0, d["ymin"] - 60.0)
                 y1 = min(h, d["ymax"] + 60.0)
             else:
-                y0 = max(0.0, min(prev_bottom, d["ymin"]) - 20.0)
+                if q in tops:
+                    y0 = max(0.0, tops[q] - LEAD)
+                else:
+                    y0 = max(0.0, min(prev_bottom, d["ymin"]) - 20.0)
                 y1 = min(h, d["ymax"] + PAD)
+                # Ne pas mordre sur l'énoncé de la question suivante.
+                for nq, _nd in items[idx + 1:]:
+                    if nq in tops:
+                        y1 = min(y1, max(y0 + 20.0, tops[nq] - LEAD - 4.0))
+                        break
             _regions[q] = {"page": page, "x0": 110.0, "y0": y0,
                            "x1": w - 110.0, "y1": y1}
             prev_bottom = d["ymax"] + PAD
+
+    _apply_answerbox_regions(_regions, lay, hints, pages)
+
+    # Blocs `text` : aucune case dans le calage, on les retrouve dans le PDF
+    # par le texte (cf. `_apply_text_block_regions`). Indexés par bid.
+    try:
+        blocks = parse_subject()["blocks"]
+        qmap = amc_question_map()
+        # bid → clé de région, pour les blocs déjà localisés.
+        qcm_num = {q_tex: num for num, q_tex in (qmap.get("qcm") or {}).items()}
+        open_num = {bid: num for num, bid in (qmap.get("open") or {}).items()}
+        seq = {"n": 0}
+
+        def key_of(b):
+            if b.kind == "question_qcm":
+                seq["n"] += 1
+                return qcm_num.get(seq["n"])
+            if b.kind in _OPEN_KINDS:
+                return open_num.get(b.bid)
+            return None
+
+        _apply_text_block_regions(_regions, lay, hints, pages, blocks, key_of)
+    except Exception:
+        pass
     return _regions
+
+
+def _plain_words(tex: str) -> list[str]:
+    """Mots visibles d'un fragment LaTeX, pour le retrouver dans le PDF.
+
+    Retire commentaires, commandes et leurs options, puis la ponctuation de
+    balisage. `\\section*{Questions}` → `["questions"]`.
+    """
+    t = re.sub(r"(?<!\\)%.*", " ", tex)
+    t = re.sub(r"\\[a-zA-Z@]+\*?", " ", t)          # commandes
+    t = re.sub(r"\[[^\]]{0,40}\]", " ", t)            # options [..]
+    t = re.sub(r"[{}$&~^_\\|#]", " ", t)
+    words = re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]{3,}", t)
+    seen, out = set(), []
+    for w in words:
+        wl = w.lower()
+        if wl not in seen:
+            seen.add(wl)
+            out.append(wl)
+    return out
+
+
+def _apply_text_block_regions(regions, lay, hints, pages, blocks, key_of):
+    """Localise les blocs `text` dans le PDF, pour qu'ils aient eux aussi un
+    cadre dans l'aperçu.
+
+    Un bloc de texte libre n'a **aucune case** dans le calage : rien ne dit où
+    il atterrit. On procède en deux temps :
+
+    1. **Bande de recherche** — le bloc est forcément entre la région du bloc
+       localisé qui le précède et celle du bloc localisé qui le suit (ordre du
+       document). Ça borne la recherche à quelques centimètres de PDF.
+    2. **Appariement par le texte** — on compare les mots du LaTeX aux lignes
+       du PDF dans cette bande (`hints['lines']`), et on garde la suite de
+       lignes contiguës qui correspond le mieux.
+
+    ⚠ L'étape 2 est nécessaire : la bande du 1er bloc part du haut de la page
+    et contient l'en-tête de l'examen. Et elle ne suffit pas seule — pour
+    `\\section*{Questions}`, le mot « questions » apparaît aussi dans les
+    consignes de l'en-tête. On départage par la **proximité au bloc suivant**
+    (un intertitre introduit ce qui vient après).
+
+    Les régions des blocs texte sont indexées par **bid** (chaîne), pas par
+    numéro AMC — d'où les clés mixtes int/str de `pdf_regions()`.
+    """
+    lines_by_page = hints.get("lines") or {}
+    if not lines_by_page or not pages:
+        return
+    page_nums = sorted(pages)
+    TOP = 240.0
+
+    def bounds(key):
+        r = regions.get(key)
+        return None if not r else (r["page"], r["y0"], r["y1"])
+
+    located = [(i, key_of(b)) for i, b in enumerate(blocks)]
+    located = [(i, k) for i, k in located if k is not None and k in regions]
+
+    for i, b in enumerate(blocks):
+        if b.kind != "text":
+            continue
+        words = _plain_words(b.data.get("tex", ""))
+        if not words:
+            continue
+        prev = next((bounds(k) for j, k in reversed(located) if j < i), None)
+        nxt = next((bounds(k) for j, k in located if j > i), None)
+        if prev:
+            p0, y0 = prev[0], prev[2]
+        else:
+            p0, y0 = page_nums[0], TOP
+        if nxt:
+            p1, y1 = nxt[0], nxt[1]
+        else:
+            p1 = page_nums[-1]
+            y1 = pages.get(p1, (2480.0, 3508.0))[1]
+
+        # Lignes du PDF dans la bande.
+        cand = []
+        for pg in page_nums:
+            if pg < p0 or pg > p1:
+                continue
+            for ly0, ly1, _sz, txt in lines_by_page.get(pg, []):
+                if pg == p0 and ly1 <= y0:
+                    continue
+                if pg == p1 and ly0 >= y1:
+                    continue
+                low = txt.lower()
+                hit = sum(1 for w in words if w in low)
+                cand.append((pg, ly0, ly1, hit))
+        if not cand:
+            continue
+
+        # Suites de lignes contiguës qui correspondent.
+        need = 1 if len(words) <= 2 else max(1, len(words) // 4)
+        runs, cur = [], []
+        for pg, ly0, ly1, hit in cand:
+            if hit >= need:
+                if cur and (cur[-1][0] != pg
+                            or ly0 - cur[-1][2] > 2.5 * max(1.0, ly1 - ly0)):
+                    runs.append(cur); cur = []
+                cur.append((pg, ly0, ly1, hit))
+            elif cur:
+                runs.append(cur); cur = []
+        if cur:
+            runs.append(cur)
+        if not runs:
+            continue
+
+        # Départage : proximité au bloc suivant (un intertitre introduit ce qui
+        # suit), à défaut au précédent ; à égalité, le plus de mots trouvés.
+        if nxt:
+            anchor_pg, anchor_y = nxt[0], nxt[1]
+        elif prev:
+            anchor_pg, anchor_y = prev[0], prev[2]
+        else:
+            anchor_pg, anchor_y = p1, y1
+
+        def dist(run):
+            pg = run[-1][0]
+            edge = run[-1][2] if pg <= anchor_pg else run[0][1]
+            return (abs(pg - anchor_pg) * 1e6 + abs(edge - anchor_y),
+                    -sum(r[3] for r in run))
+
+        best = min(runs, key=dist)
+        pg = best[0][0]
+        w, h = pages.get(pg, (2480.0, 3508.0))
+        top = max(0.0, min(r[1] for r in best) - 12.0)
+        bot = min(h, max(r[2] for r in best) + 12.0)
+        regions[b.bid] = {"page": pg, "x0": 110.0, "y0": top,
+                          "x1": w - 110.0, "y1": bot}
+
+
+def _apply_answerbox_regions(regions, lay, hints, pages):
+    """Recentre la région des blocs `answerbox` sur leur cadre de réponse.
+
+    Un `answerbox` n'a pas de cases là où l'étudiant écrit : ses seules cases
+    sont la ligne de barème « Réservé correcteur », sur la feuille de réponses.
+    Son numéro AMC pointe donc vers l'évaluation, alors que ce qu'on veut
+    montrer c'est le cadre où l'étudiant répond. On le retrouve dans le PDF :
+    c'est un rectangle pleine largeur, précédé de sa ligne d'en-tête.
+
+    Appariement rect ↔ bloc par le **titre** présent dans l'en-tête ; repli sur
+    l'ordre du document pour les blocs sans titre. Les `answerbox` en
+    `placement=end` sont laissés tels quels (leur cadre est sur la feuille de
+    réponses, au milieu d'autres encadrés : appariement non fiable).
+    """
+    if not hints.get("rects"):
+        return
+    try:
+        blocks = [b for b in parse_subject()["blocks"] if b.kind == "answerbox"]
+    except Exception:
+        return
+    inline = [b for b in blocks
+              if (b.data.get("placement") or "inline") != "end"]
+    if not inline:
+        return
+    # bid → numéro AMC de son barème (c'est la clé sous laquelle l'UI
+    # référence le bloc, via `preview_q`).
+    q_of_bid = {}
+    for q, name in lay.question_names.items():
+        if name.startswith("bareme-"):
+            q_of_bid[name[len("bareme-"):]] = q
+
+    asp = lay.answer_sheet_page
+    cands = []
+    for page in sorted(hints["rects"]):
+        if page == asp or page not in pages:
+            continue
+        for y0, y1, head in hints["rects"][page]:
+            cands.append((page, y0, y1, head))
+    if not cands:
+        return
+
+    used = set()
+    assigned = {}
+    for b in inline:                       # 1re passe : appariement par titre
+        title = str(b.data.get("title") or "").strip()
+        if not title:
+            continue
+        for i, (page, y0, y1, head) in enumerate(cands):
+            if i not in used and title and title in head:
+                assigned[b.bid] = i
+                used.add(i)
+                break
+    free = [i for i in range(len(cands)) if i not in used]
+    for b in inline:                       # 2e passe : ordre du document
+        if b.bid in assigned or not free:
+            continue
+        assigned[b.bid] = free.pop(0)
+
+    for bid, i in assigned.items():
+        q = q_of_bid.get(bid)
+        if q is None:
+            continue
+        page, y0, y1, _head = cands[i]
+        w, h = pages.get(page, (2480.0, 3508.0))
+        # Inclure l'en-tête du cadre : même remontée ligne à ligne que pour un
+        # énoncé de QCM (s'arrête au saut de paragraphe, donc à la fin de la
+        # question précédente).
+        lines = hints["lines"].get(page, [])
+        top = _statement_top(lines, hints.get("body", {}).get(page, 0.0), y0)
+        if top is None or top > y0:
+            top = y0
+        top = max(0.0, top - 14.0)
+        bot = min(h, y1 + 20.0)
+        regions[q] = {"page": page, "x0": 110.0, "y0": top,
+                      "x1": w - 110.0, "y1": bot}
+        # Les régions voisines ont été calculées sans connaître ce cadre :
+        # on les empêche de mordre dessus.
+        for oq, r in regions.items():
+            if oq != q and r["page"] == page and r["y0"] < top < r["y1"]:
+                r["y1"] = max(r["y0"] + 20.0, top - 4.0)
 
 
 # --------------------------------------------------------------------------

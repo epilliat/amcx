@@ -42,10 +42,23 @@ from datetime import datetime
 from pathlib import Path
 from threading import RLock
 
+import bank_taxonomy as tx
 import config
 from sujet_store import Block, _gen_bid
 
 DEFAULT_BANK_ROOT = Path.home() / "Documents" / "AMCx-banque"
+
+# Version du cache `index.json`. Incrémentée quand la forme d'une entrée
+# change (v2 = ajout de `categories`) : `_read_or_rebuild_index` reconstruit
+# alors tout seul, sans que l'utilisateur ait rien à supprimer à la main.
+INDEX_VERSION = 2
+
+# Version du fichier `categories.json`.
+CATEGORIES_VERSION = 1
+
+# Sentinelle : distingue « paramètre absent » de `None` (= remettre à la
+# racine) dans `update_category(parent_id=…)`.
+UNSET = object()
 
 _lock = RLock()   # réentrant : update_project_stats appelle save() sous le lock
 
@@ -53,15 +66,24 @@ _lock = RLock()   # réentrant : update_project_stats appelle save() sous le loc
 def bank_root() -> Path:
     """Racine de la banque locale active.
 
-    Précédence : `config.active_bank_cfg()["path"]` (si type=local) >
-    env `AMCX_BANK_DIR` > défaut `~/Documents/AMCx-banque`.
+    Précédence : banque **explicitement configurée** (`config.banks[active]`,
+    type local) > env `AMCX_BANK_DIR` > chemin de repli > défaut
+    `~/Documents/AMCx-banque`.
+
+    ⚠ Le test « explicitement configurée » compte : sans banque dans la config,
+    `active_bank_cfg()` synthétise un repli qui porte DÉJÀ un `path`, si bien
+    que la branche `AMCX_BANK_DIR` n'était jamais atteinte — la variable
+    d'environnement documentée était sans effet dans tous les cas.
     """
     entry = config.active_bank_cfg()
-    if entry.get("type") == "local" and entry.get("path"):
+    configured = bool((config.load_config().get("banks") or {}))
+    if configured and entry.get("type") == "local" and entry.get("path"):
         return Path(str(entry["path"])).expanduser().resolve()
     env = os.environ.get("AMCX_BANK_DIR")
     if env:
         return Path(env).expanduser().resolve()
+    if entry.get("type") == "local" and entry.get("path"):
+        return Path(str(entry["path"])).expanduser().resolve()
     return DEFAULT_BANK_ROOT
 
 
@@ -132,11 +154,16 @@ def load(bank_id: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def save(question: dict) -> Path:
+def save(question: dict, *, reindex: bool = True) -> Path:
     """Écrit la question + reindex. Retourne le chemin écrit.
 
     Si un fichier existe déjà pour le même `bank_id` mais avec un slug différent
     (titre modifié), l'ancien est supprimé.
+
+    `reindex=False` saute la reconstruction de l'index — `rebuild_index()` scanne
+    TOUT le dossier, donc affecter 40 questions à une catégorie ferait 40 scans
+    complets. Les opérations en lot passent donc à False et reconstruisent une
+    seule fois à la fin. L'appelant en devient responsable.
     """
     with _lock:
         ensure_root()
@@ -148,7 +175,8 @@ def save(question: dict) -> Path:
         if old and old != new_path:
             old.unlink(missing_ok=True)
         config.write_json_atomic(new_path, question)
-        rebuild_index()
+        if reindex:
+            rebuild_index()
         return new_path
 
 
@@ -182,6 +210,7 @@ def _build_index_entries() -> list[dict]:
             "author":      q.get("author", ""),
             "modified_at": q.get("modified_at", ""),
             "source_project": q.get("source_project", ""),
+            "categories":  list(q.get("categories") or []),
             "stats":       stats_summary(q),
         })
     return out
@@ -191,7 +220,8 @@ def rebuild_index() -> dict:
     """Scan `questions/`, écrit `index.json`. Retourne l'index."""
     ensure_root()
     entries = _build_index_entries()
-    idx = {"mtime": _now(), "questions": entries}
+    idx = {"index_version": INDEX_VERSION, "mtime": _now(),
+           "questions": entries}
     config.write_json_atomic(index_path(), idx)
     return idx
 
@@ -213,6 +243,9 @@ def _read_or_rebuild_index() -> dict:
         idx = json.loads(ipath.read_text(encoding="utf-8"))
         if not isinstance(idx, dict) or "questions" not in idx:
             return rebuild_index()
+        # Index écrit par une version antérieure (sans `categories`) → rebuild.
+        if int(idx.get("index_version") or 1) != INDEX_VERSION:
+            return rebuild_index()
         if len(idx["questions"]) != len(files):
             return rebuild_index()
         return idx
@@ -226,6 +259,9 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     - `tags`   : list[str] (any-match : au moins 1 tag commun)
     - `q`      : str (substring sur title + tags, casse-insensible)
     - `author` : str (substring sur author)
+    - `category`      : str (uuid) — questions de ce nœud
+    - `descendants`   : bool (défaut True) — inclure les sous-catégories
+    - `uncategorized` : bool — questions sans aucune catégorie vivante
     """
     filters = filters or {}
     idx = _read_or_rebuild_index()
@@ -253,6 +289,27 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     if author:
         items = [q for q in items if author in (q.get("author") or "").lower()]
 
+    # Catégories. Un id syntaxiquement invalide est une erreur (il finirait
+    # interpolé dans une URL PostgREST côté online) ; un id valide mais absent
+    # de l'arbre ne l'est pas : le nœud a pu être supprimé entre-temps.
+    cat = (filters.get("category") or "").strip()
+    want_uncat = bool(filters.get("uncategorized"))
+    if cat or want_uncat:
+        nodes = load_categories()
+        if cat:
+            if not tx.is_valid_cat_id(cat):
+                raise tx.TaxonomyError(f"identifiant de catégorie invalide : {cat!r}")
+            wanted = (tx.descendants(nodes, cat)
+                      if filters.get("descendants", True) else {cat})
+            items = [q for q in items
+                     if wanted & set(q.get("categories") or [])]
+        if want_uncat:
+            # « Sans catégorie » ignore les ids morts (nœud supprimé ailleurs) :
+            # sinon une question resterait introuvable des deux côtés du filtre.
+            known = tx.index_by_id(nodes)
+            items = [q for q in items
+                     if not any(c in known for c in (q.get("categories") or []))]
+
     # Tri : récents en premier (modified_at descendant).
     items.sort(key=lambda q: q.get("modified_at", ""), reverse=True)
     return items
@@ -274,7 +331,8 @@ def _strip_private(data: dict) -> dict:
 
 
 def from_block(block, project_name: str = "", title: str = "",
-               tags: list[str] | None = None, author: str = "") -> dict:
+               tags: list[str] | None = None, author: str = "",
+               categories: list[str] | None = None) -> dict:
     """Convertit un Block (ou dict bloc) en question de banque.
 
     `block` accepte un dataclass `Block` ou un dict `{bid, kind, data}` (cas
@@ -296,6 +354,7 @@ def from_block(block, project_name: str = "", title: str = "",
         "data":           _copy.deepcopy(data),
         "title":          (title or _auto_title_from_data(kind, data) or "").strip(),
         "tags":           [t.strip() for t in (tags or []) if t and t.strip()],
+        "categories":     _dedup_cat_ids(categories),
         "author":         (author or "").strip(),
         "created_at":     now,
         "modified_at":    now,
@@ -390,3 +449,271 @@ def _short(s: str, n: int = 60) -> str:
     s = (s or "").strip().replace("\n", " ").replace("\\", "")
     s = re.sub(r"\s+", " ", s)
     return s[:n] + ("…" if len(s) > n else "")
+
+
+# --------------------------------------------------------------------------
+# Catégories (arbre partagé de la banque) — voir BANK_CATEGORIES_PLAN.md
+#
+# L'arbre vit dans `<bank>/categories.json`, à la RACINE de la banque et surtout
+# pas dans `questions/` : `_read_or_rebuild_index()` compare le nombre de
+# fichiers `questions/*.json` au nombre d'entrées de l'index, donc un intrus
+# dans ce dossier forcerait un rebuild complet à chaque lecture.
+#
+# Les affectations vivent sur la question (`categories: [uuid]`), comme `tags` :
+# un fichier de question reste autoportant (copie, git, envoi par mail).
+# --------------------------------------------------------------------------
+
+def categories_path() -> Path:
+    return bank_root() / "categories.json"
+
+
+def _dedup_cat_ids(cat_ids) -> list[str]:
+    """Filtre de forme seulement (pas d'accès à l'arbre) : ids valides, sans
+    doublon, ordre conservé. Utilisable depuis `from_block`, qui est partagé
+    avec le backend en ligne et ne doit donc faire aucune I/O locale."""
+    out: list[str] = []
+    for c in (cat_ids or []):
+        c = str(c or "")
+        if tx.is_valid_cat_id(c) and c not in out:
+            out.append(c)
+    return out
+
+
+def load_categories() -> list[dict]:
+    """Nœuds validés de l'arbre. `[]` si le fichier est absent.
+
+    ⚠ Ne crée jamais le fichier : une banque locale posée sur un partage en
+    lecture seule doit rester consultable.
+
+    Fichier illisible ou arbre invalide → il est mis de côté en
+    `categories.json.corrupt-<horodatage>` (même convention que `subject.json`)
+    et l'arbre repart vide, plutôt que de rendre la banque entière inutilisable.
+    Si la mise de côté échoue (dossier non inscriptible), on l'ignore.
+    """
+    p = categories_path()
+    if not p.exists():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        nodes = raw.get("nodes") if isinstance(raw, dict) else raw
+        return tx.validate_nodes(nodes or [])
+    except Exception:
+        try:
+            p.rename(p.with_name(p.name + ".corrupt-"
+                                 + datetime.now().strftime("%Y%m%d-%H%M%S")))
+        except OSError:
+            pass
+        return []
+
+
+def _write_categories(nodes) -> list[dict]:
+    """Valide puis écrit l'arbre. Retourne les nœuds normalisés."""
+    with _lock:
+        clean = tx.validate_nodes(nodes)
+        ensure_root()
+        config.write_json_atomic(categories_path(), {
+            "version":     CATEGORIES_VERSION,
+            "modified_at": _now(),
+            "nodes":       clean,
+        })
+        return clean
+
+
+def _members_by_category() -> dict[str, set]:
+    """`{cat_id: {bank_id, …}}` — affectations DIRECTES, lues depuis l'index."""
+    out: dict[str, set] = {}
+    for e in _read_or_rebuild_index().get("questions", []):
+        for c in e.get("categories") or []:
+            out.setdefault(c, set()).add(e.get("bank_id"))
+    return out
+
+
+def list_categories() -> list[dict]:
+    """Arbre aplati en ordre préfixe, avec `depth`, `path`, `n_direct`, `n_total`."""
+    return tx.annotate(load_categories(), _members_by_category())
+
+
+def create_category(name: str, parent_id: str | None = None,
+                    position: int | None = None) -> dict:
+    """Crée un nœud. `position=None` → placé en dernier parmi ses frères."""
+    with _lock:
+        nodes = load_categories()
+        name = tx.clean_name(name)
+        parent_id = parent_id or None
+        if parent_id is not None:
+            if not tx.is_valid_cat_id(parent_id):
+                raise tx.TaxonomyError(f"parent invalide : {parent_id!r}")
+            if parent_id not in tx.index_by_id(nodes):
+                raise KeyError(parent_id)
+            if tx.depth(nodes, parent_id) + 1 > tx.MAX_DEPTH:
+                raise tx.TaxonomyConflict(
+                    f"Profondeur maximale atteinte ({tx.MAX_DEPTH} niveaux).")
+        if tx.sibling_conflict(nodes, parent_id, name):
+            raise tx.TaxonomyConflict(
+                f"Une catégorie sœur s'appelle déjà « {name} ».")
+        if position is None:
+            sibs = tx.children_of(nodes, parent_id)
+            position = (max(int(s.get("position") or 0) for s in sibs) + 1) if sibs else 0
+        now = _now()
+        node = {"id": tx.new_cat_id(), "parent_id": parent_id, "name": name,
+                "position": int(position), "created_at": now, "modified_at": now}
+        _write_categories(nodes + [node])
+        return node
+
+
+def update_category(cat_id: str, *, name: str | None = None,
+                    parent_id=UNSET, position: int | None = None) -> dict:
+    """Renomme / déplace / réordonne. `parent_id=None` remonte à la racine,
+    `parent_id` omis ne touche pas au parent (d'où la sentinelle UNSET).
+
+    Ni le renommage ni le déplacement ne touchent aux affectations : les
+    questions référencent l'`id`, pas le nom ni le chemin.
+    """
+    with _lock:
+        nodes = load_categories()
+        by_id = tx.index_by_id(nodes)
+        if cat_id not in by_id:
+            raise KeyError(cat_id)
+        node = dict(by_id[cat_id])
+        new_name = node["name"] if name is None else tx.clean_name(name)
+        new_parent = node["parent_id"] if parent_id is UNSET else (parent_id or None)
+
+        if new_parent != node["parent_id"]:
+            if new_parent is not None:
+                if not tx.is_valid_cat_id(new_parent):
+                    raise tx.TaxonomyError(f"parent invalide : {new_parent!r}")
+                if new_parent not in by_id:
+                    raise KeyError(new_parent)
+            if tx.would_create_cycle(nodes, cat_id, new_parent):
+                raise tx.TaxonomyConflict(
+                    f"« {node['name']} » ne peut pas être déplacée sous "
+                    "elle-même ou sous l'une de ses sous-catégories.")
+            # Le sous-arbre suit : vérifier la seule profondeur du nœud déplacé
+            # laisserait passer un déplacement qui enfonce ses descendants.
+            base = 0 if new_parent is None else tx.depth(nodes, new_parent)
+            if base + tx.subtree_height(nodes, cat_id) > tx.MAX_DEPTH:
+                raise tx.TaxonomyConflict(
+                    f"Ce déplacement dépasserait {tx.MAX_DEPTH} niveaux.")
+        if tx.sibling_conflict(nodes, new_parent, new_name, exclude_id=cat_id):
+            raise tx.TaxonomyConflict(
+                f"Une catégorie sœur s'appelle déjà « {new_name} ».")
+
+        node["name"] = new_name
+        node["parent_id"] = new_parent
+        if position is not None:
+            node["position"] = int(position)
+        node["modified_at"] = _now()
+        _write_categories([node if n["id"] == cat_id else n for n in nodes])
+        return node
+
+
+def delete_category(cat_id: str, mode: str = "refuse") -> dict:
+    """Supprime un nœud. **Ne supprime jamais de question.**
+
+    - `mode="refuse"` (défaut) : 409 si le nœud a des enfants ou des questions.
+    - `mode="reparent"` : enfants et questions remontent au parent (ou perdent
+      simplement la catégorie si le nœud était une racine).
+    """
+    if mode not in ("refuse", "reparent"):
+        raise tx.TaxonomyError(f"mode inconnu : {mode!r}")
+    with _lock:
+        nodes = load_categories()
+        by_id = tx.index_by_id(nodes)
+        if cat_id not in by_id:
+            raise KeyError(cat_id)
+        node = by_id[cat_id]
+        kids = tx.children_of(nodes, cat_id)
+        members = _members_by_category().get(cat_id, set())
+        if (kids or members) and mode != "reparent":
+            raise tx.TaxonomyConflict(
+                f"« {node['name']} » contient {len(kids)} sous-catégorie(s) "
+                f"et {len(members)} question(s).")
+        parent = node["parent_id"]
+        rest = []
+        for n in nodes:
+            if n["id"] == cat_id:
+                continue
+            if n["parent_id"] == cat_id:
+                n = {**n, "parent_id": parent, "modified_at": _now()}
+            rest.append(n)
+        _write_categories(rest)
+
+        reassigned = 0
+        for bid in sorted(x for x in members if x):
+            try:
+                q = load(bid)
+            except KeyError:
+                continue
+            cats = [c for c in (q.get("categories") or []) if c != cat_id]
+            if parent and parent not in cats:
+                cats.append(parent)
+            q["categories"] = cats
+            save(q, reindex=False)      # un seul rebuild, à la fin
+            reassigned += 1
+        rebuild_index()
+        return {"removed": cat_id, "reparented_children": len(kids),
+                "reassigned_questions": reassigned}
+
+
+def get_question_categories(bank_id: str) -> list[str]:
+    """Catégories vivantes d'une question (les ids morts sont ignorés)."""
+    return tx.sanitize_assignment(load(bank_id).get("categories"),
+                                  load_categories())
+
+
+def set_question_categories(bank_id: str, cat_ids) -> list[str]:
+    """Remplace les catégories d'une question (comme `set_personal_tags`).
+
+    ⚠ Ne touche pas à `modified_at` : classer n'est pas éditer. Sinon ranger
+    une vieille question la ferait remonter en tête de la liste, qui est triée
+    par date de modification.
+    """
+    with _lock:
+        by_id = tx.index_by_id(load_categories())
+        clean: list[str] = []
+        for c in (cat_ids or []):
+            c = str(c or "")
+            if not tx.is_valid_cat_id(c):
+                raise tx.TaxonomyError(f"identifiant de catégorie invalide : {c!r}")
+            if c not in by_id:
+                raise KeyError(c)
+            if c not in clean:
+                clean.append(c)
+        q = load(bank_id)
+        q["categories"] = clean
+        save(q)
+        return clean
+
+
+def assign_category(cat_id: str, bank_ids, remove: bool = False) -> int:
+    """Ajoute (ou retire) une catégorie sur un lot de questions. Retourne le
+    nombre de questions effectivement modifiées. Un `bank_id` inconnu est
+    ignoré ; un `bank_id` mal formé est une erreur."""
+    with _lock:
+        if not tx.is_valid_cat_id(cat_id):
+            raise tx.TaxonomyError(f"identifiant de catégorie invalide : {cat_id!r}")
+        if cat_id not in tx.index_by_id(load_categories()):
+            raise KeyError(cat_id)
+        n = 0
+        for bid in (bank_ids or []):
+            if not is_valid_bank_id(bid):
+                raise ValueError(f"identifiant de question invalide : {bid!r}")
+            try:
+                q = load(bid)
+            except KeyError:
+                continue
+            cats = list(q.get("categories") or [])
+            if remove:
+                if cat_id not in cats:
+                    continue
+                cats = [c for c in cats if c != cat_id]
+            else:
+                if cat_id in cats:
+                    continue
+                cats.append(cat_id)
+            q["categories"] = cats
+            save(q, reindex=False)
+            n += 1
+        if n:
+            rebuild_index()
+        return n

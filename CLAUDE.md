@@ -481,6 +481,8 @@ pkill -f "front/server.py"
 | `/diagnostic` | Diagnostic d'installation (à envoyer au support) |
 | `/api/doctor` | GET : mêmes contrôles en JSON `{ok, checks:[{status,label,detail}]}` |
 | `/sujet/region/<q>.png` | crop PNG de la région d'une question (aperçu) |
+| `/sujet/page/<n>.png` | page entière du PDF rendue en PNG (aperçu empilé) |
+| `/sujet/regions.json` | GET : `{pages:[{n,w,h}], total_pages, regions:[{q,page,x0,y0,x1,y1}]}` — **ratios** [0,1], pour poser les cadres de question sur l'aperçu |
 | **API Sujet — édition** | |
 | `/api/sujet` | GET : `{config, header, answer_sheet, blocks, mode, available_copies, total_max, max}` |
 | `/api/sujet/save` | POST batch `{questions:[…]}` (compat legacy, redirige vers blocks/update) |
@@ -617,6 +619,36 @@ qu'il n'a pas été migré explicitement.
 - **`question_open`** : `{tag, statement, lines, points, grading_cases:[{label,
   value}]}` — `\AMCOpen` natif avec cases de notation cochables par correcteur.
 
+### ⚠ `question_freeform` est DÉSACTIVÉ à la création
+
+`sujet_store.DISABLED_KINDS` interdit d'en créer : ces blocs **ne s'impriment
+pas dans le PDF compilé**, sans la moindre erreur LaTeX. Diagnostic par
+élimination (sur un sujet à 3 exemplaires) :
+
+| test | résultat |
+|---|---|
+| `\element{open}{TEXTE-TEMOIN}` | s'imprime pages 2, 4, 6 → le groupe marche |
+| `\AMCOpen` **dans** `\element{open}{…}` | rien |
+| … enveloppé dans `\begin{question}` | rien |
+| … **hors** du groupe `open` | **s'imprime** |
+
+→ un `\AMCOpen` ne survit pas au stockage dans le registre de tokens du groupe,
+et `render_block` enveloppe tous les kinds ouverts dans `\element{open}{…}`.
+**`question_open` est donc probablement atteint de la même façon** — non
+vérifié de bout en bout.
+
+Le filtre ne porte QUE sur la création (`add_block`) : les blocs existants
+restent lisibles, éditables et supprimables, sinon un projet qui en contient
+deviendrait inéditable. Ils affichent un bandeau « ne s'imprime pas » et la
+pastille `LIBRE — DÉSACTIVÉ`. Le bouton d'ajout est retiré de la toolbar, la
+route `/api/sujet/blocks/add` répond 400 avec le motif, et `question_freeform`
+sort de `IMPORTABLE` (import d'un `.tex`) — ces blocs sont alors comptés dans
+`skipped`.
+
+Pour réactiver : corriger d'abord le rendu (ne plus passer par
+`\element{open}` ou trouver l'équivalent qui survit), puis retirer le kind de
+`DISABLED_KINDS`.
+
 Marqueurs `%%QCM-PREAMBLE` / `%%QCM-PREAMBLE-END`, `%%QCM-HEADER` / `%%QCM-HEADER-END`,
 `%%QCM-BLOCKS-START` / `%%QCM-BLOCKS-END`, `%%QCM-BLOCK bid=… kind=…` / `%%QCM-END bid=…`,
 `%%QCM-ANSWER-SHEET` / `%%QCM-ANSWER-SHEET-END`.
@@ -684,6 +716,209 @@ Marqueurs `%%QCM-PREAMBLE` / `%%QCM-PREAMBLE-END`, `%%QCM-HEADER` / `%%QCM-HEADE
 `[+ texte libre] [+ QCM choix unique] [+ QCM choix multiple] [+ question ouverte]`
 → insertion en fin de liste avec `/api/sujet/blocks/add` puis reload.
 
+### Aperçu PDF : lien bidirectionnel avec l'éditeur
+
+Le panneau droit empile **toutes** les pages du PDF (`/sujet/page/<n>.png`,
+images `loading=lazy`) et pose un rectangle absolu `.pv-zone[data-q]` par
+question, positionné en `%` depuis `/sujet/regions.json`. Deux états, **les
+mêmes couleurs des deux côtés** (bloc éditeur `.sujet-block` ↔ rectangle
+`.pv-zone`) :
+
+| État | Couleur | Classe bloc | Classe zone | Déclencheur |
+|---|---|---|---|---|
+| courant | bleu `#2769d8` | `is-preview-active` | `is-current` | survol d'un bloc, ou question traversée en scrollant l'aperçu |
+| sélectionné | magenta `#c026a8` | `is-preview-selected` | `is-selected` | clic sur un bloc **ou** sur une zone de l'aperçu |
+
+Le magenta reprend le code couleur de la correction (cases douteuses). Le
+survol prime sur le scroll ; le magenta prime sur le bleu pour une même
+question. `Escape` lève la sélection.
+
+Les **deux vues** — panneau droit et vue agrandie — rendent le même DOM et
+partagent l'état : `pvRenderInto(host, data)` construit l'une ou l'autre,
+`pvApply()` applique les classes via `document.querySelectorAll('.pv-zone')`,
+et `pvActiveHost()` désigne celle que le scroll-spy écoute (la vue agrandie
+si elle est ouverte, sinon le panneau). La vue agrandie n'embarque donc plus
+le PDF natif — il reste accessible par « 📄 Voir le PDF » de la toolbar.
+
+Sens du recentrage — asymétrique **à dessein** : on ne bouge jamais la vue
+que l'utilisateur est en train de regarder.
+- clic sur un **bloc** → l'aperçu scrolle sur la question ;
+- clic sur une **zone** → l'éditeur scrolle sur le bloc ;
+- clic dans le panneau **hors** de toute zone → vue agrandie sur cette page.
+
+**Géométrie des régions** (`sujet_store.pdf_regions`) : les cases du calage ne
+disent pas où commence un énoncé. `_pdf_region_hints()` lit donc le texte du
+PDF (PyMuPDF) et `_statement_top()` remonte ligne à ligne depuis les cases,
+s'arrêtant au premier saut de paragraphe (gap > 1,15 × hauteur de ligne) ou au
+premier titre (police > 1,15 × la médiane de la page). Sans ça la 1re question
+d'une page part du haut de la feuille et englobe l'en-tête et le titre du
+sujet. Le bas d'une région s'arrête avant l'énoncé de la suivante.
+
+`_apply_answerbox_regions()` traite le cas des `answerbox` : leurs seules
+cases sont la ligne de barème « Réservé correcteur » de la feuille de
+réponses, donc leur numéro AMC pointe vers l'évaluation et pas vers le cadre
+où l'étudiant écrit. La région est remplacée par ce cadre, retrouvé dans le
+PDF (rectangle pleine largeur ≥ 60 % de la page et ≥ 150 px de haut, plus sa
+ligne d'en-tête), apparié au bloc par son **titre** puis par ordre.
+
+`_apply_text_block_regions()` localise les blocs `text`, qui n'ont **aucune
+case** dans le calage. Deux temps : (1) le bloc est forcément entre la région
+du bloc localisé qui le précède et celle de celui qui le suit — ça borne la
+recherche ; (2) on apparie les mots du LaTeX (`_plain_words`) aux lignes du
+PDF dans cette bande. L'étape 2 est indispensable — la bande du 1er bloc part
+du haut de page et contient l'en-tête de l'examen — et ne suffit pas seule :
+pour `\section*{Questions}`, « questions » apparaît aussi dans les consignes.
+On départage par la **proximité au bloc suivant** (un intertitre introduit ce
+qui vient après). Sans correspondance, pas de région : mieux vaut aucun cadre
+qu'un cadre faux.
+
+⚠ Ces régions sont indexées par **bid** (chaîne), pas par numéro AMC — d'où
+les clés mixtes `int | str` de `pdf_regions()`. Ne pas faire
+`sorted(regions.items())` (TypeError) : trier par `(page, y0)`.
+
+`GET /sujet/regions.json` n'expose que les pages couvertes par le calage :
+avec `\exemplaire{N}` le PDF contient N copies, mais le calage ne décrit que
+la copie 1 — les autres pages n'auraient aucun cadre.
+
+Le recentrage n'a lieu que si la sélection *change* — sinon chaque clic dans
+un textarea du bloc déjà sélectionné ferait sauter l'aperçu.
+
+⚠ Pièges de ce module (état dans l'objet `PV` de `sujet.html`) :
+- **`aspect-ratio` sur `.pv-page`** posé en JS depuis les dimensions réelles
+  de la page : sans lui, les images `lazy` non chargées ont une hauteur nulle
+  et la géométrie du scroll (spy + recentrage) est fausse sur toutes les
+  pages sauf la première.
+- **`PV.syncing`** gèle le scroll-spy pendant un scroll programmatique, sinon
+  le cadre bleu clignote sur chaque question traversée.
+- **`pdf_mtime` vaut `0`** quand le PDF n'existe pas → `PDF_V === '0'`, qui est
+  *truthy* en JS. Tester `!PDF_V || PDF_V === '0'`.
+- Le panneau est masqué par défaut (`display:none` via `.no-preview`) : tous
+  les `getBoundingClientRect()` valent 0. `pvVisible()` court-circuite le spy,
+  et le toggle 👁 rejoue `pvBuild()` + recentrage au ré-affichage.
+- L'IIFE du toggle 👁 s'exécute **avant** les `const PV` / `previewBody`
+  déclarés plus bas dans le même `<script>` → l'appel à `pvBuild()` y est
+  différé en `requestAnimationFrame` (sinon ReferenceError de TDZ).
+
+### Déplacement d'un bloc (▲ / ▼) — animation et repérage
+
+Trois mécanismes, dans `sujet.html` :
+- **`animateBlockSwap(a, b, apply)`** anime l'échange en **FLIP** : mesurer les
+  positions, appliquer la mutation DOM, remesurer, repartir de l'ancienne
+  position (`translateY`) vers la nouvelle. Sans ça les deux blocs permutent
+  instantanément et on perd de vue lequel a bougé.
+- **`flashMoved(blk)`** pose la classe `just-moved` (keyframe `blockMovedFlash`)
+  sur le seul bloc déplacé — l'animation d'échange ne dit pas *lequel* des deux
+  a été déplacé quand ils se ressemblent. Appelé aussi après un drag&drop.
+- **`bringBlockIntoView(blk)`** recentre, mais **seulement si le bloc n'est pas
+  déjà bien visible** : scroller pour rien désoriente plus que ne pas scroller.
+  La bande occultée par les deux barres collantes (`.topbar` 44 px + la
+  `.sujet-toolbar` qui passe sur 2 lignes en fenêtre étroite) est **mesurée**
+  par `stickyTopOffset()`, pas codée en dur.
+
+⚠ **`layoutTop(el)` plutôt que `getBoundingClientRect()`** pour calculer la
+cible du scroll : le rect **inclut les `transform`**, donc pendant le FLIP il
+renvoie l'ANCIENNE place du bloc et le recentrage tombe à côté (constaté : le
+bloc arrivait 91 px au-dessus des barres collantes). La chaîne des `offsetTop`
+donne la position de mise en page, insensible au transform.
+
+Le focus est rendu au bouton utilisé (`focus({preventScroll: true})` — sans
+l'option, le focus annule le recentrage qu'on vient de faire), pour pouvoir
+enchaîner les déplacements. `refreshMoveButtons()` grise ▲ sur le premier bloc
+et ▼ sur le dernier ; il est appelé **depuis `buildOutline()`**, qui tourne
+après tout changement de structure — un futur appelant ne peut pas l'oublier.
+
+Tout est neutralisé sous `prefers-reduced-motion: reduce`.
+
+### Blocs d'édition — dette de design corrigée
+
+- Le ✕ « supprimer cette réponse » vivait dans `.ans-mark`, un flex column en
+  `align-items: stretch` : il s'étirait sur les 134 px de la colonne. Il est
+  désormais ancré en absolu dans le coin de `.md-answer` (d'où
+  `position: relative` + `padding-right` sur la ligne).
+- `plancher` / `plafond` : 54 px tronquaient le placeholder « aucun » → 70 px.
+- Libellés `.field-label` / `.ans-char` / `.bar-grouplabel` / `.field-note` :
+  #999–#aaa donnaient 2,3–3,5:1 sur blanc, sous le minimum AA de 4,5:1, alors
+  que ce sont les seules étiquettes des champs → `#6b7280` (4,83:1).
+- `.block-btn` : gabarit carré uniforme (26×23) pour toute la rangée, le ✕
+  destructif ne se distinguant qu'au survol.
+- **Densité** : une réponse tient sur une ligne (`rows="1"` + `autoGrowAnswer`,
+  d'où `resize: none` — une poignée de redimensionnement mentirait, la frappe
+  suivante recalculerait la hauteur), et `case D` + barème partagent une ligne
+  (`.ans-meta`). Un bloc QCM passe de **680 à 484 px** (−29 %), une ligne de
+  réponse de ~130 à **55 px**.
+  ⚠ Le markup de `addAnswer()` (sujet.html) doit rester identique à celui de
+  `_sujet_block.html` — sinon une réponse ajoutée ne se comporte pas comme les
+  autres.
+- **Une seule grammaire de formulaire** : libellé au-dessus du champ
+  (`.bar-field`), partagée par l'en-tête des QCM, des questions ouvertes et des
+  `answerbox`. `.q-horiz` ne sert plus qu'à la case à cocher « horiz », où
+  l'alignement en ligne est le bon.
+- **Suppression annulable** : `deleteBlock` capture contenu + position avant de
+  supprimer et propose « ↩ Annuler » 12 s (`setStatusAction`). Ça remplace la
+  confirmation modale — le ✕ est à 8 px de « dupliquer », et une boîte de
+  dialogue de plus ne protège personne, alors qu'un retour arrière si.
+  ⚠ L'annulation **réutilise le bid d'origine** (`POST /api/sujet/blocks/add`
+  accepte `bid`) : il est gravé dans le calage compilé (`bareme-<bid>` d'un
+  answerbox, marqueur `ffz<bid>` d'une question libre), un identifiant neuf
+  romprait le lien avec l'aperçu et le HTR jusqu'à la recompilation.
+
+### Jetons de design (`:root` en tête de style.css)
+
+Une trentaine de variables (texte, surfaces, bordures, accent, sémantique).
+**Migration par zone** : l'éditeur de sujet est migré, le tableau de bord et
+les pages de correction ne le sont pas encore (≈980 couleurs en dur au total,
+265 distinctes).
+
+⚠ **Ne pas migrer le reste en masse par recherche du code hexa** : la même
+valeur sert à des rôles différents (`#fff` est tantôt un fond de carte, tantôt
+du texte sur la barre sombre). Les coupler sous un même jeton créerait une
+dépendance fausse — pire que pas de jeton. La migration de l'éditeur a été
+vérifiée **pixel à pixel** (capture pleine page avant/après : 0 pixel de
+différence sur 3 445 880).
+
+### Sélection : la clé est le `bid`, pas le numéro AMC
+
+Le cadre magenta se pose sur **n'importe quel bloc**, y compris ceux qui n'ont
+aucune région dans le PDF : bloc ajouté depuis la dernière compilation, texte
+que la recherche n'a pas su localiser. C'est pour ça que la clé de sélection
+est le **bid** (tout bloc en a un) et non le numéro AMC (réservé aux questions
+compilées). Un bloc sans région est sélectionnable, l'aperçu indique alors
+« pas dans le PDF compilé ».
+
+`GET /sujet/regions.json` expose donc pour chaque région un champ **`bid`** en
+plus de la clé interne `q`, et les `.pv-zone` sont indexées par bid.
+
+⚠ **`server.block_preview_keys(blocks)` est l'unique implémentation** du
+mapping bloc → clé de région, partagée par la page (`data-preview-q`) et par
+`regions.json` (champ `bid`). Si les deux divergeaient, un cadre de l'aperçu
+pointerait sur le mauvais bloc. Elle s'appuie sur `layout.question_names` et
+**pas** sur `amc_question_map()`, dont la classification range la grille de
+barème d'un `answerbox` (étiquetée 0,1,2…) parmi les colonnes du code étudiant.
+
+### Sélecteur d'exemplaire et lettres de case (`case D`)
+
+Le badge `case X` d'une réponse fait correspondre son **rang dans l'ordre de
+déclaration LaTeX** à la lettre imprimée sur la feuille, lue dans le calage
+compilé. Avec `shuffle_answers`, cette lettre **change d'un exemplaire à
+l'autre** — mesuré sur un sujet à 3 exemplaires, une même réponse porte C, D
+puis B. Le sélecteur en haut de page choisit l'exemplaire affiché
+(`GET /api/sujet/charmap?copy=N`) ; il est **masqué quand il n'y a qu'un seul
+exemplaire**, et n'a aucun effet sur la correction — celle-ci lit le numéro
+d'exemplaire imprimé sur chaque copie scannée (`cv_grade.detect_copy_id`) et
+note avec la carte correspondante.
+
+⚠ `charmap_for_copy()` est indexé par **numéro de QCM** (la clé de
+`parse_tex()`), pas par numéro AMC : `_tex_chars` l'est, lui, et compte aussi
+les colonnes du code étudiant et les barèmes (piège #1).
+
+**Lettres périmées** : `sujet_store.letters_stale()` compare le mtime de
+`subject.json` à celui d'`exam.xy`. Sujet édité depuis la compilation →
+`body.letters-stale`, les lettres sont barrées et le bandeau affiche
+« ⚠ lettres périmées — recompilez ». Nécessaire parce que **réordonner** des
+réponses laisse des lettres silencieusement fausses (elles suivent la position,
+pas la réponse) ; en ajouter ou en retirer est sans risque, `_attach_chars`
+exige que le nombre corresponde et retire la lettre sinon.
+
 ### Panel outline gauche (📑 Structure)
 
 3 colonnes : `sujet-outline` (sticky 230px) | `sujet-left` (édition) | `sujet-right` (aperçu PDF 420px).
@@ -702,6 +937,28 @@ Marqueurs `%%QCM-PREAMBLE` / `%%QCM-PREAMBLE-END`, `%%QCM-HEADER` / `%%QCM-HEADE
 - **Drag&drop dans l'outline** (canonique seul) : chaque item est `draggable`,
   drop sur un autre item appelle `/api/sujet/blocks/move` + reorder DOM dans
   l'outline ET dans `#blocks-list`. Highlight `outline-drop-above/below`.
+### Menu contextuel de bloc — partagé Structure ↔ édition
+
+Un seul menu (`#blockContextMenu`, classe `.block-ctx-menu`) sert les **deux**
+colonnes : clic droit sur un item de la Structure ou sur un bloc de l'éditeur
+ouvre les mêmes 9 actions (7 insertions, `save-to-bank`, `delete`), qui
+s'appliquent au bloc visé. Le handler `onContextMenu` est branché sur
+`.sujet-outline` et sur `#blocks-list`.
+
+- **Le clic droit sélectionne le bloc visé** (cadre magenta) : sans ça, rien
+  n'indique sur quel bloc le menu va agir.
+- **Dans un champ de saisie, on ne l'intercepte pas** (`input, textarea,
+  select`) : c'est là qu'on attend couper/coller et le correcteur
+  orthographique du navigateur.
+- ⚠ Les insertions passent par `ensureSavedBeforeReload()` **avant** le
+  `reloadPage()`. Sans elle, les blocs modifiés non enregistrés étaient perdus
+  **en silence** : `reloadPage()` pose `_allowUnload = true`, ce qui neutralise
+  le garde-fou `beforeunload`. (Constaté et corrigé.)
+- ⚠ `openBankSaveModal` vit dans l'IIFE « Banque » ; le menu contextuel est
+  dans une autre. Le pont est la variable `AMCxBankSave`, déclarée au niveau du
+  script et affectée par l'IIFE Banque. Un appel direct levait un
+  `ReferenceError` et l'action « 💾 Sauver dans la banque » ne faisait rien.
+
 - **Renommage inline** (canonique seul) : double-clic sur le label → `<input>`
   pré-rempli. Enter/blur valide, Escape annule. Question QCM → modifie `tag`
   via `/api/sujet/blocks/update`. Section → modifie `\section*{X}` dans le tex
@@ -772,6 +1029,31 @@ sujet avant de migrer :
 `_build_template_tex()` construit le sujet vierge via `render_subject({…})`
 avec 4 blocs d'exemple (1 text `\section*{Questions}` + 1 QCM mult + 1 QCM single +
 1 question_open). Garantit la cohérence parser/serializer pour tout nouveau projet.
+
+### ⚠ Numérotation des `answerbox` — ne pas revenir à `\ref`
+
+L'en-tête inline d'un bloc `answerbox` affiche « Question N » pour que le
+correcteur relie le cadre de réponse à sa ligne de barème sur la feuille de
+réponses. Ce N est **calculé par `render_subject`** (dict `qnums`), pas
+récupéré par `\ref` sur un `\label` posé dans le groupe barème — la version
+`\ref` était fausse : la grille « N° copie » qu'injecte `render_answer_sheet`
+dès `num_copies > 1` fait avancer le compteur LaTeX, décalant le renvoi de
+`num_copies − 1` (mesuré : « Question 5 » inline contre « Question 3 » sur la
+feuille, pour 3 exemplaires).
+
+⚠ Le numéro n'est **pas** l'ordre du document. AMC numérote dans l'ordre où la
+**feuille de réponses** assemble les questions : `\formulaire` (groupe
+« questions » = les QCM) → `\insertgroup{open}` → `\insertgroup{bareme}`
+(les answerbox). D'où `qnum = (nombre de question_qcm) + (rang parmi les
+answerbox)`. Vérifié sur 5 configurations, dont *answerbox placé en tête du
+sujet* (AMC imprime quand même « Question 3 » avec 2 QCM) et *2 answerbox*
+(3 puis 4). Les `question_open` / `question_freeform` ne produisent aucune
+entrée numérotée sur la feuille et ne décalent donc rien.
+
+Si `shuffle_questions` est actif, l'ordre change d'un exemplaire à l'autre :
+aucun numéro fixe ne peut être juste → l'en-tête n'affiche que le titre.
+Le parseur (`_parse_block_body`) accepte les deux formes, littérale et `\ref`,
+pour relire un tex produit par une version antérieure.
 
 ### Convention de barème — piège UX
 
@@ -887,6 +1169,329 @@ projet actif) :
 **Hors-scope MVP** : page `/banque` dédiée, icône 🔗 sur les blocs liés,
 bouton « 🔄 Mettre à jour la question dans la banque » (édition d'une question
 existante), synchro git, détection de dépendances LaTeX.
+
+### Catégories hiérarchiques — étapes 0 et 1 livrées (backend local)
+
+Spec complète : [auto_grading/BANK_CATEGORIES_PLAN.md](auto_grading/BANK_CATEGORIES_PLAN.md).
+Livré : le module pur, le backend **local**, les routes, les tests. **Pas
+encore** : le backend online (étape 2, `schema.sql` + `bank_online.py`) ni
+aucune UI (étapes 3-4) — les routes répondent **501** sur une banque online.
+
+⚠ **L'identité d'une catégorie est son `id` (UUID), jamais son nom ni son
+chemin.** C'est ce qui distingue une catégorie d'un tag : renommer ou déplacer
+un nœud ne touche à aucune affectation. Un tag, lui, *est* sa chaîne — le
+renommer casserait le lien sur toutes les questions à la fois.
+
+- [bank_taxonomy.py](auto_grading/bank_taxonomy.py) — **logique pure, zéro
+  I/O**, partagée par les deux backends : liste plate `{id, parent_id, name,
+  position}` (même forme que la table Postgres), `validate_nodes`,
+  `descendants`, `would_create_cycle`, `subtree_height`, `annotate`,
+  `sanitize_assignment`. `MAX_DEPTH = 4`.
+- L'arbre local vit dans **`<bank>/categories.json`, à la racine** — surtout
+  pas dans `questions/` : `_read_or_rebuild_index()` compare le nombre de
+  fichiers `questions/*.json` au nombre d'entrées de l'index, donc un intrus
+  dans ce dossier forcerait un rebuild complet à chaque lecture.
+- Les affectations vivent **sur la question** (`categories: [uuid]`, comme
+  `tags`) : un fichier de question reste autoportant. `index.json` les recopie
+  et porte désormais un `index_version` (2) — un index d'une version
+  antérieure se reconstruit tout seul.
+- **Tags conservés, orthogonaux** : l'arbre porte la structure du cours, les
+  tags restent les facettes transversales (`facile`, `L2`). Aucune conversion
+  automatique — elle remplirait l'arbre d'étiquettes de difficulté. Promotion
+  **opt-in** d'un tag en catégorie : `POST /api/bank/categories/<id>/assign
+  {tag}`.
+- **Filtre par sous-arbre** : `?category=<uuid>` inclut les descendants par
+  défaut (`&descendants=0` pour ne prendre que le nœud), `?uncategorized=1`
+  isole les questions sans catégorie **vivante** — un id mort (nœud supprimé
+  ailleurs) ne doit pas rendre une question introuvable des deux côtés du
+  filtre.
+- **Suppression** : 409 si le nœud n'est pas vide ; `?mode=reparent` remonte
+  enfants et questions au parent. **Aucune question n'est jamais supprimée.**
+- Classer une question **ne touche ni `modified_at` ni `version`** : la liste
+  est triée par date de modification, ranger une vieille question ne doit pas
+  la faire remonter en tête. C'est aussi pourquoi les affectations ne passent
+  pas par `/api/bank/<id>/save-data`.
+- `bank.save(question, reindex=False)` pour les lots : `rebuild_index()`
+  scanne tout le dossier, donc 40 affectations feraient 40 scans complets.
+  L'appelant reconstruit une fois à la fin.
+
+Routes (`_cat_error` mappe TaxonomyConflict→**409**, TaxonomyError→400,
+KeyError→404, NotImplementedError→501) :
+
+```
+GET    /api/bank/categories              → {nodes[{id,parent_id,name,position,depth,path,n_direct,n_total}], max_depth, can_edit}
+POST   /api/bank/categories              → {name, parent_id?, position?}
+PATCH  /api/bank/categories/<id>         → {name?, parent_id?, position?}
+DELETE /api/bank/categories/<id>?mode=refuse|reparent
+POST   /api/bank/categories/<id>/assign  → {bank_ids:[…]} | {tag}, remove?
+GET|PUT /api/bank/<bank_id>/categories   → {categories:[uuid]}
+GET    /api/bank/facets                  → {all_tags, nodes, max_depth, can_edit}
+```
+
+⚠ Sur `PATCH`, **`parent_id` absent = ne pas toucher au parent**, `parent_id:
+null` = remonter à la racine. D'où la sentinelle `bank.UNSET` plutôt qu'un
+`.get()`.
+
+⚠ `n_total` est un **ensemble, pas une somme** : une question classée dans
+deux sous-catégories d'un même chapitre n'y compte qu'une fois.
+
+### Deux bugs corrigés au passage
+
+- **`AMCX_BANK_DIR` était sans effet.** `bank_root()` documentait la
+  précédence « config > env > défaut », mais `config.active_bank_cfg()`
+  synthétise un repli qui porte **déjà** un `path` quand aucune banque n'est
+  configurée — la branche env n'était donc jamais atteinte. Corrigé : le
+  chemin de la config ne l'emporte que si une banque est *explicitement*
+  configurée. C'est ce qui rend les tests isolables.
+- **`GET /api/bank` parcourait la banque deux fois** à chaque frappe (une fois
+  filtrée, une fois entière juste pour `all_tags`). Quand aucun filtre n'est
+  actif, la liste filtrée *est* la liste complète : le second parcours est
+  supprimé. Le cas filtré disparaîtra quand l'UI lira `/api/bank/facets`.
+
+### Tests
+
+Premier `tests/` du dépôt — **`unittest` de la stdlib**, pas de pytest (aucune
+dépendance ajoutée) :
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v     # 141 tests
+./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
+```
+
+[tests/fake_postgrest.py](tests/fake_postgrest.py) simule le sous-ensemble de
+PostgREST utilisé : le backend en ligne est donc testable sans instance
+Supabase — mais **ni RLS ni trigger**, d'où le harnais SQL.
+
+⚠ Chaque `setUp` **repointe `AMCX_BANK_DIR` sur sa propre banque jetable**.
+`unittest discover` importe *tous* les modules de test avant d'en exécuter un
+seul : un module qui pose la variable au niveau module la pose pour tout le
+monde, et le dernier importé gagne. (Constaté : 45 échecs selon l'ordre.)
+
+### Catégories hiérarchiques (livré : backends, UI, migration, glisser-déposer)
+
+Spec complète : [auto_grading/BANK_CATEGORIES_PLAN.md](auto_grading/BANK_CATEGORIES_PLAN.md).
+Les tags restent des **facettes transversales** (`facile`, `L2`) ; l'arbre porte
+la **structure du cours** (chapitre → sous-chapitre). Les deux coexistent, aucune
+conversion automatique.
+
+⚠ **L'identité d'une catégorie est son `id` (UUID), jamais son nom ni son
+chemin.** Renommer ou déplacer un nœud ne touche donc à aucune affectation. Un
+tag, lui, *est* sa chaîne : le renommer casserait le lien sur toutes les
+questions à la fois — c'est précisément ce que l'arbre corrige.
+
+- [bank_taxonomy.py](auto_grading/bank_taxonomy.py) — **logique pure, zéro I/O**,
+  partagée par les deux backends : validation, cycles, profondeur (`MAX_DEPTH=4`),
+  `descendants`, `annotate` (aplatit en ordre préfixe avec `depth`/`path`/
+  `n_direct`/`n_total`). L'UI ne refait aucun calcul d'arbre.
+- L'arbre local vit dans **`<bank>/categories.json`, à la racine** — surtout pas
+  dans `questions/` : `_read_or_rebuild_index()` compare le nombre de fichiers
+  `questions/*.json` au nombre d'entrées de l'index, donc un intrus dans ce
+  dossier forcerait un rebuild complet à chaque lecture. Fichier absent = arbre
+  vide, **sans écriture** (une banque sur un partage en lecture seule reste
+  consultable) ; fichier corrompu → mis de côté en `.corrupt-<horodatage>`.
+- Les affectations vivent **sur la question** (`categories: [uuid]`, comme
+  `tags`) : un fichier de question reste autoportant.
+- `n_total` est un **ensemble, pas une somme** : une question classée dans deux
+  sous-catégories d'un même chapitre n'y compte qu'une fois.
+- Un id de catégorie **mort** (nœud supprimé ailleurs) est **ignoré en lecture**
+  plutôt que de lever — sinon une question deviendrait illisible à cause d'un
+  nœud effacé dans un autre projet. Le filtre « sans catégorie » les ignore aussi.
+- `set_question_categories` ne touche **ni `modified_at` ni `version`** : classer
+  n'est pas éditer. Sinon ranger une vieille question la ferait remonter en tête
+  de la liste, triée par date de modification. Même raison pour ne pas router les
+  affectations par `/api/bank/<id>/save-data`.
+- **Suppression** : 409 par défaut si le nœud n'est pas vide ; `?mode=reparent`
+  remonte enfants et questions au parent. **Aucune question n'est jamais
+  supprimée.** Un nœud racine supprimé en `reparent` laisse ses questions sans
+  catégorie (retrouvables par `uncategorized=1`).
+- Un déplacement vérifie la profondeur du **sous-arbre entier**
+  (`subtree_height`) : contrôler la seule profondeur du nœud déplacé laisserait
+  passer un déplacement qui enfonce ses descendants.
+- `save(question, reindex=False)` pour les lots : `rebuild_index()` scanne tout
+  le dossier, donc affecter 40 questions faisait 40 scans complets. L'appelant
+  reconstruit une fois à la fin.
+
+Routes (les deux backends ; un backend sans l'API répond **501**, pas un
+`AttributeError` opaque) :
+
+| Route | Rôle |
+|---|---|
+| `GET /api/bank/categories` | `{nodes, max_depth, can_edit}` |
+| `POST /api/bank/categories` | `{name, parent_id?, position?}` |
+| `PATCH /api/bank/categories/<id>` | `{name?, parent_id?, position?}` — `parent_id` **absent** = ne pas toucher, `null` = remonter à la racine |
+| `DELETE /api/bank/categories/<id>?mode=refuse\|reparent` | 409 si non vide en `refuse` |
+| `GET\|PUT /api/bank/<bank_id>/categories` | affectations d'une question |
+| `POST /api/bank/categories/<id>/assign` | `{bank_ids}` ou `{tag}` (promotion **opt-in** d'un tag), `{remove}` |
+| `GET /api/bank/facets` | `{all_tags, nodes}` en un seul aller-retour |
+| `GET /api/bank?category=&descendants=0\|1&uncategorized=1` | filtre par sous-arbre |
+
+`_cat_error()` mappe : conflit d'invariant (cycle, profondeur, doublon entre
+frères, nœud non vide) → **409** ; id malformé → 400 ; id inconnu → 404.
+Un id de catégorie est **toujours validé par une regex UUID stricte** avant tout
+usage — `bank.is_valid_bank_id` accepte 36 caractères quelconques de
+`[0-9a-fA-F-]`, ce qui suffit contre un glob `*` mais pas pour interpoler une
+valeur dans une URL PostgREST (backend en ligne, étape 2).
+
+⚠ **`AMCX_BANK_DIR` était sans effet** : `active_bank_cfg()` synthétise un repli
+qui porte déjà un `path`, si bien que la branche env de `bank_root()` n'était
+jamais atteinte. Corrigé — l'env ne s'applique que si **aucune** banque n'est
+configurée, ce qui rend les tests isolables sans toucher aux banques réelles.
+
+#### Backend en ligne — section 8 de [supabase/schema.sql](supabase/schema.sql)
+
+Deux tables : `bank_categories` (l'arbre) et `question_categories` (la
+jonction). `bank_online.py` expose exactement la même API que `bank.py` — les
+routes ignorent sur quel backend elles tournent.
+
+- **Le trigger `bank_categories_check_tree` est la garantie**, pas le client :
+  il refuse cycle, auto-parent et profondeur > 4 même si quelqu'un tape la base
+  directement. Le client refait les mêmes contrôles uniquement pour rendre un
+  message lisible au lieu d'une erreur SQL. ⚠ La constante 4 y double
+  `bank_taxonomy.MAX_DEPTH` : les deux doivent bouger ensemble.
+- **Unicité entre frères, racine incluse** : `NULL` n'entrant dans aucune
+  contrainte d'unicité, l'index passe par `coalesce(parent_id, '000…0'::uuid)`
+  — sans ça, deux chapitres homonymes à la racine passeraient.
+- `parent_id` en **`on delete restrict`** (supprimer un nœud qui a des enfants
+  échoue côté base) ; la jonction en **`cascade`** des deux côtés : supprimer
+  une catégorie n'efface jamais une question.
+- Les affectations sont **embarquées dans le `select`** de `list_questions`
+  (`question_categories(category_id)`) : aucune requête supplémentaire.
+- ⚠ **`categories` n'est pas une colonne de `bank_questions`** : elle est dans
+  le `skip` de `_question_to_row`. L'y laisser ferait échouer tout `save()` en
+  PGRST204.
+
+⚠ **Un refus RLS sur DELETE/UPDATE ne lève pas d'erreur : il filtre les
+lignes** (vérifié sur Postgres 16). Deux conséquences, toutes deux traitées :
+retirer un classement posé par un tiers est un **no-op silencieux**, donc
+`set_question_categories` se comporte en *fusion* et non en remplacement dès
+qu'une autre personne a classé la question ; et `delete_category(mode=
+"reparent")` **perd** les affectations d'autrui, que le `cascade` efface sans
+qu'on ait pu les recréer sur le parent. D'où : ces deux fonctions **relisent
+l'état réel** et retournent ce qui s'est vraiment passé, jamais ce qui avait
+été demandé. L'UI doit afficher ça, et le dire dans la confirmation de
+suppression.
+
+**Le harnais SQL** ([tests/sql/run.sh](tests/sql/run.sh), docker requis)
+applique la seule section 8 sur un prélude minimal
+([tests/sql/00_stub.sql](tests/sql/00_stub.sql) : `auth.uid()`, `profiles`,
+`bank_questions`), vérifie l'idempotence du schéma, puis le trigger, l'index
+d'unicité, les FK, le cascade et les policies **avec deux utilisateurs**. Rien
+de tout ça n'est simulable côté Python.
+
+#### UI — [static/bank_tree.js](auto_grading/front/static/bank_tree.js)
+
+Composant unique `AMCxBankTree`, deux modes : `filter` (navigation + édition,
+panneau gauche de `/banque`) et `pick` (cases à cocher, sélecteur de la fiche
+question). Il sera réutilisé tel quel dans les modales de `/sujet` (étape 4) —
+d'où le fichier partagé plutôt qu'une troisième copie de widget (cf. la dette
+des widgets Phase B dupliqués entre `banque.html` et `sujet.html`).
+
+⚠ **Aucun `innerHTML` dans ce fichier, nulle part.** Les noms de catégories
+viennent d'une banque potentiellement partagée : c'est de l'entrée non fiable,
+tout passe par `createElement` + `textContent`. Vérifié : une catégorie nommée
+`<script>alert(1)</script>` s'affiche littéralement et n'injecte aucun nœud
+`<script>`.
+
+- Le composant **ne recalcule aucune structure d'arbre** : le serveur renvoie
+  déjà `depth`, `path`, `n_direct`, `n_total`. Il ne fait que replier, indenter
+  et émettre les filtres.
+- **Caret et libellé sont deux zones de clic distinctes** : plier n'est pas
+  filtrer. La boîte du caret est réservée même sans enfant, sinon les libellés
+  se décalent d'une ligne à l'autre.
+- **Repli persisté** dans `localStorage`, avec une clé **par banque**
+  (`amcx-bank-tree-<slug>`) — sans ça, deux banques partageraient leur état de
+  repli. Le slug n'étant connu qu'après `/api/bank/auth-status`, la clé est
+  reposée après coup (`setStorageKey`).
+- **Arbre vide** : ni « Sans catégorie », ni case de portée, ni « Toutes » — ils
+  ne peuvent rien filtrer. Un message d'amorçage et le bouton de création.
+- Les outils d'édition (`+ ▲ ▼ ✕`) n'apparaissent **qu'au survol** de la ligne :
+  quatre boutons permanents par ligne noieraient l'arbre.
+- La **suppression d'un nœud non vide** passe par un `confirm` qui dit ce que le
+  nœud contient, que rien ne sera supprimé, et qu'en ligne les classements
+  d'autrui seront perdus.
+- ⚠ La fiche question affiche **l'état renvoyé par le serveur**, jamais celui
+  demandé (cf. la fusion silencieuse en ligne ci-dessus).
+- ⚠ `.banque-q-row` est un conteneur **flex** : le chemin de catégorie s'y pose
+  en colonne de droite, pas sur une seconde ligne (`display:block` n'y change
+  rien). Il est borné à 45 % pour ne pas écraser le titre.
+
+Non fait, et pas dans le périmètre demandé : la facette « tags publics » de
+`/banque` (elle n'existe que dans la modale de `/sujet`).
+
+#### UI — modales de `/sujet`
+
+Le **même** `AMCxBankTree` sert les deux modales, sans une ligne de widget
+dupliquée :
+
+- **« 📚 Banque »** : arbre en mode `filter`, `canEdit: false` — on ne remanie
+  pas l'arbre d'une banque depuis un sujet, ça se fait dans l'onglet Banque. Il
+  se combine en ET avec la recherche, le type et les tags. Les cartes affichent
+  le chemin de catégorie, masqué quand on filtre déjà dessus.
+- **« 💾 Sauver dans la banque »** : arbre en mode `pick`, **pré-coché sur les
+  dernières catégories utilisées** (`localStorage`, clé par banque) — classer
+  dix questions du même chapitre à la suite ne doit pas demander dix fois les
+  mêmes clics. Le message de confirmation nomme les catégories retenues.
+- Banque sans aucune catégorie : le sélecteur est masqué et remplacé par une
+  phrase qui renvoie vers l'onglet Banque.
+
+⚠ **`setPicked` filtre sur l'arbre courant.** Les ids pré-cochés viennent d'un
+`localStorage` qui peut être plus vieux que l'arbre : garder l'id d'une
+catégorie supprimée entre-temps ferait échouer l'enregistrement en 404. Vérifié
+avec un id fantôme : la question part sans catégorie, sans erreur.
+
+⚠ **Bug antérieur corrigé au passage — deux sens pour `.bank-modal`.** La règle
+`.bank-modal { width: 480px }` visait la *carte* « Ajouter une banque » de
+`/banque`, mais s'appliquait aussi à `<div class="pm-modal bank-modal">`,
+l'*overlay plein écran* de la modale Banque de `/sujet` : son `inset: 0` était
+écrasé, l'overlay tombait à 480 px et la carte de 1100 px débordait de **310 px
+à gauche de l'écran** (mesuré avant/après). La règle est désormais limitée à
+`.bank-modal-bg .bank-modal`.
+
+#### Migration locale → en ligne
+
+[bank_migrate.py](auto_grading/bank_migrate.py) monte l'arbre **avant** les
+questions (étape 0/3), en **conservant les identifiants** : les ids locaux sont
+déjà des UUID v4, donc ils se transposent tels quels et les affectations des
+questions migrées pointent sur les bons nœuds — **aucune table de
+correspondance n'est nécessaire pour les catégories**, contrairement aux
+questions dont l'id local ne fait que 8 hex. L'ordre préfixe d'`annotate` place
+chaque parent avant ses enfants, ce que la clé étrangère exige.
+
+⚠ Un **conflit de nom entre sœurs** (l'arbre en ligne contient déjà un chapitre
+du même nom, créé indépendamment) n'est **pas** fusionné : il est signalé, à
+l'humain de trancher. Fusionner deux chapitres homonymes en silence mélangerait
+deux cours.
+
+#### Glisser-déposer et facettes
+
+- Glisser une ligne de question sur un nœud de `/banque` l'**ajoute** à cette
+  catégorie ; ça ne la retire d'aucune autre — c'est le modèle. Le retrait passe
+  par le ✕ d'une chip sur la fiche. Les catégories courantes sont **relues avant
+  écriture** : l'état affiché peut dater, et un `PUT` bâti dessus perdrait les
+  autres appartenances.
+- Le type MIME du transfert est `application/x-amcx-bank-id`, pas `text/plain` :
+  pendant `dragover`, `getData` est interdit et seuls les **types** sont
+  lisibles — c'est la seule façon de savoir si le survol nous concerne avant
+  d'accepter le dépôt.
+- ⚠ **`GET /api/bank` ne renvoie plus `all_tags`.** Le calculer imposait un
+  **second parcours complet** de la banque à chaque frappe dans la recherche
+  (deux requêtes HTTP entières en banque en ligne). Les facettes — tags publics
+  *et* arbre — sont servies une fois par ouverture de modale par
+  `GET /api/bank/facets`, et `AMCxBankTree.load(payload)` consomme cette même
+  réponse au lieu d'aller rechercher l'arbre. Effet de bord voulu : la liste
+  des tags ne se réduit plus au fil du filtrage, elle décrit la banque et non
+  le résultat courant.
+
+**Volontairement non fait** : la vue SQL `category_counts`. Les comptages sont
+agrégés côté client à partir d'une seule requête sur `question_categories` —
+avec des banques de quelques centaines de questions, une vue `security_invoker`
+serait de la complexité sans gain mesurable. À revoir si une banque dépasse le
+plafond de 500 lignes de `list_questions`, qui mordra bien avant.
+
+⚠ **Après toute édition de template ou de statique, redémarrer le serveur** :
+Jinja est en `auto_reload=False` (debug off) et met `banque.html` en cache dès
+le premier rendu. Constaté en testant : un serveur lancé avant l'ajout de
+l'arbre servait indéfiniment l'ancienne page, arbre absent et aucune erreur.
 
 ### Backend en ligne (Supabase) — multi-user
 

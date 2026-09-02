@@ -40,6 +40,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+import bank_taxonomy as tx  # noqa: E402
 import config  # noqa: E402
 
 # Helpers communs réutilisés depuis bank.py (transformations de Block).
@@ -166,7 +167,8 @@ def _request(method: str, path: str, *, body: Any = None, params: dict | None = 
 # CRUD questions
 # --------------------------------------------------------------------------
 
-_SELECT_WITH_AUTHOR = "*,author_profile:profiles!author_id(display_name,institution)"
+_SELECT_WITH_AUTHOR = ("*,author_profile:profiles!author_id(display_name,institution)"
+                       ",question_categories(category_id)")
 
 
 def load(bank_id: str) -> dict:
@@ -266,6 +268,17 @@ def list_questions(filters: dict | None = None) -> list[dict]:
         ids = {p["question_id"] for p in ptags}
         restrict_ids = ids if restrict_ids is None else (restrict_ids & ids)
 
+    # Catégories : restreint aux questions du sous-arbre demandé.
+    cat = (filters.get("category") or "").strip()
+    if cat:
+        if not tx.is_valid_cat_id(cat):
+            raise tx.TaxonomyError(f"identifiant de catégorie invalide : {cat!r}")
+        nodes = _raw_categories()
+        wanted = (tx.descendants(nodes, cat)
+                  if filters.get("descendants", True) else {cat})
+        ids = _questions_in_categories(wanted)
+        restrict_ids = ids if restrict_ids is None else (restrict_ids & ids)
+
     if restrict_ids is not None:
         if not restrict_ids:
             return []  # filtre exclusif sans match
@@ -281,7 +294,13 @@ def list_questions(filters: dict | None = None) -> list[dict]:
         for r in rows:
             r["stats"] = {"by_project": evals_by_q.get(r["id"], {})}
 
-    return [_normalize_question(r) for r in rows]
+    out = [_normalize_question(r) for r in rows]
+    # « Sans catégorie » : filtre d'exclusion, donc côté client — `restrict_ids`
+    # ne sait qu'inclure. Les affectations sont déjà embarquées, aucune requête
+    # supplémentaire.
+    if filters.get("uncategorized"):
+        out = [q for q in out if not q.get("categories")]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -369,6 +388,13 @@ def _normalize_question(row: dict) -> dict:
     prof = out.pop("author_profile", None) or {}
     out["author"] = prof.get("display_name") or out.get("author") or ""
     out["author_institution"] = prof.get("institution") or ""
+    # Jonction embarquée → `categories: [uuid]`, même forme qu'en local.
+    # Absente des réponses d'insert/update (le `select` ne s'y applique pas).
+    join = out.pop("question_categories", None)
+    if join is not None:
+        out["categories"] = [r["category_id"] for r in join if r.get("category_id")]
+    else:
+        out.setdefault("categories", [])
     # L'UI attend `stats.by_project` ; si pas encore greffé, default vide.
     out.setdefault("stats", {"by_project": {}})
     return out
@@ -383,7 +409,10 @@ def _question_to_row(question: dict) -> dict:
     (résultat de JOIN).
     """
     skip = {"bank_id", "id", "stats", "created_at", "modified_at",
-            "author", "author_institution", "author_profile"}
+            "author", "author_institution", "author_profile",
+            # Affectations : table de jonction `question_categories`, pas une
+            # colonne. Les laisser passer ferait échouer l'insert en PGRST204.
+            "categories", "question_categories"}
     return {k: v for k, v in question.items() if k not in skip}
 
 
@@ -600,3 +629,331 @@ def update_question_content(bank_id: str, data: dict, *,
     if not rows:
         raise BankNotFoundError(bank_id)
     return _normalize_question(rows[0])
+
+
+# --------------------------------------------------------------------------
+# Catégories hiérarchiques — parité avec bank.py (voir BANK_CATEGORIES_PLAN.md)
+#
+# L'arbre est un objet PARTAGÉ de la banque (tables `bank_categories` +
+# `question_categories`), pas une vue par utilisateur : la vue perso reste
+# `question_personal_tags`. Les invariants (cycle, profondeur, unicité entre
+# frères) sont garantis par le trigger `bank_categories_check_tree` ; on les
+# vérifie AUSSI ici pour rendre un message lisible plutôt qu'une erreur SQL.
+# --------------------------------------------------------------------------
+
+_CAT_SELECT = "id,parent_id,name,position,created_by,created_at,modified_at"
+
+
+def _raw_categories() -> list[dict]:
+    """Nœuds bruts de l'arbre (validés côté client)."""
+    rows = _request("GET", "/rest/v1/bank_categories",
+                    params={"select": _CAT_SELECT, "order": "position.asc,name.asc",
+                            "limit": "2000"}) or []
+    return tx.validate_nodes(rows)
+
+
+def _in_list(ids) -> str:
+    """`in.("a","b")` — les ids sont des UUID déjà validés, mais on les cite
+    quand même : c'est la seule forme sûre pour un filtre PostgREST."""
+    return "in.(" + ",".join(f'"{i}"' for i in sorted(ids)) + ")"
+
+
+def _questions_in_categories(cat_ids) -> set:
+    """Ids des questions affectées à l'une de ces catégories (RLS : seulement
+    celles que l'utilisateur peut voir)."""
+    if not cat_ids:
+        return set()
+    rows = _request("GET", "/rest/v1/question_categories",
+                    params={"select": "question_id",
+                            "category_id": _in_list(cat_ids),
+                            "limit": "10000"}) or []
+    return {r["question_id"] for r in rows}
+
+
+def _category_members() -> dict:
+    """`{cat_id: {question_id, …}}` pour les compteurs de l'arbre."""
+    rows = _request("GET", "/rest/v1/question_categories",
+                    params={"select": "category_id,question_id",
+                            "limit": "10000"}) or []
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["category_id"], set()).add(r["question_id"])
+    return out
+
+
+def list_categories() -> list[dict]:
+    """Arbre aplati en ordre préfixe (`depth`, `path`, `n_direct`, `n_total`)."""
+    return tx.annotate(_raw_categories(), _category_members())
+
+
+def create_category(name: str, parent_id: str | None = None,
+                    position: int | None = None) -> dict:
+    """Crée un nœud. `position=None` → en dernier parmi ses frères."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    name = tx.clean_name(name)
+    parent_id = parent_id or None
+    nodes = _raw_categories()
+    if parent_id is not None:
+        if not tx.is_valid_cat_id(parent_id):
+            raise tx.TaxonomyError(f"parent invalide : {parent_id!r}")
+        if parent_id not in tx.index_by_id(nodes):
+            raise BankNotFoundError(parent_id)
+        if tx.depth(nodes, parent_id) + 1 > tx.MAX_DEPTH:
+            raise tx.TaxonomyConflict(
+                f"Profondeur maximale atteinte ({tx.MAX_DEPTH} niveaux).")
+    if tx.sibling_conflict(nodes, parent_id, name):
+        raise tx.TaxonomyConflict(f"Une catégorie sœur s'appelle déjà « {name} ».")
+    if position is None:
+        sibs = tx.children_of(nodes, parent_id)
+        position = (max(int(s.get("position") or 0) for s in sibs) + 1) if sibs else 0
+    rows = _request("POST", "/rest/v1/bank_categories",
+                    body={"name": name, "parent_id": parent_id,
+                          "position": int(position), "created_by": uid},
+                    extra_headers={"Prefer": "return=representation"})
+    if not rows:
+        raise BankNetworkError("Réponse vide à la création de catégorie.")
+    return rows[0]
+
+
+def update_category(cat_id: str, *, name: str | None = None,
+                    parent_id=tx, position: int | None = None) -> dict:
+    """Renomme / déplace / réordonne.
+
+    ⚠ La sentinelle par défaut de `parent_id` est le module `tx` lui-même —
+    n'importe quelle valeur qu'un appelant ne passerait jamais. `None` doit
+    rester utilisable pour dire « remonter à la racine », donc il ne peut pas
+    servir de « paramètre absent ».
+
+    Ni le renommage ni le déplacement ne touchent aux affectations : elles
+    référencent l'`id`.
+    """
+    nodes = _raw_categories()
+    by_id = tx.index_by_id(nodes)
+    if cat_id not in by_id:
+        raise BankNotFoundError(cat_id)
+    node = by_id[cat_id]
+    new_name = node["name"] if name is None else tx.clean_name(name)
+    new_parent = node["parent_id"] if parent_id is tx else (parent_id or None)
+
+    payload: dict = {}
+    if new_name != node["name"]:
+        payload["name"] = new_name
+    if new_parent != node["parent_id"]:
+        if new_parent is not None:
+            if not tx.is_valid_cat_id(new_parent):
+                raise tx.TaxonomyError(f"parent invalide : {new_parent!r}")
+            if new_parent not in by_id:
+                raise BankNotFoundError(new_parent)
+        if tx.would_create_cycle(nodes, cat_id, new_parent):
+            raise tx.TaxonomyConflict(
+                f"« {node['name']} » ne peut pas être déplacée sous elle-même "
+                "ou sous l'une de ses sous-catégories.")
+        base = 0 if new_parent is None else tx.depth(nodes, new_parent)
+        if base + tx.subtree_height(nodes, cat_id) > tx.MAX_DEPTH:
+            raise tx.TaxonomyConflict(
+                f"Ce déplacement dépasserait {tx.MAX_DEPTH} niveaux.")
+        payload["parent_id"] = new_parent
+    if position is not None:
+        payload["position"] = int(position)
+    if tx.sibling_conflict(nodes, new_parent, new_name, exclude_id=cat_id):
+        raise tx.TaxonomyConflict(f"Une catégorie sœur s'appelle déjà « {new_name} ».")
+    if not payload:
+        return node
+    rows = _request("PATCH", "/rest/v1/bank_categories?"
+                    + urlencode({"id": f"eq.{cat_id}"}), body=payload,
+                    extra_headers={"Prefer": "return=representation"})
+    if not rows:
+        # RLS : un utilisateur non connecté n'a aucune ligne à mettre à jour.
+        raise BankAuthError("Modification refusée (pas connecté ?).")
+    return rows[0]
+
+
+def delete_category(cat_id: str, mode: str = "refuse") -> dict:
+    """Supprime un nœud. **Ne supprime jamais de question.**
+
+    ⚠ En `mode="reparent"`, les affectations posées par d'AUTRES utilisateurs
+    sur ce nœud sont perdues : la RLS ne les rend ni lisibles ni supprimables,
+    donc impossible de les recréer sur le parent. Le `on delete cascade` les
+    efface. L'UI doit le dire dans sa confirmation.
+    """
+    if mode not in ("refuse", "reparent"):
+        raise tx.TaxonomyError(f"mode inconnu : {mode!r}")
+    nodes = _raw_categories()
+    by_id = tx.index_by_id(nodes)
+    if cat_id not in by_id:
+        raise BankNotFoundError(cat_id)
+    node = by_id[cat_id]
+    kids = tx.children_of(nodes, cat_id)
+    members = _questions_in_categories({cat_id})
+    if (kids or members) and mode != "reparent":
+        raise tx.TaxonomyConflict(
+            f"« {node['name']} » contient {len(kids)} sous-catégorie(s) "
+            f"et {len(members)} question(s).")
+
+    parent = node["parent_id"]
+    for kid in kids:
+        _request("PATCH", "/rest/v1/bank_categories?"
+                 + urlencode({"id": f"eq.{kid['id']}"}),
+                 body={"parent_id": parent},
+                 extra_headers={"Prefer": "return=minimal"})
+    reassigned = 0
+    if parent and members:
+        uid = current_user_id()
+        _request("POST", "/rest/v1/question_categories",
+                 body=[{"question_id": q, "category_id": parent, "added_by": uid}
+                       for q in sorted(members)],
+                 extra_headers={"Prefer": "resolution=ignore-duplicates,"
+                                          "return=minimal"})
+        reassigned = len(members)
+    # Le cascade de question_categories nettoie les affectations restantes.
+    _request("DELETE", "/rest/v1/bank_categories?"
+             + urlencode({"id": f"eq.{cat_id}"}))
+    return {"removed": cat_id, "reparented_children": len(kids),
+            "reassigned_questions": reassigned}
+
+
+def get_question_categories(bank_id: str) -> list[str]:
+    """Catégories d'une question (la FK garantit qu'elles sont vivantes)."""
+    rows = _request("GET", "/rest/v1/question_categories",
+                    params={"select": "category_id",
+                            "question_id": f"eq.{bank_id}"}) or []
+    return [r["category_id"] for r in rows]
+
+
+def set_question_categories(bank_id: str, cat_ids) -> list[str]:
+    """Remplace les catégories d'une question.
+
+    ⚠ Ne touche ni à `modified_at` ni à `version` de la question : classer
+    n'est pas éditer (une écriture sur `bank_questions` déclencherait
+    `touch_modified_at` et ferait remonter la question en tête de liste).
+
+    ⚠ **« Remplace » n'est pas garanti en ligne.** Un refus RLS sur un DELETE
+    ne lève pas : il filtre les lignes (vérifié sur Postgres 16). Retirer le
+    classement qu'un AUTRE utilisateur a posé sur la question d'un tiers est
+    donc un no-op silencieux, et l'opération se comporte en fusion. D'où la
+    relecture finale : on retourne l'état RÉEL, pas la liste demandée, pour que
+    l'UI affiche ce qui s'est vraiment passé.
+    """
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    known = tx.index_by_id(_raw_categories())
+    clean: list[str] = []
+    for c in (cat_ids or []):
+        c = str(c or "")
+        if not tx.is_valid_cat_id(c):
+            raise tx.TaxonomyError(f"identifiant de catégorie invalide : {c!r}")
+        if c not in known:
+            raise BankNotFoundError(c)
+        if c not in clean:
+            clean.append(c)
+    _request("DELETE", "/rest/v1/question_categories",
+             params={"question_id": f"eq.{bank_id}"})
+    if clean:
+        _request("POST", "/rest/v1/question_categories",
+                 body=[{"question_id": bank_id, "category_id": c, "added_by": uid}
+                       for c in clean],
+                 extra_headers={"Prefer": "resolution=ignore-duplicates,"
+                                          "return=minimal"})
+    return get_question_categories(bank_id)
+
+
+def assign_category(cat_id: str, bank_ids, remove: bool = False) -> int:
+    """Ajoute (ou retire) une catégorie sur un lot de questions. Retourne le
+    nombre de questions effectivement modifiées.
+
+    Le compte est mesuré **après coup** : un refus RLS sur DELETE est silencieux
+    (0 ligne, pas d'erreur), donc annoncer le nombre demandé mentirait dès qu'on
+    touche au classement d'un tiers.
+    """
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    if not tx.is_valid_cat_id(cat_id):
+        raise tx.TaxonomyError(f"identifiant de catégorie invalide : {cat_id!r}")
+    if cat_id not in tx.index_by_id(_raw_categories()):
+        raise BankNotFoundError(cat_id)
+    ids = [str(b or "") for b in (bank_ids or [])]
+    for b in ids:
+        # Même exigence qu'en local : un id mal formé n'est pas ignoré, il est
+        # refusé — il finirait interpolé dans une URL PostgREST.
+        if not _is_uuid(b):
+            raise ValueError(f"identifiant de question invalide : {b!r}")
+    if not ids:
+        return 0
+    already = _questions_in_categories({cat_id})
+    todo = [b for b in ids if (b in already) == bool(remove)]
+    if not todo:
+        return 0
+    if remove:
+        _request("DELETE", "/rest/v1/question_categories",
+                 params={"category_id": f"eq.{cat_id}",
+                         "question_id": _in_list(todo)})
+    else:
+        _request("POST", "/rest/v1/question_categories",
+                 body=[{"question_id": b, "category_id": cat_id, "added_by": uid}
+                       for b in todo],
+                 extra_headers={"Prefer": "resolution=ignore-duplicates,"
+                                          "return=minimal"})
+    after = _questions_in_categories({cat_id})
+    return len(set(todo) - after) if remove else len(after & set(todo))
+
+
+def _is_uuid(v) -> bool:
+    return tx.is_valid_cat_id(v)
+
+
+# --------------------------------------------------------------------------
+# Import (migration locale → en ligne) — voir bank_migrate.py
+#
+# Ces deux fonctions préservent les identifiants d'origine, contrairement à
+# `create_category` qui en génère un neuf. Les ids locaux sont déjà des UUID v4
+# (`bank_taxonomy.new_cat_id`), donc ils se transposent tels quels : les
+# affectations d'une question migrée continuent de pointer sur les bons nœuds,
+# sans table de correspondance à tenir pour les catégories.
+# --------------------------------------------------------------------------
+
+def import_category(node: dict) -> dict:
+    """Insère un nœud **en conservant son `id`**. Idempotent sur l'id.
+
+    ⚠ `ignore-duplicates` ne couvre que la clé primaire. Un conflit sur l'index
+    d'unicité (deux sœurs de même nom) lève : c'est voulu, l'appelant doit le
+    signaler plutôt que de fusionner deux chapitres homonymes en silence.
+    """
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    cid = str(node.get("id") or "")
+    if not tx.is_valid_cat_id(cid):
+        raise tx.TaxonomyError(f"identifiant de catégorie invalide : {cid!r}")
+    parent = node.get("parent_id") or None
+    if parent is not None and not tx.is_valid_cat_id(parent):
+        raise tx.TaxonomyError(f"parent invalide : {parent!r}")
+    body = {"id": cid, "parent_id": parent,
+            "name": tx.clean_name(node.get("name")),
+            "position": int(node.get("position") or 0),
+            "created_by": uid}
+    rows = _request("POST", "/rest/v1/bank_categories", body=body,
+                    extra_headers={"Prefer": "resolution=ignore-duplicates,"
+                                             "return=representation"})
+    return (rows or [body])[0]
+
+
+def import_assignments(question_id: str, cat_ids) -> int:
+    """Affecte une question à plusieurs catégories en une requête. Idempotent
+    (clé primaire `(question_id, category_id)`). Retourne le nombre d'ids
+    soumis, pas le nombre de lignes réellement créées."""
+    uid = current_user_id()
+    if not uid:
+        raise BankAuthError("Pas connecté.")
+    ids = [str(c) for c in (cat_ids or []) if tx.is_valid_cat_id(str(c))]
+    if not ids:
+        return 0
+    _request("POST", "/rest/v1/question_categories",
+             body=[{"question_id": question_id, "category_id": c, "added_by": uid}
+                   for c in ids],
+             extra_headers={"Prefer": "resolution=ignore-duplicates,"
+                                      "return=minimal"})
+    return len(ids)

@@ -4,8 +4,13 @@ CLI :
     python -m auto_grading.bank_migrate [--dry-run] [--also-patch-projects]
 
 Étapes :
+0. Monte l'arbre de catégories (`categories.json`) **en conservant les ids** :
+   ils sont déjà des UUID v4, donc les affectations des questions migrées
+   pointent sur les bons nœuds sans table de correspondance. Parents avant
+   enfants (la FK l'exige).
 1. Lit chaque `<bank_id>-<slug>.json` du dossier local.
-2. Pour chaque question : POST sur Supabase (statut `draft`).
+2. Pour chaque question : POST sur Supabase (statut `draft`), puis ses
+   affectations de catégories dans `question_categories`.
 3. Pour chaque `stats.by_project.<proj>.*` : upsert dans `question_evals`.
 4. Enregistre le mapping `{old_8hex_id: new_uuid}` dans
    `~/.config/amcx/bank_migration.json` (idempotent : déjà migré = skip).
@@ -31,6 +36,7 @@ if str(_THIS_DIR) not in sys.path:
 
 import bank
 import bank_online
+import bank_taxonomy as tx
 import config
 import project_state
 
@@ -52,6 +58,39 @@ def save_mapping(m: dict) -> None:
     MAPPING_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def migrate_categories(dry_run: bool = False) -> dict:
+    """Monte l'arbre local sur Supabase en conservant les identifiants.
+
+    L'ordre préfixe d'`annotate` place chaque parent avant ses enfants, ce que
+    la clé étrangère `parent_id` exige. Idempotent : un nœud déjà présent (même
+    id) est ignoré côté serveur.
+
+    Un conflit de nom entre sœurs (l'arbre en ligne contient déjà un chapitre
+    du même nom, créé indépendamment) n'est PAS fusionné : il est signalé, à
+    l'humain de trancher.
+    """
+    if not dry_run and not bank_online.is_logged_in():
+        raise SystemExit("✘ Pas connecté.")
+    nodes = bank.load_categories()
+    if not nodes:
+        return {"created": 0, "errors": []}
+    created, errors = 0, []
+    for n in tx.annotate(nodes):          # ordre préfixe : parents d'abord
+        label = " › ".join(n["path"])
+        print(f"  → catégorie {label}", end=" ")
+        if dry_run:
+            print("(dry-run)")
+            continue
+        try:
+            bank_online.import_category(n)
+            created += 1
+            print("✓")
+        except Exception as e:
+            errors.append(f"{label} : {e}")
+            print(f"✘ {e}")
+    return {"created": created, "errors": errors}
+
+
 def migrate_questions(dry_run: bool = False) -> dict:
     """Upload chaque question locale → Supabase. Retourne un récap."""
     if not bank_online.is_logged_in():
@@ -62,7 +101,7 @@ def migrate_questions(dry_run: bool = False) -> dict:
         return {"uploaded": 0, "skipped": 0, "evals": 0, "errors": []}
 
     mapping = load_mapping()
-    uploaded, skipped, evals_total = 0, 0, 0
+    uploaded, skipped, evals_total, cats_total = 0, 0, 0, 0
     errors: list[str] = []
 
     for jp in sorted(qdir.glob("*.json")):
@@ -100,6 +139,15 @@ def migrate_questions(dry_run: bool = False) -> dict:
             print(f"✘ {e}")
             continue
 
+        # Affectations de catégories : les ids locaux valent en ligne (l'arbre
+        # a été monté à l'identique par migrate_categories).
+        cats = q.get("categories") or []
+        if cats:
+            try:
+                cats_total += bank_online.import_assignments(new_id, cats)
+            except Exception as e:
+                errors.append(f"{old_id} : catégories {e}")
+
         # Évals : 1 ligne par projet
         by_p = ((q.get("stats") or {}).get("by_project") or {})
         for proj_name, ev in by_p.items():
@@ -122,6 +170,7 @@ def migrate_questions(dry_run: bool = False) -> dict:
         "uploaded": uploaded,
         "skipped":  skipped,
         "evals":    evals_total,
+        "cats":     cats_total,
         "errors":   errors,
         "mapping_file": str(MAPPING_FILE) if not dry_run else "(dry-run)",
     }
@@ -186,17 +235,25 @@ def main():
     print(f"  cible  : {config.active_bank_cfg().get('supabase_url')}")
     print()
 
-    print("1/2 Upload des questions…")
+    print("1/3 Montage de l'arbre de catégories…")
+    r0 = migrate_categories(dry_run=args.dry_run)
+    print(f"  → {r0['created']} catégorie(s)")
+    if r0["errors"]:
+        print(f"  ⚠ {len(r0['errors'])} conflit(s) — à trancher à la main :")
+        for e in r0["errors"][:10]:
+            print(f"    - {e}")
+
+    print("\n2/3 Upload des questions…")
     r1 = migrate_questions(dry_run=args.dry_run)
     print(f"\n  → {r1['uploaded']} uploadée(s), {r1['skipped']} déjà migrée(s), "
-          f"{r1['evals']} eval(s) synchronisée(s)")
+          f"{r1['evals']} eval(s), {r1.get('cats', 0)} affectation(s) de catégorie")
     if r1["errors"]:
         print(f"  ⚠ {len(r1['errors'])} erreur(s) :")
         for e in r1["errors"][:10]:
             print(f"    - {e}")
 
     if args.also_patch_projects:
-        print("\n2/2 Patch des sujets locaux…")
+        print("\n3/3 Patch des sujets locaux…")
         mapping = load_mapping()
         r2 = patch_projects(mapping, dry_run=args.dry_run)
         print(f"  → {r2['projects_scanned']} projet(s) scanné(s), "

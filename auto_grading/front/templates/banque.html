@@ -132,6 +132,15 @@
       </div>
     </div>
 
+    {# Arbre de catégories — rendu par static/bank_tree.js (mode filtre +
+       édition). Séparé des tags : l'arbre porte la structure du cours, les
+       tags restent des facettes transversales. #}
+    <details class="bq-cats" id="bq-cats" open>
+      <summary>Catégories</summary>
+      <div id="bq-cats-tree"></div>
+      <div class="bq-cats-status" id="bq-cats-status"></div>
+    </details>
+
     <div class="banque-count" id="bq-count">—</div>
     <div class="banque-list-rows" id="bq-list">
       <p class="banque-empty">Chargement…</p>
@@ -202,6 +211,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='bank_tree.js') }}"></script>
 <script>
 // Message d'erreur : texte, jamais du HTML. Le message peut venir du serveur
 // ou d'une banque partagée — l'injecter en innerHTML est une porte XSS.
@@ -252,6 +262,7 @@ async function refreshAuthStatus() {
     const s = await r.json();
     bankMode = s.mode || 'local';
     bankUserId = s.user_id || '';
+    if (catTree && s.slug) catTree.setStorageKey('amcx-bank-tree-' + s.slug);
     // Badge dans le bouton 🔐
     connBadge.className = 'conn-badge';
     const localInfo = document.getElementById('conn-local-info');
@@ -396,6 +407,128 @@ document.getElementById('banque-sync-btn')?.addEventListener('click', async () =
 
 const KIND_ICON = {question_qcm:'☑', question_open:'✍', answerbox:'▭', text:'¶'};
 
+// --- Arbre de catégories (panneau gauche) ---------------------------------
+let catTree = null;
+
+function catStatus(msg, cls) {
+  const s = document.getElementById('bq-cats-status');
+  s.textContent = msg;
+  s.className = 'bq-cats-status' + (cls === 'err' ? ' err' : '');
+  if (cls !== 'err') setTimeout(() => { if (s.textContent === msg) s.textContent = ''; }, 4000);
+}
+
+// Glisser une question sur une catégorie l'y AJOUTE (elle peut être dans
+// plusieurs). On relit d'abord ses catégories : l'état affiché peut dater, et
+// écraser la liste ferait perdre les autres appartenances.
+async function classifyByDrop(bankId, catId) {
+  try {
+    const cur = await (await fetch('/api/bank/' + encodeURIComponent(bankId)
+                                   + '/categories')).json();
+    const now = cur.categories || [];
+    if (now.includes(catId)) { catStatus('Déjà dans cette catégorie.'); return; }
+    const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/categories', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({categories: [...now, catId]})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'Erreur');
+    const path = catTree ? catTree.pathOf(catId) : null;
+    catStatus('Classée dans ' + (path ? path.join(' › ') : 'la catégorie') + ' ✓');
+    await catTree.refresh();
+    await reloadList();
+    if (currentQuestion && currentQuestion.bank_id === bankId) selectQuestion(bankId);
+  } catch (e) { catStatus('✘ ' + e.message, 'err'); }
+}
+
+function initCatTree() {
+  catTree = AMCxBankTree.create(document.getElementById('bq-cats-tree'), {
+    mode: 'filter',
+    canEdit: true,
+    onFilterChange: () => reloadList(),
+    onDropQuestion: classifyByDrop,
+    onStatus: catStatus,
+  });
+  return catTree.refresh();
+}
+
+// Chips-chemin + sélecteur multiple sur la fiche d'une question.
+function renderDetailCats(host, q) {
+  const wrap = document.createElement('div');
+  wrap.className = 'bq-detail-cats';
+  host.appendChild(wrap);
+  const picker = document.createElement('div');
+  picker.className = 'bq-cat-picker';
+  picker.hidden = true;
+  host.appendChild(picker);
+
+  let ids = (q.categories || []).slice();
+  let pickTree = null;
+
+  async function save(next) {
+    try {
+      const r = await fetch('/api/bank/' + encodeURIComponent(q.bank_id) + '/categories', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({categories: next})});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'Erreur');
+      // ⚠ On affiche l'état RENVOYÉ, pas celui demandé : sur une banque en
+      // ligne, retirer le classement posé par quelqu'un d'autre est refusé
+      // silencieusement par la RLS, donc « remplacer » peut fusionner.
+      ids = j.categories || [];
+      q.categories = ids;
+      if (pickTree) pickTree.setPicked(ids);
+      draw();
+      if (catTree) catTree.refresh();
+    } catch (e) { catStatus('✘ ' + e.message, 'err'); }
+  }
+
+  function draw() {
+    wrap.textContent = '';
+    const lab = document.createElement('span');
+    lab.className = 'bq-cats-label';
+    lab.textContent = ids.length ? 'Catégories :' : 'Aucune catégorie';
+    wrap.appendChild(lab);
+    ids.forEach(id => {
+      const path = catTree ? catTree.pathOf(id) : null;
+      const chip = document.createElement('span');
+      chip.className = 'bq-cat-chip';
+      const t = document.createElement('span');
+      // Un id sans nœud = catégorie supprimée ailleurs : on le dit au lieu
+      // d'afficher un chip vide.
+      t.textContent = path ? path.join(' › ') : '(catégorie supprimée)';
+      if (path) chip.title = path.join(' › ');
+      chip.appendChild(t);
+      const x = document.createElement('button');
+      x.type = 'button'; x.className = 'bq-cat-x'; x.textContent = '✕';
+      x.title = 'retirer de cette catégorie';
+      x.addEventListener('click', () => save(ids.filter(c => c !== id)));
+      chip.appendChild(x);
+      wrap.appendChild(chip);
+    });
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'btn btn-tiny';
+    add.textContent = picker.hidden ? '+ Classer' : 'Fermer';
+    add.addEventListener('click', async () => {
+      picker.hidden = !picker.hidden;
+      if (!picker.hidden) {
+        if (!pickTree) {
+          pickTree = AMCxBankTree.create(picker, {
+            mode: 'pick',
+            storageKey: (catTree ? catTree.opts.storageKey : 'amcx-bank-tree') + '-pick',
+            onPickChange: (sel) => save(sel),
+            onStatus: catStatus,
+          });
+          await pickTree.refresh();
+        }
+        pickTree.setPicked(ids);
+      }
+      draw();
+    });
+    wrap.appendChild(add);
+  }
+  draw();
+}
+
 async function reloadList() {
   const q    = document.getElementById('bq-search').value.trim();
   const kind = document.getElementById('bq-kind').value;
@@ -406,6 +539,7 @@ async function reloadList() {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   if (kind) params.set('kind', kind);
+  if (catTree) catTree.applyTo(params);
   if (bankMode === 'online') {
     if (fav) params.set('mes_favoris', '1');
     if (monTag) params.set('mon_tag', monTag);
@@ -442,6 +576,26 @@ function renderList(items, err) {
       (isMine ? '<span class="banque-q-mine" title="ma question">★</span>' : '') +
       (it.status && it.status !== 'public' ?
         '<span class="banque-q-status banque-q-status-' + it.status + '">' + it.status + '</span>' : '');
+    // Chemin de catégorie : inutile quand on est déjà DANS la catégorie.
+    const cats = it.categories || [];
+    if (cats.length && catTree && !catTree.getFilter().category) {
+      const path = catTree.pathOf(cats[0]);
+      if (path) {
+        const line = document.createElement('span');
+        line.className = 'bq-cat-path';
+        line.textContent = path.join(' › ') + (cats.length > 1 ? '  +' + (cats.length - 1) : '');
+        row.appendChild(line);
+      }
+    }
+    // Glisser-déposer vers l'arbre (ajout à une catégorie).
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(AMCxBankTree.DND_TYPE, it.bank_id);
+      e.dataTransfer.effectAllowed = 'copy';
+      row.classList.add('is-dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('is-dragging'));
+    row.title = 'Glisser sur une catégorie pour l\u2019y classer';
     row.addEventListener('click', () => selectQuestion(it.bank_id));
     host.appendChild(row);
   });
@@ -528,6 +682,9 @@ function renderDetailPane(q, blockHtml) {
     tagDiv.innerHTML = q.tags.map(t => '<span class="bank-tag-badge">' + escapeHtml(t) + '</span>').join('');
     host.appendChild(tagDiv);
   }
+
+  // === Catégories (chips-chemin + sélecteur) ===
+  renderDetailCats(host, q);
 
   // === Body : preview OU éditeur selon le mode ===
   const body = document.createElement('div');
@@ -1011,6 +1168,9 @@ document.getElementById('bank-add-create').addEventListener('click', async () =>
 // Init : remplit le label du bouton banque
 refreshBankList();
 
-refreshAuthStatus().then(reloadList);
+// L'arbre d'abord : `reloadList` lui demande les filtres actifs et les
+// chemins à afficher sous chaque ligne. `refreshAuthStatus` ensuite, qui
+// repointe la clé de repli sur la banque active.
+initCatTree().then(refreshAuthStatus).then(reloadList);
 </script>
 {% endblock %}

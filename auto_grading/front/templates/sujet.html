@@ -21,9 +21,11 @@
       </span>
       {% endif %}
       <span class="bd-spacer"></span>
-      <span class="bd-copy-pick">
-        Copie&nbsp;:
-        <select id="copy-picker" title="copie affichée (mapping case ↔ lettre)">
+      <span class="bd-copy-pick"
+            {% if not available_copies or available_copies|length < 2 %}hidden{% endif %}>
+        Lettres de case de l'exemplaire&nbsp;:
+        <select id="copy-picker"
+                title="Avec le mélange des réponses, une même réponse ne porte pas la même lettre d'un exemplaire à l'autre. Ce sélecteur ne change que l'affichage.">
           {% if available_copies %}
             {% for c in available_copies %}
             <option value="{{ c }}"{% if c == 1 %} selected{% endif %}>{{ c }}</option>
@@ -32,7 +34,7 @@
             <option value="1" selected>1</option>
           {% endif %}
         </select>
-        <span class="bd-copy-hint">(debug / aperçu)</span>
+        <span class="bd-copy-hint" id="copy-hint">affichage seulement</span>
       </span>
     </summary>
 
@@ -231,7 +233,8 @@
         <strong id="total-max">{{ "%.2f"|format(total_max) }}</strong></span>
       <span class="sujet-hint">
         Entrée (champs) ou Ctrl+Entrée : sauvegarder ·
-        Alt+Entrée : compiler · survol d'un bloc : aperçu PDF.
+        Alt+Entrée : compiler · clic sur une question : la cadrer en magenta
+        dans l'aperçu PDF (et inversement).
       </span>
     </div>
     <div class="sujet-toolbar-right">
@@ -256,8 +259,6 @@
     <button type="button" class="btn btn-add" data-add-kind="question_qcm" data-qtype="mult">+ QCM choix multiple</button>
     <button type="button" class="btn btn-add" data-add-kind="answerbox">+ zone réponse</button>
     <button type="button" class="btn btn-add" data-add-kind="question_open">+ question ouverte (AMC)</button>
-    <button type="button" class="btn btn-add" data-add-kind="question_freeform"
-            title="Question à réponse libre, auto-gradée par HTR contre expected_answer (extra [htr])">+ question libre (HTR)</button>
     <span class="sujet-add-hint">→ ajout à la fin (déplacer ensuite avec ☰)</span>
   </div>
   {% endif %}
@@ -297,10 +298,10 @@
   <aside class="sujet-right">
     <div class="preview-panel">
       <div class="preview-title" id="preview-title">Aperçu PDF</div>
-      <div class="preview-hint-small">Clic sur l'aperçu = vue agrandie scrollable.</div>
+      <div class="preview-hint-small">Clic sur une question = sélection (magenta)
+        des deux côtés · clic hors question = PDF en grand.</div>
       <div class="preview-body" id="preview-body">
-        <p class="preview-hint">Survolez ou cliquez un bloc pour afficher
-          sa partie du PDF du sujet.</p>
+        <p class="preview-hint">Chargement de l'aperçu…</p>
       </div>
     </div>
   </aside>
@@ -319,9 +320,10 @@
 
 </div>
 
-{# Menu contextuel de l'outline (clic droit sur item/section) — canonique seul. #}
+{# Menu contextuel partagé : mêmes actions au clic droit sur un item de la
+   colonne Structure ET sur un bloc de la colonne d'édition. Canonique seul. #}
 {% if mode == 'canonical' %}
-<div id="outlineContextMenu" class="outline-ctx-menu" hidden role="menu">
+<div id="blockContextMenu" class="block-ctx-menu" hidden role="menu">
   <button type="button" data-action="add-section" role="menuitem">
     <span class="ctx-icon outline-icon-text">§</span> Ajouter une section
   </button>
@@ -384,6 +386,12 @@
           <label class="bank-radio"><input type="radio" name="bank-kind" value="question_open"> Ouverte (AMC)</label>
           <label class="bank-radio"><input type="radio" name="bank-kind" value="answerbox"> Zone réponse</label>
           <label class="bank-radio"><input type="radio" name="bank-kind" value="text"> Texte</label>
+        </div>
+        <div class="bank-filter-field">
+          <label>Catégories</label>
+          {# Mode filtre SANS édition : on ne remanie pas l'arbre d'une banque
+             depuis un sujet — ça se fait dans l'onglet Banque. #}
+          <div id="bank-cats-tree" class="bank-cats-tree"></div>
         </div>
         <div class="bank-filter-field">
           <label>Tags publics</label>
@@ -525,6 +533,12 @@
       <span class="pm-modal-hint">Séparés par des virgules.</span>
     </div>
     <div class="pm-modal-field">
+      <label>Catégories</label>
+      <div id="bank-save-cats" class="bq-cat-picker"></div>
+      <span class="pm-modal-hint" id="bank-save-cats-hint">
+        Une question peut être dans plusieurs catégories.</span>
+    </div>
+    <div class="pm-modal-field">
       <label for="bank-save-author">Auteur</label>
       <input type="text" id="bank-save-author" autocomplete="off">
       <span class="pm-modal-hint">Préremplis avec l'auteur du sujet.</span>
@@ -539,6 +553,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='bank_tree.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 <script>
@@ -558,6 +573,17 @@ const IS_CANONICAL = SUJET_MODE === 'canonical';
     if (state === 'on') {
       split.classList.remove('no-preview');
       btn.classList.add('btn-toggle-on');
+      // Le panneau était `display:none` : les rects étaient tous nuls, donc
+      // ni le scroll-spy ni le recentrage n'avaient pu jouer. On rejoue —
+      // en rAF, car cet IIFE tourne AVANT que `PV` / `previewBody` (des
+      // `const` déclarés plus bas dans le même <script>) ne soient initialisés.
+      requestAnimationFrame(function () {
+        pvBuild();
+        requestAnimationFrame(function () {
+          if (PV.selectedQ) pvScrollHostTo(previewBody, PV.selectedQ, 'auto');
+          else pvScrollSpy(previewBody);
+        });
+      });
     } else {
       split.classList.add('no-preview');
       btn.classList.remove('btn-toggle-on');
@@ -762,6 +788,33 @@ function collectBlockData(blk) {
   return {};
 }
 
+/** Ajuste la hauteur d'une zone de réponse à son contenu. Une réponse tient
+ *  presque toujours sur une ligne : lui en réserver deux en permanence coûtait
+ *  ~20 px par réponse, soit ~80 px par question. */
+function autoGrowAnswer(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.max(ta.scrollHeight, 30) + 'px';
+}
+
+/** Variante de `setStatus` avec une action (annulation). Le bouton disparaît
+ *  au bout de `ms` — passé ce délai, l'action n'est plus proposée. */
+function setStatusAction(msg, cls, label, fn, ms) {
+  const el = document.getElementById('compile-status');
+  el.textContent = msg + ' ';
+  el.className = 'compile-status ' + (cls || '');
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'status-action';
+  b.textContent = label;
+  b.addEventListener('click', function () { b.disabled = true; fn(); });
+  el.appendChild(b);
+  const logEl = document.getElementById('compile-log');
+  logEl.hidden = true; logEl.textContent = '';
+  clearTimeout(setStatusAction._t);
+  setStatusAction._t = setTimeout(function () { b.remove(); }, ms || 12000);
+}
+
 function setStatus(msg, cls, log) {
   const el = document.getElementById('compile-status');
   el.textContent = msg;
@@ -855,120 +908,403 @@ async function compileWithGuard() {
   doCompile();
 }
 
-// === aperçu PDF (panneau droit) =============================================
+// === Aperçu PDF — lien bidirectionnel avec l'éditeur ========================
+// Deux vues rendent le même DOM : le panneau droit et la vue agrandie
+// (lightbox). Chacune empile les pages du PDF et pose un rectangle absolu par
+// question (ratios servis par /sujet/regions.json, donc indépendants de la
+// largeur de rendu). Deux états, IDENTIQUES partout — bloc dans l'éditeur et
+// rectangle dans les deux aperçus :
+//   · bleu    = question courante (survolée, ou traversée en scrollant)
+//   · magenta = question sélectionnée au clic (code couleur de la correction)
+// Le lien joue dans les deux sens : cliquer un bloc scrolle l'aperçu sur la
+// question, cliquer une zone d'aperçu scrolle l'éditeur sur le bloc.
 const previewTitle = document.getElementById('preview-title');
 const previewBody = document.getElementById('preview-body');
-let previewQ = null;
-// État du preview courant : numéro AMC q + métadonnées de la région (page +
-// ratio vertical) pour pouvoir ré-afficher et ouvrir le lightbox à la bonne page.
+const zoomBody = document.getElementById('previewZoomBody');
+
+// Métadonnées de la question sélectionnée (page du PDF), pour ouvrir la vue
+// agrandie au bon endroit.
 let previewInfo = null;
 
-function _setPreviewActiveBlock(blk) {
-  // Cadre bleu sur le bloc en cours d'aperçu (relie visuellement la colonne
-  // d'édition et le panneau droit). Retire la classe sur tous les autres.
-  document.querySelectorAll('.sujet-block.is-preview-active').forEach(b => {
-    if (b !== blk) b.classList.remove('is-preview-active');
-  });
-  if (blk) blk.classList.add('is-preview-active');
+const PV = {
+  data: null,        // payload de /sujet/regions.json
+  hoverQ: null,      // survol (éditeur OU aperçu)
+  scrollQ: null,     // question courante d'après le scroll de l'aperçu actif
+  selectedQ: null,   // clic
+  builtFor: null,    // valeur de PDF_V pour laquelle le panneau a été construit
+  zoomBuiltFor: null,
+  building: false,
+  syncing: false,    // scroll programmatique en cours → gèle le scroll-spy
+};
+
+function pvHasPdf() { return !!PDF_V && PDF_V !== '0'; }
+
+// La clé de sélection est le **bid du bloc**, pas son numéro AMC : tout bloc
+// en a un, y compris ceux qui n'ont pas (encore) de région dans le PDF — un
+// bloc fraîchement ajouté, un texte introuvable, un sujet pas recompilé. Ils
+// restent donc sélectionnables (cadre magenta dans l'éditeur), simplement sans
+// cadre en face dans l'aperçu.
+function pvQOf(blk) {
+  return (blk && blk.dataset.bid) ? String(blk.dataset.bid) : null;
 }
 
-function showPreview(blk) {
-  // Le panneau droit a été retiré ; cette fonction reste pour compatibilité
-  // (les blocs ont encore des listeners mouseenter/focusin) mais ne fait rien
-  // tant que `previewBody` est absent.
-  if (!previewBody) return;
-  _setPreviewActiveBlock(blk);
-  const q = blk.dataset.previewQ;
-  if (!q) {
-    previewQ = null; previewInfo = null;
-    previewTitle.textContent = 'Aperçu PDF';
-    previewBody.innerHTML = '<p class="preview-hint">Pas d\'aperçu pour ce bloc '
-      + '(pas de zone AMC enregistrée).</p>';
-    return;
+function pvBlockForQ(q) {
+  return q ? document.querySelector('.sujet-block[data-bid="' + q + '"]') : null;
+}
+
+/** Y a-t-il un cadre dans l'aperçu pour ce bloc ? */
+function pvHasZone(q) {
+  return !!(q && document.querySelector('.pv-zone[data-q="' + q + '"]'));
+}
+
+function pvLabel(q) {
+  const blk = pvBlockForQ(q);
+  const kind = blk && blk.dataset.kind;
+  if (kind === 'question_qcm')  return 'Q' + ((blk && blk.dataset.q) || q);
+  if (kind === 'answerbox')     return 'Zone de réponse';
+  if (kind === 'question_open') return 'Question ouverte';
+  if (kind === 'question_freeform') return 'Question libre';
+  if (kind === 'text') {
+    // `data-title` n'est posé que sur les blocs legacy ; pour un bloc canonique
+    // on lit le titre de section directement dans le LaTeX, comme l'outline.
+    let t = (blk && blk.dataset.title || '').trim();
+    if (!t && blk) {
+      const src = blk.querySelector('.text-src');
+      const m = src && src.value.match(/\\(?:sub)*section\*?\{([^}]*)\}/);
+      if (m) t = m[1].trim();
+    }
+    return t ? ('Texte — ' + (t.length > 32 ? t.slice(0, 32) + '…' : t)) : 'Texte libre';
   }
-  if (q === previewQ) return;
-  previewQ = q;
-  const kind = blk.dataset.kind;
-  const label = (kind === 'question_qcm') ? 'Q' + (blk.dataset.q || q)
-              : (kind === 'question_open') ? 'Question ouverte (AMC Q' + q + ')'
-              : (kind === 'answerbox')     ? 'Zone réponse + barème (AMC Q' + q + ')'
-              :                              'AMC Q' + q;
-  previewTitle.textContent = 'Aperçu PDF — ' + label;
-  if (!PDF_V) {
-    previewBody.innerHTML = '<p class="preview-hint">Compilez le sujet '
-      + '(bouton ⚙ Compiler) pour afficher l\'aperçu PDF.</p>';
-    return;
+  return 'AMC Q' + q;
+}
+
+// Titre plus explicite pour l'en-tête du panneau (le tag du bloc si connu).
+function pvLongLabel(q) {
+  const blk = pvBlockForQ(q);
+  const tag = blk && blk.querySelector('.q-tag-input');
+  const t = tag && tag.value ? tag.value.trim() : '';
+  return pvLabel(q) + (t ? ' — ' + t : '');
+}
+
+function pvHint(host, html) {
+  if (host) host.innerHTML = '<p class="preview-hint">' + html + '</p>';
+}
+
+// --- construction du DOM ---------------------------------------------------
+
+function pvBuild() {
+  if (!previewBody) return Promise.resolve();
+  // `pdf_mtime` vaut 0 quand le PDF n'existe pas — et '0' est *truthy* en JS,
+  // d'où le test explicite.
+  if (!pvHasPdf()) {
+    PV.builtFor = null; PV.zoomBuiltFor = null; PV.data = null;
+    previewBody.innerHTML = '';
+    pvHint(previewBody, 'Compilez le sujet (bouton ⚙ Compiler) pour afficher l\'aperçu PDF.');
+    return Promise.resolve();
   }
-  // Affiche la page PDF entière contenant la question, scrollée à la zone.
-  // Le ratio vertical de la question (y_top/page_h) sert à scroller le
-  // conteneur `.preview-body` une fois l'image chargée.
-  fetch('/sujet/region/' + q + '.json?v=' + PDF_V, {cache: 'no-store'})
+  if (PV.builtFor === PDF_V || PV.building) return Promise.resolve();
+  PV.building = true;
+  const want = PDF_V;
+  return fetch('/sujet/regions.json?v=' + want, {cache: 'no-store'})
     .then(r => r.ok ? r.json() : null)
-    .then(info => {
-      if (q !== previewQ) return;  // changé de bloc pendant le fetch
-      if (!info) {
-        previewBody.innerHTML = '<p class="preview-hint">Région introuvable.</p>';
+    .then(data => {
+      if (want !== PDF_V) return;          // recompilé pendant le fetch
+      if (!data || !(data.pages || []).length) {
+        pvHint(previewBody, 'Le PDF du sujet n\'est pas compilé — utilisez ⚙ Compiler '
+                          + 'pour afficher l\'aperçu.');
         return;
       }
-      previewInfo = info;
-      previewInfo.label = label;
-      previewBody.innerHTML = '';
-      const img = document.createElement('img');
-      img.alt = 'page ' + info.page + ' (' + label + ')';
-      img.src = '/sujet/page/' + info.page + '.png?v=' + PDF_V;
-      previewBody.appendChild(img);
-      // Scroll au chargement : on cible le HAUT de la question avec une
-      // marge ~20px pour le voir avec du contexte au-dessus.
-      img.addEventListener('load', function () {
-        const h = img.clientHeight;
-        const y = Math.max(0, info.y_top * h - 20);
-        previewBody.scrollTop = y;
-      }, {once: true});
+      PV.data = data;
+      pvRenderInto(previewBody, data);
+      PV.builtFor = want;
+      PV.zoomBuiltFor = null;              // la vue agrandie se rebâtira à l'ouverture
+      pvApply();
+      if (PV.selectedQ) pvScrollHostTo(previewBody, PV.selectedQ, 'auto');
+      pvScrollSpy(previewBody);
     })
-    .catch(() => {
-      previewBody.innerHTML = '<p class="preview-hint">Erreur de chargement.</p>';
-    });
-}
-function refreshPreview() {
-  if (!previewQ) return;
-  const blk = document.querySelector('.sujet-block[data-preview-q="' + previewQ + '"]');
-  previewQ = null;
-  if (blk) showPreview(blk);
+    .catch(() => pvHint(previewBody, 'Erreur de chargement de l\'aperçu.'))
+    .finally(() => { PV.building = false; });
 }
 
-// === Lightbox PDF complet (clic sur l'image du panneau droit) ==============
-// Embed du PDF natif avec `#page=N` → navigation entre pages, zoom et scroll
-// gérés par le navigateur. Ouvre directement à la page de la question.
+function pvRenderInto(host, data) {
+  host.innerHTML = '';
+  const byPage = new Map();
+  (data.regions || []).forEach(r => {
+    if (!byPage.has(r.page)) byPage.set(r.page, []);
+    byPage.get(r.page).push(r);
+  });
+
+  (data.pages || []).forEach(pg => {
+    const n = pg.n;
+    const wrap = document.createElement('div');
+    wrap.className = 'pv-page';
+    wrap.dataset.page = String(n);
+    // `aspect-ratio` posé AVANT le chargement de l'image : la hauteur du
+    // conteneur est donc correcte dès le départ, ce qui rend le scroll-spy
+    // et le recentrage justes même sur les pages pas encore téléchargées
+    // (les images sont en `loading=lazy`).
+    if (pg.w > 0 && pg.h > 0) wrap.style.aspectRatio = pg.w + ' / ' + pg.h;
+
+    const img = document.createElement('img');
+    img.alt = 'page ' + n + ' du sujet';
+    img.loading = 'lazy';
+    img.src = '/sujet/page/' + n + '.png?v=' + PDF_V;
+    wrap.appendChild(img);
+
+    const num = document.createElement('span');
+    num.className = 'pv-page-num';
+    num.textContent = n + '/' + (data.pages || []).length;
+    wrap.appendChild(num);
+
+    (byPage.get(n) || []).forEach(r => {
+      const q = r.bid ? String(r.bid) : String(r.q);   // clé = bid du bloc
+      const z = document.createElement('div');
+      z.className = 'pv-zone';
+      z.dataset.q = q;
+      z.style.left = (r.x0 * 100) + '%';
+      z.style.top = (r.y0 * 100) + '%';
+      z.style.width = ((r.x1 - r.x0) * 100) + '%';
+      z.style.height = ((r.y1 - r.y0) * 100) + '%';
+      z.title = pvLabel(q) + ' — cliquer pour la sélectionner dans l\'éditeur';
+      const tag = document.createElement('span');
+      tag.className = 'pv-zone-tag';
+      tag.textContent = pvLabel(q);
+      z.appendChild(tag);
+      wrap.appendChild(z);
+    });
+    host.appendChild(wrap);
+  });
+
+  // `\exemplaire{N}` : le PDF contient N copies, mais le calage ne décrit que
+  // la copie 1 — les autres n'auraient aucun cadre. On le dit plutôt que de
+  // laisser l'utilisateur chercher.
+  const shown = (data.pages || []).length;
+  if (data.total_pages > shown) {
+    const note = document.createElement('p');
+    note.className = 'preview-hint';
+    note.textContent = 'Copie 1 affichée (' + shown + ' pages). Le PDF en contient '
+                     + data.total_pages + ' au total : ' + data.total_pages / shown
+                     + ' exemplaires. Utilisez « 📄 Voir le PDF » pour tout voir.';
+    host.appendChild(note);
+  }
+}
+
+// --- application des états visuels -----------------------------------------
+
+function pvApply() {
+  const sel = PV.selectedQ;
+  const cur = PV.hoverQ || PV.scrollQ;   // le survol prime sur le scroll
+
+  document.querySelectorAll('.sujet-block.is-preview-active, .sujet-block.is-preview-selected')
+    .forEach(b => b.classList.remove('is-preview-active', 'is-preview-selected'));
+  if (cur && cur !== sel) {
+    const b = pvBlockForQ(cur); if (b) b.classList.add('is-preview-active');
+  }
+  if (sel) {
+    const b = pvBlockForQ(sel); if (b) b.classList.add('is-preview-selected');
+  }
+  // Les deux vues (panneau + agrandissement) partagent les mêmes classes.
+  document.querySelectorAll('.pv-zone').forEach(z => {
+    const q = z.dataset.q;
+    z.classList.toggle('is-current', !!cur && q === cur && cur !== sel);
+    z.classList.toggle('is-selected', !!sel && q === sel);
+  });
+  if (previewTitle) {
+    const shown = sel || cur;
+    if (!shown) {
+      previewTitle.textContent = 'Aperçu PDF';
+    } else if (pvHasZone(shown)) {
+      previewTitle.textContent = 'Aperçu PDF — ' + pvLongLabel(shown);
+    } else {
+      // Bloc sélectionnable mais absent du PDF compilé (ajouté depuis, ou
+      // texte que la recherche n'a pas su localiser).
+      previewTitle.textContent = 'Aperçu PDF — ' + pvLongLabel(shown)
+                               + ' · pas dans le PDF compilé';
+    }
+  }
+}
+
+// --- scroll ----------------------------------------------------------------
+
+function pvVisible(host) { return host && host.offsetParent !== null; }
+
+function pvActiveHost() {
+  const ov = document.getElementById('previewZoom');
+  if (ov && !ov.hidden && pvVisible(zoomBody)) return zoomBody;
+  return previewBody;
+}
+
+// Question « courante » = celle dont la zone couvre la ligne d'ancrage de la
+// vue (≈ premier tiers), sinon la plus proche. Alimente le cadre bleu qui se
+// déplace de question en question quand on scrolle.
+function pvScrollSpy(host) {
+  if (PV.syncing || !pvVisible(host) || host !== pvActiveHost()) return;
+  const zones = host.querySelectorAll('.pv-zone');
+  if (!zones.length) return;
+  const pr = host.getBoundingClientRect();
+  const anchor = pr.top + Math.min(pr.height * 0.35, 180);
+  let best = null, bestD = Infinity;
+  zones.forEach(z => {
+    const r = z.getBoundingClientRect();
+    if (r.bottom < pr.top || r.top > pr.bottom) return;   // hors du viewport
+    const d = (r.top <= anchor && r.bottom >= anchor)
+            ? 0 : Math.min(Math.abs(r.top - anchor), Math.abs(r.bottom - anchor));
+    if (d < bestD) { bestD = d; best = z.dataset.q; }
+  });
+  if (best !== PV.scrollQ) { PV.scrollQ = best; pvApply(); }
+}
+
+function pvScrollHostTo(host, q, behavior) {
+  if (!pvVisible(host)) return;
+  const z = host.querySelector('.pv-zone[data-q="' + q + '"]');
+  if (!z) return;
+  const pr = host.getBoundingClientRect();
+  const zr = z.getBoundingClientRect();
+  const top = Math.max(0, host.scrollTop + (zr.top - pr.top) - 24);
+  PV.syncing = true;
+  host.scrollTo({top: top, behavior: behavior || 'smooth'});
+  clearTimeout(pvScrollHostTo._t);
+  pvScrollHostTo._t = setTimeout(function () {
+    PV.syncing = false;
+    PV.scrollQ = String(q);
+    pvApply();
+  }, 450);
+}
+
+// --- API publique du module ------------------------------------------------
+
+function pvHover(q) {
+  q = q ? String(q) : null;
+  if (q === PV.hoverQ) return;
+  PV.hoverQ = q;
+  pvApply();
+}
+
+/** Sélectionne (cadre magenta) une question partout.
+ *  opts.scrollPreview : recentre l'aperçu actif (défaut true)
+ *  opts.scrollEditor  : recentre la colonne d'édition (défaut false) */
+function pvSelect(q, opts) {
+  opts = opts || {};
+  q = q ? String(q) : null;
+  if (!q) return;
+  const changed = (q !== PV.selectedQ);
+  PV.selectedQ = q;
+  const r = (PV.data && PV.data.regions || [])
+    .find(x => String(x.bid || x.q) === q);
+  previewInfo = r ? {page: r.page, label: pvLabel(q)} : null;
+  pvApply();
+  // On ne recentre que si la sélection a changé : sinon chaque clic dans un
+  // textarea du bloc déjà sélectionné ferait sauter l'aperçu.
+  if (!changed) return;
+  if (opts.scrollPreview !== false) pvScrollHostTo(pvActiveHost(), q);
+  if (opts.scrollEditor) {
+    const b = pvBlockForQ(q);
+    if (b) b.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+}
+
+function pvClearSelection() {
+  if (!PV.selectedQ) return false;
+  PV.selectedQ = null;
+  previewInfo = null;
+  pvApply();
+  return true;
+}
+
+// Compat : appelée à l'init et après compilation.
+function showPreview(blk) { pvSelect(pvQOf(blk), {scrollPreview: true}); }
+function refreshPreview() { PV.builtFor = null; PV.zoomBuiltFor = null; pvBuild(); }
+
+// --- câblage commun aux deux vues ------------------------------------------
+
+function pvWire(host, opts) {
+  if (!host) return;
+  opts = opts || {};
+  let raf = 0;
+  host.addEventListener('scroll', function () {
+    if (raf) return;
+    raf = requestAnimationFrame(function () { raf = 0; pvScrollSpy(host); });
+  }, {passive: true});
+
+  host.addEventListener('mouseover', function (e) {
+    const z = e.target.closest('.pv-zone');
+    pvHover(z ? z.dataset.q : null);
+  });
+  host.addEventListener('mouseleave', function () { pvHover(null); });
+
+  host.addEventListener('click', function (e) {
+    const z = e.target.closest('.pv-zone');
+    if (z) {
+      // Clic sur une question de l'aperçu → sélection magenta partout, et on
+      // amène le bloc correspondant sous les yeux dans l'éditeur.
+      pvSelect(z.dataset.q, {scrollPreview: false, scrollEditor: true});
+      return;
+    }
+    if (opts.zoomOnPageClick) {
+      const pg = e.target.closest('.pv-page');
+      if (pg) openPreviewZoom(parseInt(pg.dataset.page, 10));
+    }
+  });
+}
+
+(function () {
+  if (!previewBody) return;
+  pvWire(previewBody, {zoomOnPageClick: true});
+  pvWire(zoomBody, {});
+  window.addEventListener('resize', function () { pvScrollSpy(pvActiveHost()); });
+  pvBuild();
+})();
+
+// === Vue agrandie ===========================================================
+// Même rendu que le panneau (pages + cadres cliquables), en plus grand. Le PDF
+// natif reste accessible par « 📄 Voir le PDF » dans la toolbar.
+let openPreviewZoom = function () {};
 (function () {
   const overlay = document.getElementById('previewZoom');
-  const body    = document.getElementById('previewZoomBody');
   const titleEl = document.getElementById('previewZoomTitle');
   const closeBtn= document.getElementById('previewZoomClose');
-  const previewPanel = document.getElementById('preview-body');
-  if (!overlay || !previewPanel) return;
+  if (!overlay || !zoomBody) return;
 
-  function openZoom() {
-    if (!previewInfo) return;
-    titleEl.textContent = 'PDF complet — ' + previewInfo.label
-                        + '  (page ' + previewInfo.page
-                        + '/' + previewInfo.total_pages + ')';
-    // `#page=N&view=FitH` : navigation native PDF.js / Acrobat / Edge.
-    const url = '/sujet/pdf?v=' + PDF_V + '#page=' + previewInfo.page + '&view=FitH';
-    body.innerHTML = '<embed type="application/pdf" src="' + url + '">';
+  openPreviewZoom = function (page) {
+    if (!pvHasPdf() || !PV.data) return;
+    if (PV.zoomBuiltFor !== PDF_V) {
+      pvRenderInto(zoomBody, PV.data);
+      PV.zoomBuiltFor = PDF_V;
+    }
+    const n = (PV.data.pages || []).length;
+    titleEl.textContent = 'Sujet — ' + n + (n > 1 ? ' pages' : ' page')
+                        + ' · cliquez une question pour la sélectionner';
     overlay.hidden = false;
+    pvApply();
+    // Ouvre sur la question sélectionnée, sinon sur la page cliquée.
+    requestAnimationFrame(function () {
+      if (PV.selectedQ && zoomBody.querySelector('.pv-zone[data-q="' + PV.selectedQ + '"]')) {
+        pvScrollHostTo(zoomBody, PV.selectedQ, 'auto');
+      } else if (page) {
+        const pg = zoomBody.querySelector('.pv-page[data-page="' + page + '"]');
+        if (pg) zoomBody.scrollTop = pg.offsetTop;
+      }
+      pvScrollSpy(zoomBody);
+    });
+  };
+  function closeZoom() {
+    overlay.hidden = true;
+    // On garde le DOM rendu (rebâtir coûte un re-téléchargement des images).
+    requestAnimationFrame(function () { pvScrollSpy(previewBody); });
   }
-  function closeZoom() { overlay.hidden = true; body.innerHTML = ''; }
 
-  previewPanel.addEventListener('click', function (e) {
-    if (!e.target.closest('img')) return;
-    openZoom();
-  });
   closeBtn.addEventListener('click', closeZoom);
   overlay.addEventListener('click', function (e) {
     if (e.target === overlay) closeZoom();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !overlay.hidden) closeZoom();
+    if (e.key !== 'Escape') return;
+    if (!overlay.hidden) { closeZoom(); return; }
+    // Escape hors vue agrandie : lève la sélection magenta (sauf si on est en
+    // train de taper dans un champ).
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    pvClearSelection();
   });
 })();
 
@@ -996,9 +1332,12 @@ function initBlock(blk) {
   // textareas avec preview (text, qcm statement, qcm answers, open statement)
   blk.querySelectorAll('.md-src').forEach(function (ta) {
     renderPreview(ta);
+    const grows = ta.classList.contains('ans-src');
+    if (grows) autoGrowAnswer(ta);
     let t;
     ta.addEventListener('input', function () {
       markDirty(blk);
+      if (grows) autoGrowAnswer(ta);
       clearTimeout(t); t = setTimeout(function () { renderPreview(ta); }, 200);
     });
   });
@@ -1063,9 +1402,13 @@ function initBlock(blk) {
     });
   });
 
-  // aperçu PDF au survol
-  blk.addEventListener('mouseenter', function () { showPreview(blk); });
-  blk.addEventListener('focusin', function () { showPreview(blk); });
+  // Lien avec l'aperçu PDF : survol = cadre bleu (courant), clic ou focus
+  // clavier = cadre magenta (sélection) + recentrage de l'aperçu sur la
+  // question. Un bloc sans zone AMC (texte libre) ne sélectionne rien.
+  blk.addEventListener('mouseenter', function () { pvHover(pvQOf(blk)); });
+  blk.addEventListener('mouseleave', function () { pvHover(null); });
+  blk.addEventListener('click', function () { pvSelect(pvQOf(blk)); });
+  blk.addEventListener('focusin', function () { pvSelect(pvQOf(blk)); });
 
   // CRUD canonique : up/down/duplicate/delete
   if (IS_CANONICAL) {
@@ -1128,7 +1471,18 @@ async function addBlock(kind, qtype) {
 }
 
 async function deleteBlock(blk) {
-  if (!confirm('Supprimer ce bloc ?\n\n(le sujet est sauvegardé immédiatement)')) return;
+  // On capture le contenu et la position AVANT de supprimer : c'est ce qui
+  // rend l'annulation possible. Elle remplace la confirmation modale — le ✕
+  // est à 8 px du bouton « dupliquer », et une boîte de dialogue de plus ne
+  // protège personne, alors qu'un retour arrière, si.
+  const kind = blk.dataset.kind;
+  const bid = blk.dataset.bid;
+  let data = {};
+  try { data = collectBlockData(blk); } catch (e) { data = {}; }
+  const prev = blk.previousElementSibling;
+  const afterBid = (prev && prev.classList.contains('sujet-block'))
+                 ? prev.dataset.bid : null;
+
   const r = await fetch('/api/sujet/blocks/delete', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({bid: blk.dataset.bid})
@@ -1137,7 +1491,23 @@ async function deleteBlock(blk) {
   if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return; }
   blk.remove();
   buildOutline();
-  setStatus('Bloc supprimé ✓', 'ok');
+  setStatusAction('Bloc supprimé ✓', 'ok', '↩ Annuler', async function () {
+    const r2 = await fetch('/api/sujet/blocks/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      // On réutilise le bid d'origine : il est gravé dans le calage compilé
+      // (`bareme-<bid>` d'un answerbox, marqueur `ffz<bid>` d'une question
+      // libre). Un identifiant neuf romprait le lien avec l'aperçu et le HTR
+      // jusqu'à la recompilation suivante.
+      body: JSON.stringify({kind: kind, after_bid: afterBid, data: data, bid: bid})
+    });
+    const j2 = await r2.json().catch(() => ({}));
+    if (!r2.ok || !j2.ok) {
+      setStatus('Échec de l\'annulation : ' + (j2.error || 'erreur'), 'err');
+      return;
+    }
+    setStatus('Bloc restauré ✓', 'ok');
+    reloadPage(350);          // le bloc restauré doit être rendu par le serveur
+  });
 }
 
 async function duplicateBlock(blk) {
@@ -1150,6 +1520,99 @@ async function duplicateBlock(blk) {
   if (!r.ok || !j.ok) { setStatus('Échec duplication : ' + (j.error || 'erreur'), 'err'); return; }
   setStatus('Bloc dupliqué ✓ — rechargement…', 'ok');
   reloadPage();
+}
+
+// Bande occultée en haut de page par les deux barres collantes (topbar 44px
+// + toolbar du sujet). Mesurée, pas codée en dur : la toolbar passe sur 2
+// lignes quand la fenêtre est étroite.
+function stickyTopOffset() {
+  const tb = document.querySelector('.topbar');
+  const st = document.querySelector('.sujet-toolbar');
+  return (tb ? tb.offsetHeight : 44) + (st ? st.offsetHeight + 8 : 0);
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/** Position d'un élément dans le document, en ignorant les `transform`.
+ *  ⚠ `getBoundingClientRect()` inclut les transformations : pendant
+ *  l'animation FLIP, le bloc porte un `translateY` et son rect renvoie donc
+ *  son ANCIENNE place — de quoi calculer un scroll faux. La chaîne des
+ *  `offsetTop` donne la position de mise en page, insensible au transform. */
+function layoutTop(el) {
+  let y = 0;
+  for (let n = el; n; n = n.offsetParent) y += n.offsetTop;
+  return y;
+}
+
+/** Amène un bloc dans la zone visible — sans bouger si on l'y voit déjà
+ *  confortablement (déplacer la page pour rien est plus désorientant que de
+ *  ne pas la déplacer). Centre le bloc s'il tient dans la fenêtre. */
+function bringBlockIntoView(blk) {
+  const top = stickyTopOffset();
+  const h = blk.offsetHeight;
+  const rTop = layoutTop(blk) - window.scrollY;   // insensible au transform
+  if (rTop >= top + 12 && rTop + h <= window.innerHeight - 12) return;
+  const avail = window.innerHeight - top;
+  const target = (h + 32 <= avail)
+    ? window.scrollY + rTop - top - (avail - h) / 2
+    : window.scrollY + rTop - top - 16;
+  window.scrollTo({top: Math.max(0, target),
+                   behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+}
+
+/** Anime l'échange de deux blocs (FLIP) : on mesure leur position AVANT la
+ *  mutation du DOM, on l'applique, on remesure, puis on repart de l'ancienne
+ *  position vers la nouvelle. `apply` doit faire la mutation, rien d'autre. */
+function animateBlockSwap(a, b, apply) {
+  if (prefersReducedMotion()) { apply(); return; }
+  const els = [a, b].filter(Boolean);
+  const before = els.map(e => e.getBoundingClientRect().top);
+  apply();
+  const after = els.map(e => e.getBoundingClientRect().top);
+  els.forEach((e, i) => {
+    const dy = before[i] - after[i];
+    if (!dy) return;
+    e.style.transition = 'none';
+    e.style.transform = 'translateY(' + dy + 'px)';
+    e.style.willChange = 'transform';
+  });
+  requestAnimationFrame(function () {
+    els.forEach(function (e) {
+      e.style.transition = 'transform 260ms cubic-bezier(.2,.7,.3,1)';
+      e.style.transform = '';
+    });
+  });
+  setTimeout(function () {
+    els.forEach(function (e) {
+      e.style.transition = ''; e.style.transform = ''; e.style.willChange = '';
+    });
+  }, 320);
+}
+
+/** Éclair bleu sur le bloc qui vient de bouger — dit *lequel* a bougé, ce que
+ *  l'animation d'échange seule ne dit pas quand les deux blocs se ressemblent. */
+function flashMoved(blk) {
+  if (!blk) return;
+  blk.classList.remove('just-moved');
+  void blk.offsetWidth;               // force le redémarrage de l'animation
+  blk.classList.add('just-moved');
+  setTimeout(function () { blk.classList.remove('just-moved'); }, 750);
+}
+
+/** Grise ▲ sur le premier bloc et ▼ sur le dernier : ils ne faisaient rien,
+ *  sans le dire. */
+function refreshMoveButtons() {
+  const blocks = [].slice.call(document.querySelectorAll('.sujet-block'));
+  blocks.forEach(function (b, i) {
+    const up = b.querySelector('.block-move-up');
+    const dn = b.querySelector('.block-move-down');
+    if (up) { up.disabled = (i === 0); up.title = up.disabled ? 'déjà en premier' : 'monter'; }
+    if (dn) { dn.disabled = (i === blocks.length - 1);
+              dn.title = dn.disabled ? 'déjà en dernier' : 'descendre'; }
+  });
 }
 
 async function moveBlock(blk, direction) {
@@ -1171,11 +1634,22 @@ async function moveBlock(blk, direction) {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { setStatus('Échec déplacement : ' + (j.error || 'erreur'), 'err'); return; }
-  // Déplacer dans le DOM aussi
-  const list = document.getElementById('blocks-list');
-  if (direction < 0) blk.parentNode.insertBefore(blk, blocks[newIdx]);
-  else blk.parentNode.insertBefore(blocks[newIdx], blk);
+  // Déplacer dans le DOM aussi, en animant l'échange.
+  const other = blocks[newIdx];
+  animateBlockSwap(blk, other, function () {
+    if (direction < 0) blk.parentNode.insertBefore(blk, other);
+    else blk.parentNode.insertBefore(other, blk);
+  });
+  flashMoved(blk);
+
   buildOutline();
+  refreshMoveButtons();
+  bringBlockIntoView(blk);
+  // Garder le focus sur le bouton qu'on vient d'utiliser : sans ça, enchaîner
+  // les déplacements au clavier est impossible (le bloc bouge sous le curseur).
+  // `preventScroll` sinon le focus annule le recentrage qu'on vient de faire.
+  const again = blk.querySelector(direction < 0 ? '.block-move-up' : '.block-move-down');
+  if (again && !again.disabled) { try { again.focus({preventScroll: true}); } catch (e) {} }
   setStatus('Bloc déplacé ✓', 'ok');
 }
 
@@ -1185,23 +1659,29 @@ function addAnswer(blk) {
   const div = document.createElement('div');
   div.className = 'md-answer is-wrong';
   div.dataset.correct = '0';
+  // ⚠ doit rester identique au markup de `_sujet_block.html` (même DOM, mêmes
+  // classes) — sinon une réponse ajoutée ne se comporte pas comme les autres.
   div.innerHTML = '<div class="ans-mark">'
     + '<button type="button" class="ans-badge" title="cliquer pour basculer">✗ mauvaise</button>'
+    + '<div class="ans-meta">'
     + (isMult
         ? '<input type="text" class="ans-bareme" spellcheck="false" value="0">'
         : '<span class="ans-score"></span>')
+    + '</div>'
     + '<button type="button" class="btn-mini ans-remove" title="supprimer">✕</button>'
     + '</div>'
-    + '<textarea class="md-src ans-src" rows="2" spellcheck="false">Nouvelle réponse</textarea>';
+    + '<textarea class="md-src ans-src" rows="1" spellcheck="false">Nouvelle réponse</textarea>';
   list.appendChild(div);
   // Rebind handlers sur les nouveaux éléments
   div.querySelector('.ans-badge').addEventListener('click', function () { toggleCorrect(blk, div); });
   div.querySelector('.ans-remove').addEventListener('click', function () { removeAnswer(blk, div); });
   const ta = div.querySelector('.ans-src');
   renderPreview(ta);
+  autoGrowAnswer(ta);
   let t;
   ta.addEventListener('input', function () {
     markDirty(blk);
+    autoGrowAnswer(ta);
     clearTimeout(t); t = setTimeout(function () { renderPreview(ta); }, 200);
   });
   const bar = div.querySelector('.ans-bareme');
@@ -1291,6 +1771,7 @@ document.querySelectorAll('.sujet-block').forEach(function (blk) {
     if (above) blk.parentNode.insertBefore(src, blk);
     else if (blk.nextSibling) blk.parentNode.insertBefore(src, blk.nextSibling);
     else blk.parentNode.appendChild(src);
+    flashMoved(src);
     buildOutline();
     setStatus('Bloc déplacé ✓', 'ok');
   });
@@ -1613,6 +2094,7 @@ function _outlineDragSetup(li, blk) {
     if (above) blk.parentNode.insertBefore(src, blk);
     else if (blk.nextSibling) blk.parentNode.insertBefore(src, blk.nextSibling);
     else blk.parentNode.appendChild(src);
+    flashMoved(src);
     buildOutline();
     setStatus('Bloc déplacé ✓', 'ok');
   });
@@ -1708,6 +2190,10 @@ async function _renameBlock(blk, newLabel) {
   buildOutline();
 }
 function buildOutline() {
+  // L'état des flèches ▲/▼ dépend de la position des blocs : on le rafraîchit
+  // ici plutôt qu'à chaque site d'appel, pour qu'un futur appelant ne puisse
+  // pas l'oublier (buildOutline tourne après tout changement de structure).
+  refreshMoveButtons();
   const nav = document.getElementById('outline-nav');
   if (!nav) return;
   // Préserver l'état (sections ouvertes ou fermées) avant rebuild.
@@ -1883,6 +2369,58 @@ if (collapseAllBtn) collapseAllBtn.addEventListener('click', function () {
   dets.forEach(d => { d.open = anyClosed; });
 });
 
+// === Sélecteur d'exemplaire : lettres de case ===============================
+// Avec `shuffle_answers`, l'ordre imprimé des réponses change d'un exemplaire
+// à l'autre : la même réponse n'a pas la même lettre. Le badge « case X » d'un
+// bloc n'est donc vrai que pour UN exemplaire — celui choisi ici (1 par
+// défaut). Purement visuel : la correction, elle, lit le numéro d'exemplaire
+// imprimé sur chaque copie scannée et note avec la carte correspondante.
+(function () {
+  const sel = document.getElementById('copy-picker');
+  if (!sel) return;
+  const hint = document.getElementById('copy-hint');
+
+  function applyChars(data) {
+    const chars = (data && data.chars) || {};
+    document.querySelectorAll('.sujet-block[data-kind="question_qcm"]').forEach(function (blk) {
+      const list = chars[String(blk.dataset.q)];
+      const rows = blk.querySelectorAll('.md-answer');
+      rows.forEach(function (row, i) {
+        let el = row.querySelector('.ans-char');
+        const ch = (list && list.length === rows.length) ? list[i] : null;
+        if (!ch) { if (el) el.remove(); return; }
+        if (!el) {
+          el = document.createElement('span');
+          el.className = 'ans-char';
+          const meta = row.querySelector('.ans-meta');
+          if (meta) meta.insertBefore(el, meta.firstChild); else return;
+        }
+        el.textContent = 'case ' + ch;
+      });
+    });
+    // Lettres périmées = le sujet a été édité depuis la dernière compilation.
+    // Ajouter/retirer une réponse est sans risque (la lettre disparaît), mais
+    // en RÉORDONNER en laisse de silencieusement fausses : elles suivent la
+    // position, pas la réponse.
+    document.body.classList.toggle('letters-stale', !!(data && data.stale));
+    if (hint) {
+      hint.textContent = (data && data.stale)
+        ? '⚠ lettres périmées — recompilez'
+        : 'affichage seulement';
+      hint.classList.toggle('is-stale', !!(data && data.stale));
+    }
+  }
+
+  function load(copy) {
+    fetch('/api/sujet/charmap?copy=' + encodeURIComponent(copy), {cache: 'no-store'})
+      .then(r => r.ok ? r.json() : null)
+      .then(applyChars)
+      .catch(() => {});
+  }
+  sel.addEventListener('change', function () { load(sel.value || 1); });
+  load(sel.value || 1);          // au chargement : signale des lettres périmées
+})();
+
 // === Mode legacy : verrouiller toute édition (lecture seule complète) =======
 // Seuls restent fonctionnels : Compiler (voir le PDF), Migration vers
 // canonique (zone dangereuse), navigation (outline + sélecteur copie).
@@ -1918,41 +2456,56 @@ observeBlocksForOutline();
 // Aperçu initial : 1er bloc qui registre une zone AMC (préfère un QCM, sinon
 // n'importe quel bloc avec `data-preview-q` — open, answerbox-avec-barème).
 const firstQ = document.querySelector('.sujet-block[data-kind="question_qcm"][data-preview-q]')
-           || document.querySelector('.sujet-block[data-preview-q]');
-if (firstQ) showPreview(firstQ);
+           || document.querySelector('.sujet-block[data-preview-q]')
+           || document.querySelector('.sujet-block');
+if (firstQ) pvSelect(pvQOf(firstQ), {scrollPreview: false});
 document.getElementById('save-btn').addEventListener('click', function () {
   saveBlocks(dirtyBlocks());
 });
 document.getElementById('compile-btn').addEventListener('click', compileWithGuard);
 updateSaveBtn();
 
-// === Outline : menu contextuel (clic droit) ===============================
-// Canonique seul. Clic droit sur un item ou une section → menu pour insérer
-// section / question / texte AU-DESSOUS du bloc visé, ou le supprimer.
+// === Menu contextuel de bloc (clic droit) =================================
+// Canonique seul. MÊMES actions des deux côtés : clic droit sur un item de la
+// colonne Structure ou sur un bloc de la colonne d'édition → insérer un bloc
+// AU-DESSOUS du bloc visé, l'envoyer à la banque, ou le supprimer.
 (function () {
   if (!IS_CANONICAL) return;
-  const menu = document.getElementById('outlineContextMenu');
+  const menu = document.getElementById('blockContextMenu');
   const outline = document.querySelector('.sujet-outline');
-  if (!menu || !outline) return;
+  const list = document.getElementById('blocks-list');
+  if (!menu || (!outline && !list)) return;
   let ctxTargetBid = null;
 
-  outline.addEventListener('contextmenu', function (e) {
-    let bid = null;
-    const item = e.target.closest('.outline-item[data-target-bid]');
+  function _bidFromOutline(t) {
+    const item = t.closest('.outline-item[data-target-bid]');
     if (item && item.dataset.targetBid && item.dataset.targetBid !== '__bandeau__') {
-      bid = item.dataset.targetBid;
-    } else {
-      const sec = e.target.closest('.outline-section');
-      if (sec) {
-        const sum = sec.querySelector(':scope > details > summary[data-target-bid]');
-        if (sum) bid = sum.dataset.targetBid;
-      }
+      return item.dataset.targetBid;
     }
+    const sec = t.closest('.outline-section');
+    if (sec) {
+      const sum = sec.querySelector(':scope > details > summary[data-target-bid]');
+      if (sum) return sum.dataset.targetBid;
+    }
+    return null;
+  }
+
+  function onContextMenu(e) {
+    // Dans un champ de saisie, on laisse le menu natif du navigateur : c'est
+    // là qu'on attend couper/coller et le correcteur orthographique.
+    if (e.target.closest('input, textarea, select')) return;
+    const bid = _bidFromOutline(e.target)
+             || (e.target.closest('.sujet-block') || {dataset: {}}).dataset.bid;
     if (!bid) return;
     e.preventDefault();
     ctxTargetBid = bid;
+    // Sélectionne le bloc visé : sans ça, rien ne dit sur lequel le menu agit.
+    try { pvSelect(bid, {scrollPreview: false}); } catch (err) {}
     _showCtxMenu(e.clientX, e.clientY);
-  });
+  }
+
+  if (outline) outline.addEventListener('contextmenu', onContextMenu);
+  if (list) list.addEventListener('contextmenu', onContextMenu);
 
   function _showCtxMenu(x, y) {
     menu.hidden = false;
@@ -1969,13 +2522,16 @@ updateSaveBtn();
 
   document.addEventListener('click', function (e) {
     if (menu.hidden) return;
-    if (e.target.closest('#outlineContextMenu')) return;
+    if (e.target.closest('#blockContextMenu')) return;
     _hideCtxMenu();
   });
   document.addEventListener('contextmenu', function (e) {
-    // Clic droit ailleurs que sur l'outline → fermer le menu (laisser passer
-    // le menu natif du navigateur).
-    if (!menu.hidden && !e.target.closest('.sujet-outline')) _hideCtxMenu();
+    // Clic droit hors des deux zones → fermer le menu et laisser passer le
+    // menu natif du navigateur.
+    if (menu.hidden) return;
+    if (!e.target.closest('.sujet-outline') && !e.target.closest('#blocks-list')) {
+      _hideCtxMenu();
+    }
   });
   window.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') _hideCtxMenu();
@@ -1998,7 +2554,10 @@ updateSaveBtn();
     }
 
     if (action === 'save-to-bank') {
-      openBankSaveModal(bid);
+      // `openBankSaveModal` vit dans l'IIFE « Banque » : elle n'est pas
+      // visible d'ici. Le pont `AMCxBankSave` est posé par cette IIFE-là.
+      if (typeof AMCxBankSave === 'function') AMCxBankSave(bid);
+      else setStatus('Banque indisponible.', 'err');
       return;
     }
 
@@ -2026,6 +2585,9 @@ updateSaveBtn();
       afterBid = null;
     } else { return; }
 
+    // `reloadPage()` lève le garde-fou `beforeunload` : sans cette invite,
+    // les blocs modifiés non enregistrés étaient perdus en silence.
+    if (!(await ensureSavedBeforeReload())) return;
     const data = dataOverride || _defaultDataFor(kind, qtype);
     const r = await fetch('/api/sujet/blocks/add', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2041,6 +2603,10 @@ updateSaveBtn();
   });
 })();
 
+// Pont vers la modale « sauver dans la banque », qui vit dans l'IIFE Banque
+// plus bas. Déclaré ici pour être visible du menu contextuel.
+let AMCxBankSave = null;
+
 // === Banque de questions =================================================
 // Canonique seul. Modale plein écran ouverte via le bouton 📚 Banque, +
 // modale rapide « 💾 Sauver dans la banque » depuis le clic droit.
@@ -2055,6 +2621,21 @@ updateSaveBtn();
   let activeTags = new Set();  // tags actuellement sélectionnés (any-match)
   let allTags = [];
   let previewCache = {};       // bank_id -> question complète
+  let bankSlug  = '';          // slug de la banque active (clés localStorage)
+  let browseTree = null;       // arbre de la modale de navigation (mode filtre)
+  let saveTree   = null;       // arbre de la modale d'enregistrement (mode pick)
+
+  // Dernières catégories utilisées, PAR BANQUE : classer dix questions du même
+  // chapitre à la suite ne doit pas demander dix fois le même clic.
+  function lastCatsKey() { return 'amcx-bank-lastcats-' + (bankSlug || 'default'); }
+  function readLastCats() {
+    try { return JSON.parse(localStorage.getItem(lastCatsKey()) || '[]'); }
+    catch (e) { return []; }
+  }
+  function writeLastCats(ids) {
+    try { localStorage.setItem(lastCatsKey(), JSON.stringify(ids || [])); }
+    catch (e) { /* mode privé : simple perte de confort */ }
+  }
 
   // --- Ouvrir / fermer la modale principale -------------------------------
   async function refreshBankModeBadge() {
@@ -2068,6 +2649,8 @@ updateSaveBtn();
       const s = await r.json();
       bankMode = s.mode || 'local';
       bankUserId = s.user_id || '';
+      bankSlug = s.slug || '';
+      if (browseTree && bankSlug) browseTree.setStorageKey('amcx-bank-tree-' + bankSlug);
       if (s.mode === 'online') {
         if (s.logged_in) {
           badge.textContent = '🌍 en ligne · ' + (s.email || '');
@@ -2092,13 +2675,33 @@ updateSaveBtn();
     }
   }
 
-  function openBankModal() {
+  async function openBankModal() {
     bankModal.hidden = false;
     document.getElementById('bank-search').value = '';
     const r = bankModal.querySelector('input[name="bank-kind"][value=""]');
     if (r) r.checked = true;
     activeTags.clear();
-    refreshBankModeBadge();
+    if (!browseTree) {
+      browseTree = AMCxBankTree.create(document.getElementById('bank-cats-tree'), {
+        mode: 'filter',
+        canEdit: false,          // l'arbre s'édite dans l'onglet Banque
+        onFilterChange: () => reloadBankList(),
+      });
+    }
+    await refreshBankModeBadge();
+    // Facettes (tags + arbre) en UNE requête, une seule fois par ouverture.
+    // Les tags ne bougent plus au fil du filtrage : ils décrivent la banque,
+    // pas le résultat courant.
+    try {
+      const fr = await fetch('/api/bank/facets');
+      const fj = await fr.json();
+      if (fr.ok && fj.ok) {
+        allTags = fj.all_tags || [];
+        browseTree.load(fj);
+      }
+    } catch (e) { allTags = []; }
+    renderTagsList();
+    // L'arbre AVANT la liste : `reloadBankList` lui demande les filtres actifs.
     reloadBankList();
     setTimeout(() => document.getElementById('bank-search').focus(), 30);
   }
@@ -2139,6 +2742,7 @@ updateSaveBtn();
     if (q) params.set('q', q);
     if (kind) params.set('kind', kind);
     if (tags.length) params.set('tags', tags.join(','));
+    if (browseTree) browseTree.applyTo(params);
     // Phase B filtres (online seulement, sinon ignorés côté serveur)
     if (bankMode === 'online') {
       if (document.getElementById('bank-filter-fav')?.checked) params.set('mes_favoris', '1');
@@ -2152,8 +2756,6 @@ updateSaveBtn();
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) { renderBankList([], j.error || 'Erreur'); return; }
     bankItems = j.items || [];
-    allTags = j.all_tags || [];
-    renderTagsList();
     renderBankList(bankItems, null);
   }
 
@@ -2228,6 +2830,17 @@ updateSaveBtn();
 
       const meta = document.createElement('div');
       meta.className = 'bank-card-meta';
+      // Chemin de catégorie — inutile quand on filtre déjà sur une catégorie.
+      if (browseTree && !browseTree.getFilter().category) {
+        (it.categories || []).forEach(cid => {
+          const path = browseTree.pathOf(cid);
+          if (!path) return;
+          const c = document.createElement('span');
+          c.className = 'bq-cat-chip';
+          c.textContent = path.join(' › ');
+          meta.appendChild(c);
+        });
+      }
       (it.tags || []).forEach(t => {
         const b = document.createElement('span');
         b.className = 'bank-tag-badge';
@@ -2555,7 +3168,8 @@ updateSaveBtn();
 
   // --- Modale rapide « Sauver dans la banque » ----------------------------
   let saveTargetBid = null;
-  function openBankSaveModal(bid) {
+  AMCxBankSave = openBankSaveModal;      // exposé au menu contextuel
+  async function openBankSaveModal(bid) {
     saveTargetBid = bid;
     const blk = document.querySelector('.sujet-block[data-bid="' + bid + '"]');
     const titleInput = document.getElementById('bank-save-title');
@@ -2565,6 +3179,27 @@ updateSaveBtn();
     document.getElementById('bank-save-error').hidden = true;
     saveModal.hidden = false;
     setTimeout(() => titleInput.focus(), 30);
+
+    // Arbre de classement : créé à la première ouverture, puis repré-sélectionné
+    // sur les dernières catégories utilisées dans cette banque.
+    const host = document.getElementById('bank-save-cats');
+    const hint = document.getElementById('bank-save-cats-hint');
+    if (!bankSlug) await refreshBankModeBadge();
+    if (!saveTree) {
+      saveTree = AMCxBankTree.create(host, {
+        mode: 'pick',
+        storageKey: 'amcx-bank-tree-' + (bankSlug || 'default') + '-save',
+      });
+    }
+    await saveTree.refresh();
+    if (saveTree.isEmpty()) {
+      host.style.display = 'none';
+      hint.textContent = 'Aucune catégorie dans cette banque — crée-en dans l\u2019onglet Banque.';
+    } else {
+      host.style.display = '';
+      hint.textContent = 'Une question peut être dans plusieurs catégories.';
+      saveTree.setPicked(readLastCats());
+    }
   }
   function closeBankSaveModal() { saveModal.hidden = true; saveTargetBid = null; }
 
@@ -2951,9 +3586,11 @@ updateSaveBtn();
       return;
     }
     const tags = tagsStr.split(',').map(t => t.trim()).filter(Boolean);
+    const cats = (saveTree && !saveTree.isEmpty()) ? saveTree.getPicked() : [];
     const r = await fetch('/api/bank', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({bid: saveTargetBid, title: title, tags: tags, author: author})
+      body: JSON.stringify({bid: saveTargetBid, title: title, tags: tags,
+                            author: author, categories: cats})
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
@@ -2961,8 +3598,12 @@ updateSaveBtn();
       errEl.hidden = false;
       return;
     }
+    writeLastCats(cats);
     closeBankSaveModal();
-    setStatus('« ' + title + ' » sauvée dans la banque ✓', 'ok');
+    const where = cats.length
+      ? ' (' + cats.map(c => (saveTree.pathOf(c) || []).join(' › ')).join(', ') + ')'
+      : '';
+    setStatus('« ' + title + ' » sauvée dans la banque ✓' + where, 'ok');
   });
 })();
 </script>

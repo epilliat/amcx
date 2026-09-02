@@ -56,6 +56,7 @@ from sujet_store import (parse_tex, save_questions, compile_pdf, SUJET_DIR,
                          amc_question_map, check_layout_consistency,
                          pop_store_warnings,
                          effective_spec, pdf_regions, render_bareme_examples,
+                         charmap_for_copy, letters_stale,
                          max_score as sujet_max_score, total_max as sujet_total_max,
                          parse_subject, subject_to_dict,
                          add_block as sujet_add_block,
@@ -71,6 +72,7 @@ from sujet_store import (parse_tex, save_questions, compile_pdf, SUJET_DIR,
 import bank
 import bank_online
 import bank_auth
+import bank_taxonomy as tx
 from config import load_config, save_config
 
 
@@ -2147,58 +2149,27 @@ def sujet_page():
     """
     sub = parse_subject()
     cfg = sub["config"]
-    # Mapping `tag AMC → numéro de question dans le .xy`. Construit depuis
-    # `layout_store.question_names` (extrait du fichier exam.xy à la compilation).
-    # Sert à retrouver le numéro AMC d'une question_open / d'une barème answerbox,
-    # vu que ces deux types passent par `\element{group}{…}\insertgroup{group}`
-    # → leur position dans le .xy n'est PAS dans l'ordre du document.
-    tag_to_q: dict[str, int] = {}
-    try:
-        _lay = layout_store.get_layout()
-        for q_num, tag in _lay.question_names.items():
-            tag_to_q[tag.strip()] = q_num
-    except Exception:
-        pass
-
-    # Pour chaque bloc question_qcm, enrichir avec le mapping lettre AMC + max_score.
-    # Indexation par ordre des blocs `question_qcm` (q=1,2,…) — cohérent avec parse_tex().
-    # `preview_q` (numéro AMC global) sert à pointer vers `/sujet/region/<q>.png` pour
-    # l'aperçu PDF.
+    # Enrichissement de chaque bloc : mapping lettre AMC + max_score.
+    # Indexation par ordre des blocs `question_qcm` (q=1,2,…) — cohérent avec
+    # parse_tex(). `preview_q` (clé de région) vient de `block_preview_keys()`.
     qs_by_order = parse_tex()
+    # Clé de région par bloc — MÊME helper que `/sujet/regions.json`, pour que
+    # `data-preview-q` et le champ `bid` des régions ne puissent pas diverger.
+    preview_keys = block_preview_keys(sub["blocks"])
     q_seq = 0          # numéro de QCM (1,2,…) pour le mapping lettre/barème
-    qcm_seq = 0        # compteur AMC pour les QCM (= q_seq ici, mais pour clarté)
     enriched = []
     for b in sub["blocks"]:
         item = {"bid": b.bid, "kind": b.kind, "data": b.data}
         if b.kind == "question_qcm":
             q_seq += 1
-            qcm_seq += 1
             info = qs_by_order.get(q_seq, {})
             item["q"] = q_seq
-            item["preview_q"] = qcm_seq
             item["answers_with_char"] = info.get("answers", [])
             item["max"] = sujet_max_score(q_seq)
-        elif b.kind == "question_open":
-            tag = (b.data.get("tag") or "").strip()
-            q_num = tag_to_q.get(tag)
-            if q_num:
-                item["preview_q"] = q_num
+        elif b.kind in ("question_open", "question_freeform"):
             item["max"] = float(b.data.get("points") or 0.0)
-        elif b.kind == "question_freeform":
-            tag = (b.data.get("tag") or "").strip()
-            q_num = tag_to_q.get(tag)
-            if q_num:
-                item["preview_q"] = q_num
-            item["max"] = float(b.data.get("points") or 0.0)
-        elif b.kind == "answerbox":
-            try:
-                bareme_max = int(b.data.get("bareme_max") or 0)
-            except (TypeError, ValueError):
-                bareme_max = 0
-            if bareme_max > 0:
-                q_num = tag_to_q.get(f"bareme-{b.bid}")
-                if q_num:
-                    item["preview_q"] = q_num
+        if b.bid in preview_keys:
+            item["preview_q"] = preview_keys[b.bid]
         enriched.append(item)
 
     pdf = SUJET_DIR / "DOC-sujet.pdf"
@@ -2406,13 +2377,17 @@ def api_sujet_regenerate_seed():
 
 @app.route("/api/sujet/blocks/add", methods=["POST"])
 def api_sujet_blocks_add():
-    """Ajoute un bloc. Body: {kind, after_bid?, data?} → {bid}."""
+    """Ajoute un bloc. Body: {kind, after_bid?, data?, bid?} → {bid}.
+
+    `bid` sert à l'annulation d'une suppression : réutiliser l'identifiant
+    d'origine garde le lien avec le calage compilé (cf. `add_block`)."""
     body = _json_body()
     kind = body.get("kind", "")
     after_bid = body.get("after_bid")
     data = body.get("data") or None
+    want_bid = body.get("bid") or None
     try:
-        bid = sujet_add_block(kind, after_bid=after_bid, data=data)
+        bid = sujet_add_block(kind, after_bid=after_bid, data=data, bid=want_bid)
         return jsonify({"ok": True, "bid": bid})
     except Exception as e:
         return _crud_error(e)
@@ -2442,7 +2417,10 @@ def api_sujet_import_tex():
     if parsed.get("mode") == "empty":
         return jsonify({"error": ".tex vide ou non reconnu."}), 400
 
-    IMPORTABLE = {"question_qcm", "question_open", "question_freeform"}
+    # `question_freeform` exclu : sa création est désactivée
+    # (cf. sujet_store.DISABLED_KINDS). Les blocs de ce type d'un .tex
+    # importé sont comptés dans `skipped`, pas rejetés en erreur.
+    IMPORTABLE = {"question_qcm", "question_open"}
     added, skipped = 0, 0
     skipped_kinds: dict[str, int] = {}
     for b in parsed.get("blocks", []):
@@ -2684,7 +2662,12 @@ def api_banks_activate(slug):
 
 @app.route("/api/bank")
 def api_bank_list():
-    """Liste les questions de la banque. Query: ?kind=&q=&tags=t1,t2&author=…"""
+    """Liste les questions de la banque.
+
+    Query : `?kind=&q=&tags=t1,t2&author=&category=<uuid>&descendants=0|1
+    &uncategorized=1`. `descendants` vaut 1 par défaut : cliquer sur un
+    chapitre montre tout son sous-arbre.
+    """
     args = request.args
     tags = [t.strip() for t in (args.get("tags") or "").split(",") if t.strip()]
     filters = {
@@ -2692,20 +2675,25 @@ def api_bank_list():
         "q":      args.get("q", ""),
         "tags":   tags,
         "author": args.get("author", ""),
+        # Catégories (les deux backends)
+        "category":      (args.get("category") or "").strip(),
+        "descendants":   args.get("descendants", "1") not in ("0", "false", "no"),
+        "uncategorized": args.get("uncategorized") in ("1", "true", "yes"),
         # Phase B (online only — ignored by bank.py local)
         "mes_favoris": args.get("mes_favoris") in ("1", "true", "yes"),
         "mon_tag":     args.get("mon_tag", ""),
         "status":      args.get("status", ""),
     }
     try:
-        b = _bank()
-        items = b.list_questions(filters)
-        all_tags: set[str] = set()
-        for q in b.list_questions(None):
-            for t in q.get("tags") or []:
-                all_tags.add(t)
-        return jsonify({"ok": True, "items": items,
-                        "all_tags": sorted(all_tags)})
+        items = _bank().list_questions(filters)
+        # ⚠ Cette route ne renvoie PLUS `all_tags`. Le calculer exigeait un
+        # second parcours complet de la banque à CHAQUE frappe dans la
+        # recherche — deux requêtes HTTP complètes en banque en ligne. Les
+        # facettes (tags + arbre) sont servies une fois par `/api/bank/facets`,
+        # à l'ouverture de la modale.
+        return jsonify({"ok": True, "items": items})
+    except tx.TaxonomyError as e:
+        return jsonify({"error": str(e)}), 400
     except bank_online.BankAuthError as e:
         return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
@@ -2850,14 +2838,16 @@ def api_bank_save_data(bank_id):
 def api_bank_save():
     """Sauve un bloc du sujet courant dans la banque.
 
-    Body: {bid, title, tags:[str], author?}. Le bloc est lu dans le sujet
-    actif, ses champs internes sont strippés, un bank_id frais est généré.
+    Body: {bid, title, tags:[str], author?, categories:[uuid]}. Le bloc est lu
+    dans le sujet actif, ses champs internes sont strippés, un bank_id frais
+    est généré.
     """
     body = _json_body()
     bid = (body.get("bid") or "").strip()
     title = (body.get("title") or "").strip()
     tags = body.get("tags") or []
     author = (body.get("author") or "").strip() or _bank_author_default()
+    categories = body.get("categories") or []
     if not bid:
         return jsonify({"error": "bid manquant"}), 400
     try:
@@ -2868,12 +2858,16 @@ def api_bank_save():
         proj = project_state.display_name(config.project_root())
         b = _bank()
         q = b.from_block(block, project_name=proj, title=title,
-                         tags=tags, author=author)
+                         tags=tags, author=author,
+                         categories=_checked_categories(b, categories))
         saved = b.save(q)
         # save() local retourne un Path, online retourne la question. On
         # uniformise : prend l'id depuis ce qui est disponible.
         bid = (saved or {}).get("bank_id") if isinstance(saved, dict) else q.get("bank_id")
         return jsonify({"ok": True, "bank_id": bid, "title": q["title"]})
+    except (tx.TaxonomyError, KeyError, NotImplementedError) as e:
+        # Une catégorie inconnue doit dire 404 avec son id, pas un 400 opaque.
+        return _cat_error(e)
     except bank_online.BankAuthError as e:
         return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
@@ -2886,6 +2880,205 @@ def api_bank_delete(bank_id):
     try:
         _bank().delete(bank_id)
         return jsonify({"ok": True})
+    except bank_online.BankAuthError as e:
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# --------------------------------------------------------------------------
+# Catégories de la banque (arbre partagé) — voir BANK_CATEGORIES_PLAN.md
+#
+# Contrairement aux routes Phase B (ratings, tags persos), les catégories ne
+# sont PAS réservées au backend en ligne : classer ses questions est un besoin
+# de base, qui doit marcher sur une banque locale, sans compte ni réseau.
+# --------------------------------------------------------------------------
+
+def _cat_backend():
+    """Backend actif, s'il sait gérer les catégories. Un backend qui ne les
+    implémente pas encore répond 501 plutôt que de lever un AttributeError
+    opaque."""
+    b = _bank()
+    if not hasattr(b, "list_categories"):
+        raise NotImplementedError(
+            "Les catégories ne sont pas encore disponibles sur ce type de banque.")
+    return b
+
+
+def _cat_error(e: Exception):
+    """Exceptions de l'arbre → HTTP. Conflit d'invariant (cycle, profondeur,
+    doublon entre frères, suppression d'un nœud non vide) = 409 : la requête
+    est bien formée, c'est l'état de l'arbre qui la refuse."""
+    if isinstance(e, tx.TaxonomyConflict):
+        return jsonify({"error": str(e), "conflict": True}), 409
+    if isinstance(e, tx.TaxonomyError):
+        return jsonify({"error": str(e)}), 400
+    if isinstance(e, KeyError):
+        return jsonify({"error": f"identifiant inconnu : {e}"}), 404
+    if isinstance(e, NotImplementedError):
+        return jsonify({"error": str(e)}), 501
+    if isinstance(e, bank_online.BankAuthError):
+        return jsonify({"error": str(e), "auth_required": True}), 401
+    if isinstance(e, ValueError):
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"error": str(e)}), 500
+
+
+def _checked_categories(b, cat_ids) -> list:
+    """Valide une liste d'affectations contre l'arbre du backend `b`.
+
+    Un id mal formé est refusé (400) et un id absent de l'arbre aussi (404) :
+    accepter silencieusement produirait une question classée nulle part, que
+    l'utilisateur croirait rangée.
+    """
+    ids = [str(c or "") for c in (cat_ids or [])]
+    if not ids:
+        return []
+    if not hasattr(b, "list_categories"):
+        raise NotImplementedError(
+            "Les catégories ne sont pas encore disponibles sur ce type de banque.")
+    known = {n["id"] for n in b.list_categories()}
+    out: list = []
+    for c in ids:
+        if not tx.is_valid_cat_id(c):
+            raise tx.TaxonomyError(f"identifiant de catégorie invalide : {c!r}")
+        if c not in known:
+            raise KeyError(c)
+        if c not in out:
+            out.append(c)
+    return out
+
+
+@app.route("/api/bank/categories")
+def api_bank_categories_list():
+    """Arbre aplati en ordre préfixe : `{nodes, max_depth, can_edit}`.
+
+    Chaque nœud porte `depth`, `path`, `n_direct`, `n_total` — l'UI n'a aucun
+    calcul d'arbre à refaire.
+    """
+    try:
+        b = _cat_backend()
+        return jsonify({
+            "ok":        True,
+            "nodes":     b.list_categories(),
+            "max_depth": tx.MAX_DEPTH,
+            "can_edit":  (config.active_bank_cfg().get("type") != "online"
+                          or bank_online.is_logged_in()),
+        })
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/categories", methods=["POST"])
+def api_bank_categories_create():
+    """Crée un nœud. Body : `{name, parent_id?, position?}`."""
+    body = _json_body()
+    try:
+        node = _cat_backend().create_category(
+            body.get("name"),
+            (body.get("parent_id") or None),
+            body.get("position"))
+        return jsonify({"ok": True, "node": node})
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/categories/<cat_id>", methods=["PATCH"])
+def api_bank_categories_update(cat_id):
+    """Renomme / déplace / réordonne. Body : `{name?, parent_id?, position?}`.
+
+    ⚠ `parent_id` **absent** = ne pas toucher au parent ; `parent_id: null` =
+    remonter à la racine. D'où la sentinelle plutôt qu'un simple `.get()`.
+    """
+    body = _json_body()
+    try:
+        kwargs = {}
+        if "name" in body:
+            kwargs["name"] = body.get("name")
+        if "parent_id" in body:
+            kwargs["parent_id"] = body.get("parent_id") or None
+        if body.get("position") is not None:
+            kwargs["position"] = int(body["position"])
+        node = _cat_backend().update_category(cat_id, **kwargs)
+        return jsonify({"ok": True, "node": node})
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/categories/<cat_id>", methods=["DELETE"])
+def api_bank_categories_delete(cat_id):
+    """Supprime un nœud. `?mode=refuse` (défaut) renvoie 409 s'il n'est pas
+    vide ; `?mode=reparent` remonte enfants et questions au parent. Aucune
+    question n'est jamais supprimée."""
+    mode = (request.args.get("mode") or "refuse").strip()
+    try:
+        return jsonify({"ok": True, **_cat_backend().delete_category(cat_id, mode)})
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/categories/<cat_id>/assign", methods=["POST"])
+def api_bank_categories_assign(cat_id):
+    """Affecte un lot de questions à une catégorie.
+
+    Body : `{bank_ids:[…]}` — ou `{tag:"proba"}` pour reprendre toutes les
+    questions portant ce tag public (promotion **opt-in** d'un tag en
+    catégorie ; les tags ne sont jamais convertis automatiquement, sinon
+    l'arbre se remplirait d'étiquettes de niveau et de difficulté).
+    `{remove: true}` retire au lieu d'ajouter. Idempotent.
+    """
+    body = _json_body()
+    try:
+        b = _cat_backend()
+        ids = body.get("bank_ids")
+        tag = (body.get("tag") or "").strip()
+        if ids is None and tag:
+            ids = [q.get("bank_id") for q in b.list_questions({"tags": [tag]})]
+        n = b.assign_category(cat_id, ids or [], remove=bool(body.get("remove")))
+        return jsonify({"ok": True, "n": n})
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/<bank_id>/categories", methods=["GET", "PUT"])
+def api_bank_question_categories(bank_id):
+    """GET → catégories vivantes d'une question ; PUT `{categories:[uuid]}` →
+    remplace (comme les tags persos).
+
+    Ne passe **pas** par `/api/bank/<id>/save-data`, qui incrémente `version` :
+    classer une question n'est pas la modifier.
+    """
+    try:
+        b = _cat_backend()
+        if request.method == "PUT":
+            cats = b.set_question_categories(
+                bank_id, _checked_categories(b, _json_body().get("categories")))
+        else:
+            cats = b.get_question_categories(bank_id)
+        return jsonify({"ok": True, "categories": cats})
+    except Exception as e:
+        return _cat_error(e)
+
+
+@app.route("/api/bank/facets")
+def api_bank_facets():
+    """Facettes de navigation : `{all_tags, nodes, max_depth, can_edit}`.
+
+    Chargée à l'ouverture et après chaque mutation de l'arbre, elle évite de
+    reparcourir toute la banque à chaque frappe dans la recherche.
+    """
+    try:
+        b = _bank()
+        all_tags = {t for q in b.list_questions(None) for t in (q.get("tags") or [])}
+        nodes = b.list_categories() if hasattr(b, "list_categories") else []
+        return jsonify({
+            "ok":        True,
+            "all_tags":  sorted(all_tags),
+            "nodes":     nodes,
+            "max_depth": tx.MAX_DEPTH,
+            "can_edit":  (config.active_bank_cfg().get("type") != "online"
+                          or bank_online.is_logged_in()),
+        })
     except bank_online.BankAuthError as e:
         return jsonify({"error": str(e), "auth_required": True}), 401
     except Exception as e:
@@ -4098,6 +4291,135 @@ def sujet_region_info(q):
         "page_h": page_h,
         "total_pages": total_pages,
     })
+
+
+def block_preview_keys(blocks):
+    """`{bid: clé de région}` pour chaque bloc du sujet.
+
+    La clé est le **numéro AMC** pour les questions (celui de `pdf_regions()`)
+    et le **bid** pour les blocs texte, dont la région est indexée ainsi. Les
+    blocs absents du PDF compilé n'ont pas d'entrée.
+
+    ⚠ Une seule implémentation, partagée par la page (`data-preview-q`) et par
+    `/sujet/regions.json` (champ `bid`) : si les deux divergeaient, un cadre de
+    l'aperçu ne pointerait plus sur le bon bloc. Elle s'appuie sur
+    `layout.question_names` plutôt que sur `amc_question_map()`, dont la
+    classification range la grille de barème d'un `answerbox` (étiquetée 0,1,2…)
+    parmi les colonnes du code étudiant.
+    """
+    tag_to_q = {}
+    try:
+        for q_num, tag in layout_store.get_layout().question_names.items():
+            tag_to_q[str(tag).strip()] = q_num
+    except Exception:
+        pass
+    try:
+        regions = pdf_regions()
+    except Exception:
+        regions = {}
+
+    out, qcm_seq = {}, 0
+    for b in blocks:
+        key = None
+        if b.kind == "question_qcm":
+            qcm_seq += 1
+            key = qcm_seq
+        elif b.kind in ("question_open", "question_freeform"):
+            key = tag_to_q.get((b.data.get("tag") or "").strip())
+        elif b.kind == "answerbox":
+            key = tag_to_q.get(f"bareme-{b.bid}")
+        if key is None and b.bid in regions:
+            key = b.bid                      # bloc texte localisé par son contenu
+        if key is not None:
+            out[b.bid] = key
+    return out
+
+
+@app.route("/api/sujet/charmap")
+def api_sujet_charmap():
+    """Lettres de case par question, pour une copie donnée.
+
+    `?copy=N` → `{copy, chars: {q: [lettres…]}, stale}`. Avec `shuffle_answers`,
+    une même réponse ne porte pas la même lettre d'un exemplaire à l'autre : le
+    sélecteur de copie de l'onglet Sujet rejoue l'affichage avec cette carte.
+    `stale` signale que le sujet a été édité depuis la dernière compilation,
+    donc que les lettres décrivent l'ancien sujet.
+    """
+    try:
+        copy = int(request.args.get("copy") or 1)
+    except (TypeError, ValueError):
+        copy = 1
+    return jsonify({"copy": copy,
+                    "chars": {str(q): c for q, c in charmap_for_copy(copy).items()},
+                    "stale": letters_stale()})
+
+
+@app.route("/sujet/regions.json")
+def sujet_regions_all():
+    """Toutes les régions de question du PDF, en **ratios** de la page.
+
+    Sert au lien bidirectionnel éditeur ↔ aperçu de l'onglet Sujet : le front
+    empile les pages (`/sujet/page/<n>.png`) et pose un rectangle absolu par
+    question, positionné en `%` — donc indépendant de la largeur de rendu du
+    panneau (qui change avec la fenêtre) et du dpi choisi côté serveur.
+
+    `{pages: [{n, w, h}], total_pages, regions: [{q, page, x0, y0, x1, y1}]}`
+    avec x/y ∈ [0,1].
+    """
+    regions = pdf_regions()
+    pdf = SUJET_DIR / "DOC-sujet.pdf"
+    if not pdf.exists():
+        return jsonify({"pages": [], "total_pages": 0, "regions": []})
+    try:
+        doc = fitz.open(str(pdf))
+        total_pages = doc.page_count
+        doc.close()
+    except Exception:
+        total_pages = 0
+    # Dimensions par page (px 300 dpi) — mêmes valeurs de repli que pdf_regions().
+    try:
+        lay = layout_store.get_layout()
+        dims = {p: (float(pi.width), float(pi.height))
+                for p, pi in lay.pages.items()}
+    except Exception:
+        dims = {}
+    # Chaque région reçoit le `bid` du bloc qu'elle représente : c'est la clé
+    # que l'éditeur utilise pour relier un bloc à son cadre. Tous les blocs ont
+    # un bid, y compris ceux sans région (pas encore compilés) — c'est ce qui
+    # rend n'importe quel bloc sélectionnable.
+    bid_of = {}
+    try:
+        for bid, key in block_preview_keys(parse_subject()["blocks"]).items():
+            bid_of[key] = bid
+    except Exception:
+        pass
+
+    out = []
+    # Clés mixtes : int (numéro AMC) pour les questions, str (bid) pour les
+    # blocs texte — on trie donc par position dans le PDF, pas par clé.
+    for q, r in sorted(regions.items(), key=lambda kv: (kv[1]["page"], kv[1]["y0"])):
+        w, h = dims.get(r["page"], (2480.0, 3508.0))
+        if w <= 0 or h <= 0:
+            continue
+        out.append({
+            # `q` = clé interne (numéro AMC, ou bid pour un bloc texte).
+            # `bid` = le bloc de l'éditeur — c'est la clé qu'utilise le front.
+            "q": q, "bid": bid_of.get(q, q if isinstance(q, str) else None),
+            "page": r["page"],
+            "x0": max(0.0, float(r["x0"]) / w), "y0": max(0.0, float(r["y0"]) / h),
+            "x1": min(1.0, float(r["x1"]) / w), "y1": min(1.0, float(r["y1"]) / h),
+        })
+    # On n'expose que les pages couvertes par le calage : avec `\exemplaire{N}`
+    # le PDF contient N copies à la suite, mais le calage (donc les régions)
+    # ne décrit que la copie 1. Empiler les copies 2..N donnerait des pages
+    # sans aucun cadre, sans que l'utilisateur comprenne pourquoi.
+    last = max(dims) if dims else total_pages
+    last = min(last, total_pages) if total_pages else last
+    pages = [{"n": n, "w": dims.get(n, (2480.0, 3508.0))[0],
+              "h": dims.get(n, (2480.0, 3508.0))[1]}
+             for n in range(1, last + 1)]
+    return jsonify({"pages": pages, "total_pages": total_pages,
+                    "shown_pages": last, "regions": out})
 
 
 # ---------------------------------------------------------------------------
