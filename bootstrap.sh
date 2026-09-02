@@ -21,9 +21,14 @@ if command -v uv >/dev/null 2>&1; then
 else
   echo "→ Installation de uv (gestionnaire Python, dans ton dossier personnel)…"
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  # uv s'installe dans ~/.local/bin : le rendre utilisable dans CE script.
-  for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-    [ -x "$d/uv" ] && PATH="$d:$PATH"
+  # Rendre uv utilisable DANS ce script, sans attendre un nouveau terminal.
+  # L'installateur respecte UV_INSTALL_DIR ; sinon il pose uv dans
+  # ~/.local/bin (ou ~/.cargo/bin sur d'anciennes versions).
+  for d in "${UV_INSTALL_DIR:-}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    if [ -n "$d" ] && [ -x "$d/uv" ]; then
+      PATH="$d:$PATH"
+      break
+    fi
   done
   export PATH
 fi
@@ -37,8 +42,20 @@ fi
 echo "→ Installation d'AMCx depuis $REPO ($REF)…"
 uv tool install --force "git+$REPO@$REF"
 
-# 3) S'assurer que la commande sera trouvée dans les prochains terminaux.
+# 3) Rendre `amcx` utilisable : maintenant (dans ce script) et plus tard
+#    (nouveaux terminaux). uv pose l'exécutable dans UV_TOOL_BIN_DIR si défini,
+#    sinon dans ~/.local/bin.
 uv tool update-shell >/dev/null 2>&1 || true
+AMCX_BIN=""
+for d in "${UV_TOOL_BIN_DIR:-}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+  if [ -n "$d" ] && [ -x "$d/amcx" ]; then
+    AMCX_BIN="$d/amcx"
+    PATH="$d:$PATH"
+    export PATH
+    break
+  fi
+done
+[ -z "$AMCX_BIN" ] && AMCX_BIN="$(command -v amcx 2>/dev/null || true)"
 
 # 4) pdflatex : nécessaire seulement pour CRÉER un sujet.
 if ! command -v pdflatex >/dev/null 2>&1; then
@@ -54,9 +71,14 @@ if ! command -v pdflatex >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "→ Diagnostic…"
-echo ""
-"$(command -v amcx || echo "$HOME/.local/bin/amcx")" doctor || true
+if [ -n "$AMCX_BIN" ]; then
+  echo "→ Diagnostic…"
+  echo ""
+  "$AMCX_BIN" doctor || true
+else
+  echo "⚠ La commande amcx n'a pas été trouvée après installation."
+  echo "  Ouvre un nouveau terminal puis lance : amcx doctor"
+fi
 
 cat <<'MSG'
 

@@ -21,10 +21,16 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 } else {
     Write-Host "-> Installation de uv (gestionnaire Python, dans ton dossier utilisateur)..."
     Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
-    # uv s'installe dans %USERPROFILE%\.local\bin : le rendre utilisable ici.
-    $uvBin = Join-Path $env:USERPROFILE ".local\bin"
-    if (Test-Path (Join-Path $uvBin "uv.exe")) {
-        $env:Path = "$uvBin;$env:Path"
+    # Rendre uv utilisable DANS ce script, sans attendre un nouveau terminal.
+    # L'installateur respecte UV_INSTALL_DIR ; sinon %USERPROFILE%\.local\bin.
+    $candidates = @()
+    if ($env:UV_INSTALL_DIR) { $candidates += $env:UV_INSTALL_DIR }
+    $candidates += (Join-Path $env:USERPROFILE ".local\bin")
+    foreach ($d in $candidates) {
+        if (Test-Path (Join-Path $d "uv.exe")) {
+            $env:Path = "$d;$env:Path"
+            break
+        }
     }
 }
 
@@ -37,8 +43,24 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 Write-Host "-> Installation d'AMCx depuis $Repo ($Ref)..."
 uv tool install --force "git+$Repo@$Ref"
 
-# 3) S'assurer que la commande sera trouvee dans les prochains terminaux.
+# 3) Rendre `amcx` utilisable : maintenant et dans les prochains terminaux.
 try { uv tool update-shell | Out-Null } catch { }
+$AmcxBin = $null
+$binDirs = @()
+if ($env:UV_TOOL_BIN_DIR) { $binDirs += $env:UV_TOOL_BIN_DIR }
+$binDirs += (Join-Path $env:USERPROFILE ".local\bin")
+foreach ($d in $binDirs) {
+    $candidate = Join-Path $d "amcx.exe"
+    if (Test-Path $candidate) {
+        $AmcxBin = $candidate
+        $env:Path = "$d;$env:Path"
+        break
+    }
+}
+if (-not $AmcxBin) {
+    $cmd = Get-Command amcx -ErrorAction SilentlyContinue
+    if ($cmd) { $AmcxBin = $cmd.Source }
+}
 
 # 4) pdflatex : necessaire seulement pour CREER un sujet.
 if (-not (Get-Command pdflatex -ErrorAction SilentlyContinue)) {
@@ -51,11 +73,13 @@ if (-not (Get-Command pdflatex -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host ""
-Write-Host "-> Diagnostic..."
-Write-Host ""
-try { amcx doctor } catch {
-    $amcxExe = Join-Path $env:USERPROFILE ".local\bin\amcx.exe"
-    if (Test-Path $amcxExe) { & $amcxExe doctor }
+if ($AmcxBin) {
+    Write-Host "-> Diagnostic..."
+    Write-Host ""
+    try { & $AmcxBin doctor } catch { }
+} else {
+    Write-Host "/!\ La commande amcx n'a pas ete trouvee apres installation."
+    Write-Host "    Ouvre un nouveau PowerShell puis lance : amcx doctor"
 }
 
 Write-Host ""
