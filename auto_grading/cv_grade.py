@@ -306,6 +306,259 @@ def detect_copy_id(warped: np.ndarray, layout: "layout_store.Layout",
         return None
 
 
+# --------------------------------------------------------------------------
+# Code d'identification imprimé en haut de page (copie / page / checksum)
+#
+# AMC imprime ce code en cases noircies (`\AMC@binaryCode`, cf.
+# tex/automultiplechoice.sty) et le calage en donne les positions exactes
+# (`chiffre:<kind>,<rang>`). Il n'y a donc RIEN à faire remplir à l'étudiant :
+# la grille manuelle `\AMCcode{copie}` n'est qu'un repli historique.
+#
+# Trois différences avec les cases cochées, qui dictent la méthode :
+#  - le contenu est IMPRIMÉ : les ratios sont bimodaux (~0 / ~1), pas de marque
+#    pâle, pas de gomme, donc pas besoin du GBM ;
+#  - les cases se touchent (1,7 px d'écart pour 37,8 px de côté), donc
+#    `refine_box_offset` est inutilisable : deux bits noirs voisins fusionnent
+#    en un seul contour, rejeté par son filtre de taille ;
+#  - le code est REDONDANT (copie + page + checksum) et le calage connaît la
+#    liste des triplets valides — ce qui fournit un critère de vérité que les
+#    cases réponses n'ont pas.
+#
+# D'où la stratégie : décoder à la position canonique ; si le triplet obtenu
+# n'est pas dans la liste du calage, balayer un petit voisinage de décalages et
+# n'accepter que si UN SEUL triplet valide en ressort. Un scan mal cadré est
+# ainsi rattrapé, et une lecture douteuse est rejetée au lieu d'attribuer
+# silencieusement la mauvaise copie.
+# --------------------------------------------------------------------------
+
+# Rattrapage de décalage, en deux temps : balayage GROSSIER large puis
+# affinage local. Mesuré sur 173 scans réels d'EXAM_2026 : après recalage sur
+# les mires, il subsiste jusqu'à ~24 px de dérive VERTICALE (1,7 mm à 300 dpi)
+# sur les copies mal engagées dans le chargeur. Une fenêtre de ±16 px en
+# ratait 19 ; ±32 les récupère, et le balayage en deux temps coûte le même
+# nombre d'évaluations qu'un pas de 2 sur ±16.
+CODE_SEARCH_PX = 20          # amplitude horizontale, et vers le HAUT
+# La dérive constatée est nettement asymétrique : sur EXAM_2026, les copies mal
+# engagées dans le chargeur glissent vers le BAS de 70 à 85 px après recalage
+# sur les mires (2 à 3 mm à 300 dpi), jamais vers le haut. On balaye donc plus
+# loin dans ce sens plutôt que d'élargir symétriquement, ce qui quadruplerait
+# le coût pour rien.
+CODE_DRIFT_DOWN = 120
+CODE_COARSE_STEP = 4
+CODE_FINE_PX = 3
+
+
+def _code_cell_darkness(warped: np.ndarray, box, offset: tuple[int, int],
+                        shrink: float) -> float:
+    """Noirceur moyenne dans une case du code, sur [0, 1].
+
+    ⚠ On n'utilise PAS `box_fill_ratio` ici : il binarise à 128 en dur, et un
+    scan pâle dont l'encre plafonne à 130 rend alors tout le code « blanc »
+    (constaté en test : le triplet devenait (0,0,0) et la page était refusée).
+    Le contenu étant imprimé et bimodal, une mesure d'intensité BRUTE, seuillée
+    ensuite relativement aux 24 bits de la page, se cale toute seule sur
+    l'exposition du scan.
+    """
+    dx_off, dy_off = offset
+    x1, x2 = int(box.xmin) + dx_off, int(box.xmax) + dx_off
+    y1, y2 = int(box.ymin) + dy_off, int(box.ymax) + dy_off
+    mx, my = (x2 - x1) * shrink, (y2 - y1) * shrink
+    crop = warped[int(y1 + my):int(y2 - my), int(x1 + mx):int(x2 - mx)]
+    if crop.size == 0:
+        return 0.0
+    return 1.0 - float(np.mean(crop)) / 255.0
+
+
+def _code_bits_value(bits: list, threshold: float) -> int | None:
+    """Bits d'un même code → entier. **Rang 1 = poids fort** (vérifié sur un
+    sujet compilé : copie 1 → `000000000001`, checksum 60 → `111100`)."""
+    if not bits:
+        return None
+    return int("".join("1" if r > threshold else "0" for _, r in sorted(bits)), 2)
+
+
+def _code_threshold(ratios: list[float]) -> float:
+    """Seuil séparant bit noirci / bit vide, par le plus grand écart.
+
+    Le contenu étant imprimé, les deux populations sont franches. On mutualise
+    les 24 bits des trois codes : il est très improbable qu'ils soient tous
+    identiques, donc l'écart existe presque toujours. Repli absolu sinon.
+
+    Le seuil est RELATIF à la page : c'est ce qui rend la lecture insensible à
+    l'exposition du scan (papier gris, encre pâle).
+    """
+    if not ratios:
+        return 0.5
+    srt = sorted(ratios, reverse=True)
+    best_gap, boundary = 0.0, None
+    for i in range(len(srt) - 1):
+        gap = srt[i] - srt[i + 1]
+        if gap > best_gap:
+            best_gap, boundary = gap, (srt[i] + srt[i + 1]) / 2
+    # Écart minimal exigé : en dessous, les deux populations ne se distinguent
+    # pas et un seuil arbitraire inventerait des bits. On rend alors un seuil
+    # médian, dont le triplet sera de toute façon rejeté par la validation.
+    if best_gap >= 0.15 and boundary is not None:
+        return boundary
+    return 0.5
+
+
+def _decode_code_at(warped: np.ndarray, code_boxes: list,
+                    offset: tuple[int, int], shrink: float) -> tuple | None:
+    """Décode (copie, page, checksum) à un décalage donné, sans validation."""
+    ratios = [(c, _code_cell_darkness(warped, c, offset, shrink))
+              for c in code_boxes]
+    thr = _code_threshold([r for _, r in ratios])
+    out = {}
+    for kind in (1, 2, 3):
+        bits = [(c.rank, r) for c, r in ratios if c.kind == kind]
+        out[kind] = _code_bits_value(bits, thr)
+    if any(out[k] is None for k in (1, 2, 3)):
+        return None
+    return (out[1], out[2], out[3])
+
+
+def _code_box_dy(warped: np.ndarray, box, span: int = 18,
+                 base: int = 0) -> int | None:
+    """Décalage vertical propre à UNE case du code, ou None si rien de net.
+
+    On glisse une fenêtre de la hauteur de la case le long d'une bande verticale
+    et on retient la position qui capte le plus d'encre. Marche pour les deux
+    états : une case noircie est pleine, une case vide a ses deux bordures — dans
+    les deux cas l'encre est maximale quand la fenêtre coïncide avec la case.
+
+    `span` reste inférieur à l'écart entre les deux rangées du code (50 px),
+    sinon une case vide pourrait s'accrocher à la rangée voisine.
+    """
+    x1, x2 = int(box.xmin), int(box.xmax)
+    h = max(1, int(box.ymax - box.ymin))
+    y1 = max(0, int(box.ymin) + base - span)
+    y2 = min(warped.shape[0], int(box.ymax) + base + span)
+    win = warped[y1:y2, x1:x2]
+    if win.size == 0 or win.shape[0] <= h:
+        return None
+    ink = 1.0 - win.mean(axis=1) / 255.0
+    if float(ink.max()) < 0.05:
+        return None                      # bande vide : rien à aligner
+    conv = np.convolve(ink, np.ones(h), mode="valid")
+    return int(y1 + int(np.argmax(conv)) - int(box.ymin))
+
+
+def _code_row_fit(warped: np.ndarray, code_boxes: list, base: int = 0) -> dict:
+    """Décalage vertical par case, lissé par une droite ajustée sur chaque rangée.
+
+    Sur les scans engagés de travers, la rangée n'est pas seulement décalée :
+    elle est **inclinée et légèrement bombée** (constaté sur EXAM_2026). Aucun
+    décalage global ne peut donc aligner les 24 cases à la fois. On ajuste une
+    droite `dy = a·x + b` par rangée — l'inclinaison est la part dominante de la
+    déformation — plutôt que d'utiliser les mesures brutes, trop bruitées case
+    par case.
+    """
+    rows: dict = {}
+    for c in code_boxes:
+        rows.setdefault(round(c.ymin), []).append(c)
+    out: dict = {}
+    for _y, boxes in rows.items():
+        pts = [(float(b.xmin), _code_box_dy(warped, b, base=base)) for b in boxes]
+        pts = [(x, d) for x, d in pts if d is not None]
+        if len(pts) < 4:
+            continue
+        xs = np.array([x for x, _ in pts], dtype=np.float64)
+        ds = np.array([d for _, d in pts], dtype=np.float64)
+        # Rejet des mesures aberrantes avant l'ajustement (une case peut
+        # s'accrocher à une poussière) : on garde l'écart absolu médian.
+        med = float(np.median(ds))
+        keep = np.abs(ds - med) <= max(6.0, 3.0 * float(np.median(np.abs(ds - med))))
+        if keep.sum() >= 3:
+            xs, ds = xs[keep], ds[keep]
+        a, b = np.polyfit(xs, ds, 1) if len(xs) >= 3 else (0.0, med)
+        for box in boxes:
+            out[(box.kind, box.rank)] = (0, int(round(a * float(box.xmin) + b)))
+    return out
+
+
+def _decode_code_warped(warped: np.ndarray, code_boxes: list,
+                        offsets: dict, shrink: float) -> tuple | None:
+    """Comme `_decode_code_at`, mais avec un décalage propre à chaque case."""
+    ratios = [(c, _code_cell_darkness(warped, c,
+                                      offsets.get((c.kind, c.rank), (0, 0)), shrink))
+              for c in code_boxes]
+    thr = _code_threshold([r for _, r in ratios])
+    out = {}
+    for kind in (1, 2, 3):
+        bits = [(c.rank, r) for c, r in ratios if c.kind == kind]
+        out[kind] = _code_bits_value(bits, thr)
+    if any(out[k] is None for k in (1, 2, 3)):
+        return None
+    return (out[1], out[2], out[3])
+
+
+def decode_page_code(warped: np.ndarray, layout: "layout_store.Layout",
+                     shrink: float = 0.18,
+                     search: int = CODE_SEARCH_PX,
+                     step: int = CODE_COARSE_STEP) -> tuple | None:
+    """Lit le code imprimé en haut de page → `(copie, page, checksum)`.
+
+    Retourne `None` si le calage ne décrit pas ce code (sujet compilé par une
+    version du style qui ne le trace pas, ou `layout.sqlite` d'AMC) ou si
+    aucune lecture ne donne un triplet connu du calage.
+
+    L'en-tête étant identique sur toutes les pages, on se sert des positions
+    d'une page quelconque comme gabarit : c'est le code lui-même qui dit de
+    quelle page il s'agit.
+    """
+    if not getattr(layout, "code_boxes", None) or not layout.page_ids:
+        return None
+    ref_page = min(c.page for c in layout.code_boxes)
+    code_boxes = layout.code_boxes_on_page(ref_page)
+    if not code_boxes:
+        return None
+    known = set(layout.page_ids)
+
+    # Cas normal : scan bien cadré, lecture directe.
+    got = _decode_code_at(warped, code_boxes, (0, 0), shrink)
+    if got in known:
+        return got
+
+    # Rattrapage : on balaye un voisinage. La validation par triplet connu sert
+    # aussi de critère d'alignement — inutile de deviner le recalage
+    # géométriquement.
+    found = {}
+    coarse = []
+    for dy in range(-search, CODE_DRIFT_DOWN + 1, step):
+        for dx in range(-search, search + 1, step):
+            if dx == 0 and dy == 0:
+                continue
+            got = _decode_code_at(warped, code_boxes, (dx, dy), shrink)
+            if got in known:
+                found.setdefault(got, (dx, dy))
+                coarse.append((dx, dy))
+    # Affinage autour des positions grossières retenues : un pas de 4 px peut
+    # tomber juste à côté du bon alignement, et une case voisine à demi
+    # recouverte suffit à inverser un bit.
+    for cx, cy in coarse[:4]:
+        for dy in range(cy - CODE_FINE_PX, cy + CODE_FINE_PX + 1):
+            for dx in range(cx - CODE_FINE_PX, cx + CODE_FINE_PX + 1):
+                got = _decode_code_at(warped, code_boxes, (dx, dy), shrink)
+                if got in known:
+                    found.setdefault(got, (dx, dy))
+    if len(found) == 1:
+        return next(iter(found))
+    if len(found) > 1:
+        # Plusieurs triplets DIFFÉRENTS : ambigu, on rend la main.
+        return None
+
+    # Toujours rien : la rangée est en plus inclinée ou bombée, aucun décalage
+    # rigide ne l'aligne. On suit alors sa déformation case par case, en partant
+    # du décalage vertical le plus probable.
+    for base in (0, CODE_DRIFT_DOWN // 2):
+        got = _decode_code_warped(
+            warped, code_boxes, _code_row_fit(warped, code_boxes, base=base), shrink)
+        if got in known:
+            return got
+    return None
+
+
 def compute_per_question_offsets(warped: np.ndarray, layout: list) -> dict:
     """Pour chaque question, calcule le décalage médian de ses cases (dx, dy).
 
@@ -558,11 +811,25 @@ def grade_image(image_path: Path | None = None,
     layout = lay.sheet_boxes()
     offsets_by_q = compute_per_question_offsets(warped, layout) if refine else {}
 
-    # --- détection du numéro de copie (sujets randomisés multi-copies) ---
-    # Les positions des cases sont identiques entre copies, donc on lit le copy_id
-    # avec le layout courant (par défaut copie #1) puis on recharge le layout de
-    # la copie réellement scannée pour avoir le bon mapping case ↔ lettre.
-    copy_id = detect_copy_id(warped, lay, offsets_by_q) or 1
+    # --- identification de la copie (sujets randomisés multi-copies) ---
+    # Deux sources, dans cet ordre :
+    #  1. le CODE IMPRIMÉ en haut de page — l'étudiant n'a rien à remplir, et le
+    #     triplet (copie, page, checksum) est validé contre le calage, donc une
+    #     lecture douteuse est refusée plutôt qu'attribuée au hasard ;
+    #  2. à défaut, la grille manuelle `\AMCcode{copie}` (sujets compilés avant
+    #     l'ajout de cette lecture, ou calage sans les cases `chiffre:*`).
+    # Les positions des cases sont identiques entre copies : on lit avec le
+    # layout courant (copie #1 par défaut) puis on recharge celui de la copie
+    # réellement scannée pour avoir le bon mapping case ↔ lettre.
+    page_code = decode_page_code(warped, lay)
+    copy_src = "none"
+    if page_code is not None:
+        copy_id, page_no, _cs = page_code
+        copy_src = "printed"
+    else:
+        copy_id = detect_copy_id(warped, lay, offsets_by_q) or 1
+        page_no = None
+        copy_src = "grid" if copy_id != 1 else "default"
     if copy_id != 1:
         available = layout_store.get_available_copies()
         if copy_id in available:
@@ -573,6 +840,9 @@ def grade_image(image_path: Path | None = None,
                 print(f"  ⚠️  copy_id={copy_id} détecté mais absent du calage "
                       f"(disponibles={available}) → repli sur copie 1")
             copy_id = 1
+            copy_src = "default"
+    if debug and page_code is not None:
+        print(f"  code imprimé : copie {page_code[0]}, page {page_code[1]}")
 
     # Référence masquée (rendu du PDF sujet) — features masquées du GBM
     try:
@@ -752,8 +1022,12 @@ def grade_image(image_path: Path | None = None,
 
     # notes : résumé lisible ; le détail par case vit dans _ambiguous_cells.
     notes = f"method={method}; mires={'ok' if mires is not None else 'FAIL'}"
-    if copy_cols:
-        notes += f"; copy_id={copy_id}"
+    # `copy_id` est noté dès qu'on a su l'identifier — le code imprimé existe
+    # même sur les sujets à un seul exemplaire, où il donne aussi le n° de page.
+    if copy_cols or copy_src == "printed":
+        notes += f"; copy_id={copy_id}({copy_src})"
+        if page_no is not None:
+            notes += f"; page={page_no}"
     if clf_bundle is not None:
         notes += f"; ml=on(overrides={ml_overrides})"
     if ambiguous:
@@ -786,6 +1060,12 @@ def grade_image(image_path: Path | None = None,
         "_cv_method": method,
         "_ambiguous_cells": ambiguous,
         "_copy_id": copy_id,
+        # Provenance du numéro de copie : "printed" = code imprimé en haut de
+        # page (aucune saisie de l'étudiant, validé par checksum), "grid" =
+        # grille manuelle, "default" = rien de lisible, copie 1 par défaut.
+        "_copy_id_source": copy_src,
+        # Numéro de page lu dans ce même code (None si code illisible/absent).
+        "_page_no": page_no,
         "_n_frame_fail": n_frame_fail,
         "_n_cells": n_cells,
         "_is_answer_sheet": is_answer_sheet,

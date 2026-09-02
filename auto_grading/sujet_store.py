@@ -1390,14 +1390,22 @@ def render_header(h: HeaderBlock) -> str:
 
 
 def _copy_grid_digits(num_copies: int) -> int:
-    """Nombre de chiffres requis pour identifier toutes les copies (ceil log10)."""
-    if num_copies < 2:
-        return 0
-    n, d = num_copies, 1
-    while n >= 10:
-        n //= 10
-        d += 1
-    return d
+    """Nombre de chiffres de la grille manuelle « N° copie ». **Toujours 0.**
+
+    AMC imprime déjà le numéro de copie en haut de CHAQUE page, en cases
+    noircies (`\\AMC@binaryCode`), et le calage en donne les positions : la
+    lecture est donc automatique (`cv_grade.decode_page_code`), validée par un
+    checksum, et l'étudiant n'a rien à recopier. Faire remplir une grille
+    n'apportait rien qu'une source d'erreur — et rien n'indiquait à l'étudiant
+    où lire le numéro.
+
+    La fonction est conservée plutôt que supprimée : `render_answer_sheet`
+    l'appelle aux deux endroits, et un sujet LEGACY qui contient déjà un
+    `\\AMCcode{copie}` reste lisible (`cv_grade.detect_copy_id` sert de repli).
+    ⚠ Recompiler un sujet multi-copies déjà imprimé fera disparaître sa grille
+    et changera donc son calage : ne pas recompiler après impression.
+    """
+    return 0
 
 
 def render_answer_sheet(a: AnswerSheetConfig,

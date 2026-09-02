@@ -653,13 +653,70 @@ Marqueurs `%%QCM-PREAMBLE` / `%%QCM-PREAMBLE-END`, `%%QCM-HEADER` / `%%QCM-HEADE
 `%%QCM-BLOCKS-START` / `%%QCM-BLOCKS-END`, `%%QCM-BLOCK bid=… kind=…` / `%%QCM-END bid=…`,
 `%%QCM-ANSWER-SHEET` / `%%QCM-ANSWER-SHEET-END`.
 
-### Multi-copies (`\exemplaire{N}` + grille `numerocopie`)
+### Identification d'une page : le code imprimé en haut (copie / page / checksum)
 
-- Quand `cfg.num_copies > 1`, `render_answer_sheet` auto-injecte
-  `\AMCcode{copie}{ceil(log10(N+1))}` juste avant `\AMCcodeGridInt{etu}{...}`.
-- AMC produit une grille de chiffres `copie[1..N]` sur la feuille de réponses ;
-  `cv_grade.detect_copy_id(warped, layout)` la lit par argmax/gap (même algo
-  que la grille étudiant) et retourne le numéro de copie scanné.
+**L'étudiant n'a rien à recopier.** AMC imprime en haut de *chaque* page un code
+en cases noircies — `\AMC@binaryCode` dans le style vendorisé, trois codes
+successifs : `id=1` numéro de copie, `id=2` numéro de page, `id=3` checksum. Le
+`+1/1/60+` en monospace juste au-dessus n'en est que le doublon lisible à l'œil.
+
+Chaque bit est une **vraie case AMC** taguée `chiffre:<kind>,<rang>`, donc le
+calage en donne les positions exactes. `layout_store` les expose désormais
+(`Layout.code_boxes`, `CodeBox`), avec la liste des triplets valides
+(`Layout.page_ids`, toutes copies confondues) et le checksum par page.
+`cv_grade.decode_page_code(warped, layout)` les lit.
+
+⚠ **Rang 1 = bit de poids fort** (vérifié sur un sujet compilé : copie 1 →
+`000000000001`, checksum 60 → `111100`), pas l'inverse.
+
+Trois différences avec les cases que l'étudiant coche, qui dictent la méthode :
+- le contenu est **imprimé** : les mesures sont bimodales, pas de marque pâle ni
+  de gomme — le GBM ne sert à rien ici ;
+- les cases **se touchent** (1,7 px d'écart pour 37,8 px de côté), donc
+  `refine_box_offset` est inutilisable : deux bits noirs voisins fusionnent en
+  un seul contour, rejeté par son filtre de taille ;
+- le code est **redondant** et le calage connaît les triplets valides — c'est un
+  critère de vérité que les cases réponses n'ont pas.
+
+D'où la stratégie, par coûts croissants : lecture directe → balayage de
+décalages → suivi de la déformation case par case. **La validation par triplet
+connu sert aussi de critère d'alignement** : inutile de deviner le recalage
+géométriquement, et une lecture douteuse est *refusée* au lieu d'attribuer
+silencieusement la mauvaise copie. Plusieurs triplets valides trouvés à des
+décalages différents ⇒ ambigu ⇒ refus.
+
+⚠ **N'utilise pas `box_fill_ratio` pour ces cases** : il binarise à 128 en dur,
+et un scan pâle dont l'encre plafonne à 130 rend alors tout le code « blanc »
+(constaté en test : le triplet devenait `(0,0,0)`). `_code_cell_darkness` mesure
+l'intensité brute et le seuil est calculé **relativement aux 24 bits de la
+page**, ce qui se cale tout seul sur l'exposition du scan.
+
+⚠ **La dérive résiduelle est asymétrique.** Mesuré sur les 173 scans réels
+d'EXAM_2026 : après recalage sur les mires, certaines copies mal engagées dans
+le chargeur glissent de **70 à 85 px vers le bas** (2-3 mm à 300 dpi), jamais
+vers le haut. Le balayage va donc jusqu'à `CODE_DRIFT_DOWN = 120` px vers le
+bas mais seulement 20 px vers le haut — élargir symétriquement quadruplerait le
+coût pour rien. Avec une fenêtre symétrique de ±16 px, 19 copies sur 173
+échouaient.
+
+**Résultats mesurés** (173 scans réels, « pas oufs ») : **173 lus, 0 refusé,
+0 faux**. Coût : **0,2 ms** quand le code est lu du premier coup (le cas
+courant), 64 ms quand le balayage complet tourne.
+
+Le JSON de `raw_responses/` porte `_copy_id_source` (`printed` / `grid` /
+`default`) et `_page_no`, et les `notes` affichent `copy_id=N(printed); page=P`.
+
+**La grille manuelle « N° copie » n'est donc plus imprimée**
+(`sujet_store._copy_grid_digits` retourne toujours 0). `cv_grade.detect_copy_id`
+reste comme **repli** pour les sujets déjà compilés qui en contiennent une, et
+pour les calages sans cases `chiffre:*` (`layout.sqlite` d'AMC, ou un style plus
+ancien). ⚠ Recompiler un sujet multi-copies **déjà imprimé** fera disparaître sa
+grille et changera son calage : ne pas recompiler après impression.
+
+### Multi-copies (`\exemplaire{N}`)
+
+- `grade_image` identifie la copie par le code imprimé (ci-dessus), sinon par la
+  grille manuelle si le sujet en a une.
 - `grade_image` détecte `_copy_id` puis recharge `layout_store.get_layout(copy=N)` :
   les positions des cases sont identiques mais le mapping char↔réponse est permuté.
   Le `_copy_id` est écrit dans le JSON `raw_responses/`.
@@ -904,7 +961,7 @@ l'autre** — mesuré sur un sujet à 3 exemplaires, une même réponse porte C,
 puis B. Le sélecteur en haut de page choisit l'exemplaire affiché
 (`GET /api/sujet/charmap?copy=N`) ; il est **masqué quand il n'y a qu'un seul
 exemplaire**, et n'a aucun effet sur la correction — celle-ci lit le numéro
-d'exemplaire imprimé sur chaque copie scannée (`cv_grade.detect_copy_id`) et
+d'exemplaire imprimé sur chaque copie scannée (`cv_grade.decode_page_code`) et
 note avec la carte correspondante.
 
 ⚠ `charmap_for_copy()` est indexé par **numéro de QCM** (la clé de
@@ -1254,7 +1311,7 @@ Premier `tests/` du dépôt — **`unittest` de la stdlib**, pas de pytest (aucu
 dépendance ajoutée) :
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 141 tests
+.venv/bin/python -m unittest discover -s tests -v     # 175 tests
 ./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
 ```
 

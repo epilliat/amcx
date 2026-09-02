@@ -63,6 +63,27 @@ class Box:
 
 
 @dataclass(frozen=True)
+class CodeBox:
+    """Un bit du code d'identification imprimé en haut de chaque page.
+
+    AMC dessine ce code avec `\\AMC@binaryCode` : chaque bit est une vraie case,
+    **noircie à l'impression** si le bit vaut 1, vide sinon. Trois codes se
+    suivent : `kind=1` numéro de copie, `kind=2` numéro de page, `kind=3`
+    checksum. `rank` est l'ordre de dessin, de gauche à droite.
+
+    Rien à voir avec les cases que l'étudiant coche : celles-ci sont imprimées
+    et donc lisibles sans que personne ne remplisse quoi que ce soit.
+    """
+    page: int
+    kind: int          # 1 = copie, 2 = page, 3 = checksum
+    rank: int          # 1 = case la plus à gauche
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+
+
+@dataclass(frozen=True)
 class Zone:
     """Une zone nommée (ex. champ nom manuscrit `__n`)."""
     page: int
@@ -80,6 +101,7 @@ class PageInfo:
     height: float          # px
     mark_diameter: float   # px
     mires: tuple           # 4 (x,y) [TL, TR, BR, BL] ; () si absentes
+    checksum: int = 0      # 3e champ de `\\page{copie/page/checksum}`
 
 
 @dataclass
@@ -99,6 +121,11 @@ class Layout:
     question_names: dict = field(default_factory=dict)
     source: str = ""
     copy: int = 1                     # numéro de copie (1..N)
+    code_boxes: list = field(default_factory=list)   # bits du code imprimé
+    # Triplets (copie, page, checksum) de TOUTES les copies du sujet. Sert à
+    # valider un code décodé : un triplet absent de cette liste est une lecture
+    # fausse, pas une copie inconnue.
+    page_ids: tuple = ()
 
     # ---- accès à la feuille de réponses ----------------------------------
     def sheet_boxes(self, role: int | None = ROLE_ANSWER) -> list:
@@ -106,6 +133,11 @@ class Layout:
         bs = [b for b in self.boxes
               if b.page == self.answer_sheet_page and (role is None or b.role == role)]
         return sorted(bs, key=lambda b: (b.question, b.answer))
+
+    def code_boxes_on_page(self, page: int) -> list:
+        """Bits du code imprimé de cette page, triés (kind, rang)."""
+        return sorted([c for c in self.code_boxes if c.page == page],
+                      key=lambda c: (c.kind, c.rank))
 
     def boxes_on_page(self, page: int, role: int | None = None) -> list:
         bs = [b for b in self.boxes
@@ -182,6 +214,8 @@ _BOX_RE = re.compile(
     r"^(casequestion|case|scorequestion|score|qtext|atext)"
     r":(.*):([0-9]+),(-?[0-9]+)$")
 _DIGIT_RE = re.compile(r"[1-9]")
+# Bits du code d'identification imprimé : `chiffre:<kind>,<rang>`.
+_CODE_RE = re.compile(r"^chiffre:([0-9]+),([0-9]+)$")
 
 
 def _read_inches(dim: str) -> float:
@@ -291,7 +325,11 @@ def parse_xy_all_copies(path) -> dict[int, Layout]:
         by_copy.setdefault(student, []).append(p)
     if not by_copy:
         return {}
-    return {c: _build_from_pages(pages, question_names, str(path), copy=c)
+    # Triplets de toutes les copies : c'est l'ensemble de validation d'un code
+    # décodé, et on ne sait pas encore quelle copie on regarde.
+    all_ids = tuple(sorted({_epc(p["id"]) for p in raw_pages}))
+    return {c: _build_from_pages(pages, question_names, str(path), copy=c,
+                                 page_ids=all_ids)
             for c, pages in by_copy.items()}
 
 
@@ -308,8 +346,9 @@ def parse_xy(path) -> Layout:
     return layouts.get(1) or next(iter(layouts.values()))
 
 
-def _build_from_pages(raw_pages, question_names, source, copy=1) -> Layout:
-    pages, boxes, zones = {}, [], []
+def _build_from_pages(raw_pages, question_names, source, copy=1,
+                      page_ids=()) -> Layout:
+    pages, boxes, zones, code_boxes = {}, [], [], []
 
     for p in raw_pages:
         _student, pageno, _checksum = _epc(p["id"])
@@ -340,7 +379,8 @@ def _build_from_pages(raw_pages, question_names, source, copy=1) -> Layout:
 
         pages[pageno] = PageInfo(page=pageno,
                                  width=DPI * p["dim_x"], height=DPI * p["dim_y"],
-                                 mark_diameter=mark_diameter, mires=mires)
+                                 mark_diameter=mark_diameter, mires=mires,
+                                 checksum=_checksum)
 
         # meptex : une page sans aucune mire est ignorée pour les cases/zones
         if dn == 0:
@@ -361,8 +401,18 @@ def _build_from_pages(raw_pages, question_names, source, copy=1) -> Layout:
                                  question=int(mb.group(3)), answer=int(mb.group(4)),
                                  char=box["char"] or "",
                                  xmin=bb[0], xmax=bb[1], ymin=bb[2], ymax=bb[3]))
+                continue
+            mc = _CODE_RE.match(key)
+            if mc:
+                code_boxes.append(CodeBox(page=pageno, kind=int(mc.group(1)),
+                                          rank=int(mc.group(2)),
+                                          xmin=bb[0], xmax=bb[1],
+                                          ymin=bb[2], ymax=bb[3]))
 
-    return _assemble(DPI, pages, boxes, zones, question_names, source, copy=copy)
+    lay = _assemble(DPI, pages, boxes, zones, question_names, source, copy=copy)
+    lay.code_boxes = code_boxes
+    lay.page_ids = tuple(page_ids)
+    return lay
 
 
 # ==========================================================================
