@@ -72,12 +72,18 @@ def _subject_pdf() -> Path:
         "Compile le sujet (onglet Sujet) pour produire sujet/DOC-sujet.pdf.")
 
 
-def render_reference(lay) -> np.ndarray:
-    """Rendu 300 dpi, en gris, de la feuille de réponses du PDF du sujet."""
+def render_reference(lay, page: int | None = None) -> np.ndarray:
+    """Rendu 300 dpi, en gris, d'une feuille de réponses du PDF du sujet.
+
+    `page` : numéro de page AMC (1-based). Par défaut la feuille principale —
+    un sujet dont les réponses débordent sur plusieurs feuilles en a une par
+    page, et chacune a sa propre référence.
+    """
+    if page is None:
+        page = lay.answer_sheet_page
     doc = fitz.open(str(_subject_pdf()))
     try:
-        pix = doc[lay.answer_sheet_page - 1].get_pixmap(
-            matrix=fitz.Matrix(300 / 72, 300 / 72))
+        pix = doc[page - 1].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
     finally:
         doc.close()
     a = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
@@ -281,30 +287,43 @@ def masked_features(warped: np.ndarray, ref: np.ndarray, box,
 # Référence en cache
 # ==========================================================================
 
-_REF_CACHE: dict = {"key": None, "ref": None, "frames": None}
+# Une entrée par feuille de réponses : un sujet multi-feuilles en a plusieurs,
+# et passer de l'une à l'autre au fil des pages scannées ne doit pas relancer
+# un rendu PDF à chaque fois.
+_REF_CACHE: dict = {}
+_REF_MAX = 4
 
 
-def get_reference(lay):
+def get_reference(lay, page: int | None = None):
     """`(ref_img, ref_frames)` : rendu du PDF sujet + cadre détecté par case.
 
+    `page` : la feuille de réponses concernée (défaut : la principale). Avec
+    plusieurs feuilles, chacune a sa référence et ses cadres — les mélanger
+    ferait chercher les cases de la feuille 2 aux positions de la feuille 1.
+
     `ref_frames` = `dict[(question, answer) → 4 coins | None]`. Mis en cache
-    (clé = mtime du PDF) — recalculer à chaque case serait catastrophique.
+    par (PDF, mtime, page) — recalculer à chaque case serait catastrophique.
     """
+    if page is None:
+        page = lay.answer_sheet_page
     pdf = _subject_pdf()
-    key = (str(pdf), pdf.stat().st_mtime, lay.answer_sheet_page)
-    if _REF_CACHE["key"] != key:
-        ref = render_reference(lay)
+    key = (str(pdf), pdf.stat().st_mtime, page)
+    hit = _REF_CACHE.get(key)
+    if hit is None:
+        ref = render_reference(lay, page)
         frames = {}
-        for b in lay.sheet_boxes():
+        for b in lay.sheet_boxes(page=page):
             sc, _ = detect_frame(ref, b)
             frames[(b.question, b.answer)] = sc
-        _REF_CACHE.update(key=key, ref=ref, frames=frames)
-    return _REF_CACHE["ref"], _REF_CACHE["frames"]
+        if len(_REF_CACHE) >= _REF_MAX:
+            _REF_CACHE.pop(next(iter(_REF_CACHE)))
+        hit = _REF_CACHE[key] = (ref, frames)
+    return hit
 
 
 def invalidate_cache() -> None:
-    """Force le re-rendu de la référence au prochain `get_reference()`."""
-    _REF_CACHE["key"] = None
+    """Force le re-rendu des références au prochain `get_reference()`."""
+    _REF_CACHE.clear()
 
 
 # ==========================================================================
@@ -317,10 +336,11 @@ def main():
     ref, frames = get_reference(lay)
     ok = sum(v is not None for v in frames.values())
     print(f"PDF sujet     : {_subject_pdf()}")
-    print(f"Référence     : {ref.shape} | feuille page {lay.answer_sheet_page}")
+    print(f"Référence     : {ref.shape} | feuille page {lay.answer_sheet_page} "
+          f"(feuilles de réponses : {list(lay.answer_sheet_pages)})")
     print(f"Cadres réf    : {ok}/{len(frames)} détectés")
     # mesure masquée sur quelques cases de la référence elle-même (toutes vides) :
-    sample = lay.sheet_boxes()[:8]
+    sample = lay.sheet_boxes(page=lay.answer_sheet_page)[:8]
     print("\nmasked_features sur la référence (cases vides → ratios attendus bas) :")
     for b in sample:
         f = masked_features(ref, ref, b, frames.get((b.question, b.answer)))

@@ -483,15 +483,17 @@ def _coarse_align_to_reference(gray: np.ndarray, ref: np.ndarray,
 
 def align_by_frames(gray: np.ndarray, lay: "layout_store.Layout",
                     ref: np.ndarray | None = None,
-                    iters: int = FRAME_ALIGN_ITERS) -> tuple:
+                    iters: int = FRAME_ALIGN_ITERS,
+                    page: int | None = None) -> tuple:
     """Recale une page SANS ses mires, sur la grille des cadres imprimés.
 
+    `page` : la feuille de réponses supposée (ses cases servent d'appuis).
     Retourne `(warped, info)` où `info` porte `ok` (le recalage est-il digne de
     confiance), `n_frames`, `n_boxes`, `resid` (px, médian) et `corr`. Quand
     `ok` est faux, `warped` ne vaut pas mieux que le repli par redimensionnement
     et l'appelant doit le traiter comme tel.
     """
-    boxes = lay.sheet_boxes()
+    boxes = lay.sheet_boxes(page=page)
     canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
     info = {"ok": False, "n_frames": 0, "n_boxes": len(boxes),
             "resid": float("nan"), "corr": 0.0}
@@ -520,7 +522,71 @@ def align_by_frames(gray: np.ndarray, lay: "layout_store.Layout",
     info["ok"] = (len(idx) >= FRAME_ALIGN_MIN_FRAC * len(boxes)
                   and info["resid"] == info["resid"]            # non NaN
                   and info["resid"] <= FRAME_ALIGN_MAX_RESID)
+    info["page"] = page if page is not None else lay.answer_sheet_page
     return warped, info
+
+
+def align_by_frames_any_sheet(gray: np.ndarray, lay: "layout_store.Layout",
+                              get_ref=None) -> tuple:
+    """Comme `align_by_frames`, mais sans savoir de QUELLE feuille il s'agit.
+
+    Un sujet dont les réponses débordent sur plusieurs feuilles en a une par
+    page, chacune avec sa propre grille de cadres. Sans mires ET sans code
+    imprimé lisible, on essaie chaque feuille et on garde celle qui se recale
+    le mieux — c'est la grille de la bonne feuille qui s'ajuste, celle des
+    autres ne trouve presque aucun cadre.
+    """
+    pages = lay.answer_sheet_pages or (lay.answer_sheet_page,)
+    best = None
+    for p in pages:
+        ref = None
+        if get_ref is not None:
+            try:
+                ref = get_ref(p)[0]
+            except Exception:
+                ref = None
+        warped, info = align_by_frames(gray, lay, ref, page=p)
+        score = (info["ok"], info["n_frames"] / max(1, info["n_boxes"]))
+        if best is None or score > best[0]:
+            best = (score, warped, info)
+        if info["ok"] and len(pages) == 1:
+            break
+    return best[1], best[2]
+
+
+def _count_frames_on_sheet(warped: np.ndarray, lay: "layout_store.Layout",
+                           page: int, sample: int = 24) -> float:
+    """Fraction d'un échantillon de cases de cette feuille dont le cadre est
+    retrouvé dans le scan. Sert à deviner quelle feuille est sous les yeux
+    quand le code imprimé est illisible."""
+    boxes = lay.sheet_boxes(page=page)
+    if not boxes:
+        return 0.0
+    step = max(1, len(boxes) // sample)
+    sel = boxes[::step][:sample]
+    ok = sum(1 for b in sel if masked_detect.detect_frame(warped, b)[0] is not None)
+    return ok / len(sel)
+
+
+def pick_sheet_page(warped: np.ndarray, lay: "layout_store.Layout",
+                    page_no: int | None) -> tuple:
+    """Quelle feuille de réponses cette image montre-t-elle ? → `(page, source)`.
+
+    1. Le **code imprimé** en haut de page donne le numéro de page, validé par
+       checksum contre le calage : c'est la source sûre, et la seule qui
+       fonctionne quand deux feuilles se ressemblent.
+    2. À défaut, on compte les cadres retrouvés sur un échantillon des cases de
+       chaque feuille : seule la bonne s'ajuste.
+    3. Sujet à une seule feuille : c'est elle, sans rien mesurer.
+    """
+    pages = lay.answer_sheet_pages or (lay.answer_sheet_page,)
+    if page_no is not None and page_no in pages:
+        return page_no, "printed"
+    if len(pages) <= 1:
+        return (pages[0] if pages else lay.answer_sheet_page), "only"
+    scores = {p: _count_frames_on_sheet(warped, lay, p) for p in pages}
+    best = max(scores, key=lambda p: scores[p])
+    return best, "frames"
 
 
 def box_fill_ratio(img_warped_gray: np.ndarray, box: BoxLayout, shrink: float = 0.18,
@@ -581,7 +647,8 @@ def box_dark_ratio(img_warped_gray: np.ndarray, box: BoxLayout, paper: float,
 
 def detect_copy_id(warped: np.ndarray, layout: "layout_store.Layout",
                    offsets_by_q: dict | None = None,
-                   shrink: float = 0.18, paper: float | None = None) -> int | None:
+                   shrink: float = 0.18, paper: float | None = None,
+                   page: int | None = None) -> int | None:
     """Lit la grille `\\AMCcode{copie}{N}` imprimée sur la feuille → entier copie.
 
     Convention AMC : `\\AMCcode{copie}{N}` crée N colonnes nommées `copie[1]`,
@@ -599,7 +666,10 @@ def detect_copy_id(warped: np.ndarray, layout: "layout_store.Layout",
     if not copy_cols:
         return None
     by_col: dict[int, list] = {}
-    for b in layout.sheet_boxes():
+    # `page` : la feuille effectivement scannée. La grille « N° copie » n'est
+    # imprimée que sur l'une d'elles ; chercher ses cases sur une autre
+    # reviendrait à mesurer du vide.
+    for b in layout.sheet_boxes(page=page):
         if b.question in set(copy_cols):
             by_col.setdefault(b.question, []).append(b)
     rank: dict[int, int] = {}
@@ -1255,14 +1325,16 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
     canon_mires = np.asarray(lay.mires, dtype=np.float32)
     canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
 
-    # Référence masquée (rendu du PDF sujet) — features masquées du GBM, et
-    # amorce du recalage sans mires. Chargée avant le warp pour cette raison.
-    try:
-        ref_img, ref_frames = masked_detect.get_reference(lay)
-    except Exception as e:
-        ref_img, ref_frames = None, {}
-        if debug:
-            print(f"  ⚠️  référence masquée indisponible: {e}")
+    # Référence masquée (rendu du PDF sujet), par feuille de réponses : elle
+    # sert aux features masquées du GBM et amorce le recalage sans mires, donc
+    # elle est chargée avant le warp.
+    def _reference(page):
+        try:
+            return masked_detect.get_reference(lay, page)
+        except Exception as e:
+            if debug:
+                print(f"  ⚠️  référence masquée indisponible: {e}")
+            return None, {}
 
     mires = detect_mires(gray, layout=lay)
     method = "cv_full"
@@ -1272,7 +1344,7 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
         # questions justes, mesuré), on recale sur la grille des cadres
         # imprimés. Si ce recalage n'inspire pas confiance, on retombe sur
         # l'ancien repli et `method` le dit.
-        warped, align_info = align_by_frames(gray, lay, ref_img)
+        warped, align_info = align_by_frames_any_sheet(gray, lay, _reference)
         if align_info["ok"]:
             method = "cv_frames"
             if debug:
@@ -1285,10 +1357,21 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
                 print(f"  ⚠️  ni mires ni cadres exploitables "
                       f"({align_info['n_frames']}/{align_info['n_boxes']} cadres) "
                       f"— traitement direct (probable échec)")
+
     else:
         warped = warp_to_canonical(gray, mires, canon_mires, canon_w, canon_h)
 
-    layout = lay.sheet_boxes()
+    # --- quelle feuille de réponses est sous les yeux ? -------------------
+    # Un sujet à beaucoup de questions déborde sur plusieurs feuilles. Chacune
+    # porte son propre code imprimé (copie, page, checksum) : c'est lui qui dit
+    # laquelle on regarde. Le code est lu avant toute lecture de case, car les
+    # positions des cases en dépendent.
+    page_code = decode_page_code(warped, lay)
+    page_no = page_code[1] if page_code is not None else None
+    sheet_page, sheet_src = pick_sheet_page(warped, lay, page_no)
+    ref_img, ref_frames = _reference(sheet_page)
+
+    layout = lay.sheet_boxes(page=sheet_page)
     offsets_by_q = compute_per_question_offsets(warped, layout) if refine else {}
     paper = paper_level(warped)   # niveau du papier, pour les mesures relatives
 
@@ -1302,20 +1385,19 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
     # Les positions des cases sont identiques entre copies : on lit avec le
     # layout courant (copie #1 par défaut) puis on recharge celui de la copie
     # réellement scannée pour avoir le bon mapping case ↔ lettre.
-    page_code = decode_page_code(warped, lay)
     copy_src = "none"
     if page_code is not None:
-        copy_id, page_no, _cs = page_code
+        copy_id = page_code[0]
         copy_src = "printed"
     else:
-        copy_id = detect_copy_id(warped, lay, offsets_by_q, paper=paper) or 1
-        page_no = None
+        copy_id = detect_copy_id(warped, lay, offsets_by_q, paper=paper,
+                                 page=sheet_page) or 1
         copy_src = "grid" if copy_id != 1 else "default"
     if copy_id != 1:
         available = layout_store.get_available_copies()
         if copy_id in available:
             lay = layout_store.get_layout(copy=copy_id)
-            layout = lay.sheet_boxes()
+            layout = lay.sheet_boxes(page=sheet_page)
         else:
             if debug:
                 print(f"  ⚠️  copy_id={copy_id} détecté mais absent du calage "
@@ -1515,6 +1597,8 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
     if align_info is not None and align_info["ok"]:
         notes += (f"; recalage=cadres({align_info['n_frames']}/{align_info['n_boxes']},"
                   f"resid={align_info['resid']:.1f})")
+    if len(lay.answer_sheet_pages) > 1:
+        notes += f"; feuille={sheet_page}({sheet_src})"
     # `copy_id` est noté dès qu'on a su l'identifier — le code imprimé existe
     # même sur les sujets à un seul exemplaire, où il donne aussi le n° de page.
     if copy_cols or copy_src == "printed":
@@ -1559,6 +1643,13 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
         "_copy_id_source": copy_src,
         # Numéro de page lu dans ce même code (None si code illisible/absent).
         "_page_no": page_no,
+        # Feuille de réponses effectivement lue, et comment elle a été
+        # identifiée ("printed" = code imprimé, "frames" = comptage de cadres,
+        # "only" = le sujet n'en a qu'une). Sert au recollage des copies
+        # multi-feuilles par `seed_raw_responses`.
+        "_sheet_page": sheet_page,
+        "_sheet_source": sheet_src,
+        "_n_sheets": len(lay.answer_sheet_pages),
         "_n_frame_fail": n_frame_fail,
         "_n_cells": n_cells,
         "_is_answer_sheet": is_answer_sheet,
@@ -1665,7 +1756,8 @@ def _grade_freeform_open_answers(warped: np.ndarray, page_index: int) -> dict:
 # une page sans grille). Les autres clés `_…` (confidences, méthode) restent
 # internes.
 _JSON_PRIVATE_KEYS = ("_ambiguous_cells", "_is_answer_sheet", "_n_frame_fail",
-                      "_n_cells", "_copy_id", "_copy_id_source", "_page_no")
+                      "_n_cells", "_copy_id", "_copy_id_source", "_page_no",
+                      "_sheet_page", "_sheet_source", "_n_sheets")
 
 
 def result_to_json(r: dict) -> dict:

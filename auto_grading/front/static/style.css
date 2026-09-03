@@ -3961,3 +3961,22 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 }
 .banque-q-row[draggable="true"] { cursor: grab; }
 .banque-q-row.is-dragging { opacity: .45; }
+
+/* Copies dont les réponses tiennent sur plusieurs feuilles : sélecteur de
+   feuille au-dessus de l'image. Les ronds cliquables ne valent que pour la
+   feuille affichée, d'où le besoin de choisir explicitement. */
+.sheet-tabs {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 8px; font-size: 13px;
+}
+.sheet-tabs-label { color: #6b7280; }
+.sheet-tab {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 23px; padding: 0 7px;
+  border: 1px solid #c9ced6; border-radius: 4px;
+  background: #fff; color: #374151; text-decoration: none;
+}
+.sheet-tab:hover { border-color: #2769d8; color: #2769d8; }
+.sheet-tab.is-active {
+  background: #2769d8; border-color: #2769d8; color: #fff; font-weight: 600;
+}

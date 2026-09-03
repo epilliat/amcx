@@ -377,6 +377,61 @@ feuille de réponses ne retrouve presque aucun cadre (14 sur 193, corrélation
 retombe sur `cv_no_mires`, plutôt que de rendre une lecture plausible et
 fausse. `method` vaut donc `cv_full`, `cv_frames` ou `cv_no_mires`.
 
+### 7ter. Réponses sur plusieurs feuilles — ⚠ implémenté mais peu éprouvé
+
+Un sujet à beaucoup de questions déborde : AMC imprime alors **une feuille de
+réponses par groupe de questions**, chacune avec son propre code (copie, page,
+checksum) en haut. Le pipeline lit une feuille à la fois puis les recolle.
+
+⚠ **Ce chemin n'a été validé que sur des scans fabriqués** (rendus du PDF avec
+des cases noircies par programme), jamais sur de vraies copies scannées. Le cas
+à une feuille, lui, est éprouvé sur les 173 scans d'EXAM_2026. Attendre des
+surprises sur : marques pâles d'une feuille à l'autre, feuille agrafée de
+travers, scan qui saute une feuille. **Vérifier quelques copies à la main avant
+de corriger un lot.** `doctor` le rappelle dès qu'il voit plusieurs feuilles.
+
+Ce qui a été mesuré, sur un sujet de 80 questions à 2 feuilles : les deux
+feuilles sont lues (34 + 47 questions, l'union couvre le sujet), 3 copies
+recollées sans erreur, et le recollage résiste à un scan dans le désordre
+quand les exemplaires sont numérotés.
+
+- **Le calage distingue les deux notions** : `Layout.answer_sheet_pages` (toutes
+  les feuilles) et `answer_sheet_page` (la principale, celle qui porte le plus
+  de cases). `sheet_boxes()` **sans argument rend TOUTES les feuilles** — c'est
+  ce que veut une correspondance globale (question ↔ lettre, barème, liste des
+  QCM) ; `sheet_boxes(page=N)` rend celles d'une feuille, ce que veut tout ce
+  qui travaille sur UNE image (lecture, référence masquée, ronds de l'UI).
+  ⚠ Un sujet à une feuille rend la même chose dans les deux cas : une confusion
+  entre les deux ne se voit donc **pas** sur EXAM_2026.
+- **Quelle feuille est sous les yeux** : `cv_grade.pick_sheet_page()`. Le code
+  imprimé donne le numéro de page, validé par checksum — source sûre. À défaut,
+  on compte les cadres retrouvés sur un échantillon de chaque feuille : seule la
+  bonne s'ajuste. Écrit dans le JSON (`_sheet_page`, `_sheet_source`).
+- **La référence masquée est par feuille** (`masked_detect.get_reference(lay,
+  page)`, cache de 4 entrées) : mélanger les feuilles ferait chercher les cases
+  de l'une aux positions de l'autre.
+- **Le recollage** vit dans `seed_raw_responses.group_sheets()` /
+  `merge_sheets()`. La copie fusionnée est écrite à l'emplacement de sa
+  **première feuille**, avec `_sheets` qui liste les images sources — tout
+  l'aval (score, liste, export) reste donc inchangé.
+
+⚠ **Deux façons de relier les feuilles d'un même étudiant, très inégales.**
+Avec des **exemplaires numérotés** (`\exemplaire{N}`, bandeau *Randomisation*),
+le code imprimé donne le numéro de copie : le recollage est exact et insensible
+à l'ordre du scan. Avec **un seul exemplaire imprimé en N**, toutes les copies
+portent le numéro 1 et seul l'**ordre du scan** relie les feuilles — une feuille
+manquante ou intervertie décale tout le reste du lot. C'est pour cette raison
+qu'AMC impose des exemplaires numérotés sur les examens multi-pages. Le mode
+dégradé est testé et fixé dans `tests/test_multi_sheet.py`, pas corrigé : on ne
+peut pas deviner à qui appartient une feuille anonyme.
+
+⚠ Un n° de copie lu sur la **grille manuelle** (`_copy_id_source = "grid"`) n'a
+pas de checksum : il ne sert **pas** à regrouper, on retombe sur l'ordre.
+
+**UI** : la vue copie affiche un sélecteur de feuilles (`?sheet=N`), ne pose les
+ronds que sur les cases de la feuille affichée, et `zoom_img` résout la case
+vers l'image qui la porte réellement (`server.sheet_of_question`).
+
 ### 7bis. Banc de non-régression — à lancer avant/après toute optimisation
 
 [cv_regress.py](auto_grading/cv_regress.py) fige le résultat de `grade_image`

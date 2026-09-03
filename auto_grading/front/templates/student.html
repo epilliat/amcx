@@ -70,8 +70,19 @@
 <main class="student-main">
 <div class="layout">
   <div class="image-pane">
+    {% if sheets|length > 1 %}
+    {# Copie dont les réponses tiennent sur plusieurs feuilles : une image par
+       feuille, sélecteur au-dessus. Les ronds ne valent que pour celle-ci. #}
+    <div class="sheet-tabs">
+      <span class="sheet-tabs-label">Feuilles :</span>
+      {% for s in sheets %}
+      <a class="sheet-tab{% if s.page == shown_sheet.page and s.batch == shown_sheet.batch %} is-active{% endif %}"
+         href="/student/{{ batch }}/{{ page }}?sheet={{ loop.index0 }}">{{ loop.index }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
     <div class="copy-overlay-wrap">
-      <img id="copy-img" src="/img_canon/{{ batch }}/{{ page }}.jpg" alt="copie">
+      <img id="copy-img" src="/img_canon/{{ shown_sheet.batch }}/{{ shown_sheet.page }}.jpg" alt="copie">
       <svg id="cell-overlay" viewBox="0 0 {{ canon_w }} {{ canon_h }}"
            preserveAspectRatio="none">
         {% for c in cells %}

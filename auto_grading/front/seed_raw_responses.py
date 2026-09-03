@@ -136,6 +136,102 @@ def load_cv_for_copy(batch: str, page: int) -> dict | None:
         return json.load(f)
 
 
+# --------------------------------------------------------------------------
+# Copies dont les réponses tiennent sur plusieurs feuilles
+#
+# Un sujet à beaucoup de questions déborde : AMC imprime alors une feuille de
+# réponses par groupe de questions, chacune avec son propre code (copie, page,
+# checksum) en haut. Le CV lit une feuille à la fois — ici on les recolle en
+# UNE copie, dont le JSON vit à l'emplacement de sa première feuille pour que
+# tout l'aval (score, liste, export) reste inchangé.
+#
+# ⚠ Deux façons de relier les feuilles d'un même étudiant, très inégales :
+#   - **sujet à exemplaires numérotés** (`\exemplaire{N}`) : le code imprimé
+#     donne le numéro de copie, validé par checksum. Le recollage est alors
+#     exact, insensible à l'ordre du scan et à une feuille manquante ;
+#   - **sujet imprimé en N exemplaires identiques** : toutes les copies portent
+#     le numéro 1, et seul l'ORDRE DU SCAN relie les feuilles. Une feuille
+#     manquante ou intervertie décale tout le reste du lot. C'est le mode
+#     dégradé, signalé par `_sheet_group_source = "ordre"`.
+# --------------------------------------------------------------------------
+
+def group_sheets(pages: list) -> list:
+    """Regroupe les pages scannées en copies. → `[[(batch, page, cv), …], …]`
+
+    `pages` : `[(batch, page, cv_json), …]` dans l'ordre du scan, déjà filtré
+    des pages qui ne sont pas des feuilles de réponses.
+
+    Par numéro de copie imprimé quand il est fiable, sinon par ordre : une
+    nouvelle copie commence dès qu'une feuille déjà vue se représente.
+    """
+    if not pages:
+        return []
+    by_copy = all(cv.get("_copy_id_source") == "printed" and cv.get("_copy_id")
+                  for _, _, cv in pages)
+    distinct_copies = {cv.get("_copy_id") for _, _, cv in pages}
+    if by_copy and len(distinct_copies) > 1:
+        groups: dict = {}
+        for batch, page, cv in pages:
+            groups.setdefault(cv["_copy_id"], []).append((batch, page, cv))
+        return [groups[k] for k in sorted(groups)]
+    # Repli : ordre du scan. On ferme le groupe dès qu'une feuille se répète.
+    out, cur, seen = [], [], set()
+    for batch, page, cv in pages:
+        sheet = cv.get("_sheet_page")
+        if sheet in seen:
+            out.append(cur)
+            cur, seen = [], set()
+        cur.append((batch, page, cv))
+        seen.add(sheet)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def merge_sheets(sheets: list) -> dict:
+    """Fusionne les lectures CV des feuilles d'une copie en une seule.
+
+    Les numéros de question sont ceux d'AMC, donc globaux au sujet : deux
+    feuilles ne peuvent pas se disputer une question. L'identité vient de la
+    feuille qui porte la grille du code étudiant — les autres n'en ont pas.
+    """
+    answers: dict = {}
+    ambiguous: list = []
+    open_answers: dict = {}
+    notes: list = []
+    student_id = ""
+    n_frame_fail = n_cells = 0
+    for batch, page, cv in sheets:
+        for q, sel in (cv.get("answers") or {}).items():
+            answers[str(q)] = sel
+        ambiguous += cv.get("_ambiguous_cells") or []
+        open_answers.update(cv.get("open_answers") or {})
+        sid = cv.get("student_id") or ""
+        # La grille du code étudiant n'est imprimée que sur une feuille : on
+        # garde le identifiant le plus complet plutôt que le dernier vu.
+        if sid.count("?") < (student_id.count("?") if student_id else 99) and sid:
+            student_id = sid
+        n_frame_fail += int(cv.get("_n_frame_fail") or 0)
+        n_cells += int(cv.get("_n_cells") or 0)
+        if len(sheets) > 1:
+            notes.append(f"f{cv.get('_sheet_page')}: {cv.get('notes', '')}")
+        else:
+            notes.append(cv.get("notes", ""))
+    first = sheets[0][2]
+    merged = dict(first)
+    merged.update({
+        "answers": answers,
+        "student_id": student_id or first.get("student_id", ""),
+        "notes": " | ".join(n for n in notes if n),
+        "_ambiguous_cells": ambiguous,
+        "_n_frame_fail": n_frame_fail,
+        "_n_cells": n_cells,
+    })
+    if open_answers:
+        merged["open_answers"] = open_answers
+    return merged
+
+
 def compute_diff(cv_answers: dict, amc_answers: dict, options: dict) -> list:
     """Liste des cases où CV ≠ AMC."""
     diffs = []
@@ -180,8 +276,54 @@ def main():
 
     n_total = n_amc = n_diff = n_unvalidated = n_preserved = n_no_cv = n_not_sheet = 0
 
+    # --- 1. lire les CV, écarter ce qui n'est pas une feuille de réponses ---
+    sheet_pages: list = []          # (batch, page, cv) dans l'ordre du scan
+    kept_paths: set = set()
     for batch, page in all_pages:
         out_path = RAW_DIR / batch / f"page_{page:03d}.json"
+        preserved = False
+        if args.preserve_manual and out_path.exists():
+            with open(out_path, encoding="utf-8") as f:
+                ex = json.load(f)
+            preserved = bool(USER_FLAGS & set(ex.get("_flags", []))
+                             or ex.get("_student_override")
+                             or ex.get("_cv_student_id"))
+        cv = load_cv_for_copy(batch, page)
+        if cv is None:
+            n_no_cv += 1
+            continue
+        # Une page sans grille de cases (recto sujet, page blanche, pub de
+        # scanner) n'est pas une copie. `cv_grade` la marque
+        # `_is_answer_sheet=False`. On l'écarte — sauf si l'utilisateur l'a
+        # déjà relue. Idempotent : une telle page écrite par un seed antérieur
+        # est supprimée de raw_responses/.
+        if not preserved and not cv.get("_is_answer_sheet", True):
+            n_not_sheet += 1
+            if out_path.exists():
+                out_path.unlink()
+            continue
+        sheet_pages.append((batch, page, cv))
+
+    # --- 2. recoller les feuilles d'une même copie -------------------------
+    groups = group_sheets(sheet_pages)
+    n_multi = sum(1 for g in groups if len(g) > 1)
+    if n_multi:
+        src = ("n° de copie imprimé"
+               if all(c.get("_copy_id_source") == "printed" for _, _, c in sheet_pages)
+               and len({c.get("_copy_id") for _, _, c in sheet_pages}) > 1
+               else "ordre du scan")
+        print(f"Copies multi-feuilles : {n_multi} sur {len(groups)} "
+              f"(recollage par {src})")
+
+    for group in groups:
+        batch, page, _ = group[0]
+        out_path = RAW_DIR / batch / f"page_{page:03d}.json"
+        # Les feuilles suivantes ne sont pas des copies à part entière : on
+        # retire un éventuel JSON laissé par un seed antérieur.
+        for b2, p2, _c in group[1:]:
+            old = RAW_DIR / b2 / f"page_{p2:03d}.json"
+            if old.exists() and old != out_path:
+                old.unlink()
 
         preserve_answers = False
         existing = None
@@ -194,21 +336,11 @@ def main():
                 preserve_answers = True
                 n_preserved += 1
 
-        cv = load_cv_for_copy(batch, page)
-        if cv is None:
-            n_no_cv += 1
-            continue
-
-        # Copies multi-pages : une page sans grille de cases (recto sujet, page
-        # blanche…) n'est pas une copie. cv_grade la marque `_is_answer_sheet=False`.
-        # On l'écarte — sauf si l'utilisateur l'a déjà relue (preserve_answers).
-        # Idempotent : si une telle page avait été écrite par un seed antérieur,
-        # on la supprime de raw_responses/ pour converger vers « 1 copie = 1 feuille ».
-        if not preserve_answers and not cv.get("_is_answer_sheet", True):
-            n_not_sheet += 1
-            if out_path.exists():
-                out_path.unlink()
-            continue
+        cv = merge_sheets(group)
+        if len(group) > 1:
+            cv["_sheets"] = [{"batch": b, "page": p,
+                              "sheet_page": c.get("_sheet_page")}
+                             for b, p, c in group]
 
         cv_answers = cv.get("answers", {})
         cv_answers_str = {str(k): v for k, v in cv_answers.items()}
@@ -261,7 +393,8 @@ def main():
         # Numéro de copie (sujets randomisés) et sa provenance : le serveur
         # note avec la carte case↔lettre de CETTE copie (`copy_id_of`). Sans
         # ces clés, tout est noté avec la copie 1.
-        for k in ("_copy_id", "_copy_id_source", "_page_no"):
+        for k in ("_copy_id", "_copy_id_source", "_page_no",
+                  "_sheet_page", "_sheet_source", "_n_sheets", "_sheets"):
             if k in cv:
                 data[k] = cv[k]
 

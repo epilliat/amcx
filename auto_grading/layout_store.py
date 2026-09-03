@@ -117,7 +117,7 @@ class Layout:
     pages: dict                       # n° de page → PageInfo
     boxes: list                       # toutes les Box
     zones: list                       # toutes les Zone
-    answer_sheet_page: int            # page de la feuille de réponses (cases role=1)
+    answer_sheet_page: int            # feuille de réponses PRINCIPALE (celle qui porte le plus de cases)
     question_names: dict = field(default_factory=dict)
     source: str = ""
     copy: int = 1                     # numéro de copie (1..N)
@@ -128,11 +128,40 @@ class Layout:
     page_ids: tuple = ()
 
     # ---- accès à la feuille de réponses ----------------------------------
-    def sheet_boxes(self, role: int | None = ROLE_ANSWER) -> list:
-        """Cases de la feuille de réponses, triées (question, answer)."""
+    def sheet_boxes(self, role: int | None = ROLE_ANSWER,
+                    page: int | None = None) -> list:
+        """Cases de réponse, triées (question, answer).
+
+        `page=None` → **toutes les feuilles de réponses** du sujet. C'est ce
+        que veulent les appelants qui construisent une correspondance globale
+        (question ↔ lettre, barème, liste des QCM). `page=N` → seulement la
+        feuille N : c'est ce que veut tout ce qui travaille sur UNE image
+        scannée (lecture des cases, référence masquée, ronds de l'interface).
+
+        ⚠ Un sujet dont les réponses tiennent sur une seule feuille — le cas
+        courant — rend exactement la même liste dans les deux cas.
+        """
+        pages = self.answer_sheet_pages if page is None else (page,)
         bs = [b for b in self.boxes
-              if b.page == self.answer_sheet_page and (role is None or b.role == role)]
+              if b.page in pages and (role is None or b.role == role)]
         return sorted(bs, key=lambda b: (b.question, b.answer))
+
+    @property
+    def answer_sheet_pages(self) -> tuple:
+        """Toutes les pages portant des cases de réponse, dans l'ordre.
+
+        Un sujet à beaucoup de questions déborde sur plusieurs feuilles : AMC
+        les imprime à la suite, chacune avec son propre code (copie, page,
+        checksum) en haut. Le pipeline lit une feuille à la fois et
+        `seed_raw_responses` les recolle en une copie.
+        """
+        pages = sorted({b.page for b in self.boxes if b.role == ROLE_ANSWER})
+        if pages:
+            return tuple(pages)
+        return (self.answer_sheet_page,) if self.answer_sheet_page else ()
+
+    def is_answer_sheet_page(self, page: int) -> bool:
+        return page in self.answer_sheet_pages
 
     def code_boxes_on_page(self, page: int) -> list:
         """Bits du code imprimé de cette page, triés (kind, rang)."""
@@ -164,12 +193,24 @@ class Layout:
     def mires(self) -> tuple:
         return self.sheet.mires
 
+    def name_zone_on(self, page: int):
+        """(xmin, xmax, ymin, ymax) du champ nom `__n` de cette page, ou None."""
+        for z in self.zones:
+            if z.page == page and z.zone == "__n":
+                return (z.xmin, z.xmax, z.ymin, z.ymax)
+        return None
+
     @property
     def name_zone(self):
-        """(xmin, xmax, ymin, ymax) du champ nom `__n` de la feuille, ou None."""
-        for z in self.zones:
-            if z.page == self.answer_sheet_page and z.zone == "__n":
-                return (z.xmin, z.xmax, z.ymin, z.ymax)
+        """Champ nom manuscrit — cherché sur les feuilles de réponses.
+
+        Avec plusieurs feuilles, il n'est imprimé que sur l'une d'elles : on
+        rend la première trouvée plutôt que rien.
+        """
+        for p in (self.answer_sheet_page,) + self.answer_sheet_pages:
+            z = self.name_zone_on(p)
+            if z:
+                return z
         return None
 
     def _question_name(self, q: int) -> str:

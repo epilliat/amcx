@@ -205,6 +205,42 @@ def get_layout():
     return _layout_cache, _layout_by_qchar
 
 
+def copy_sheets(d: dict, batch: str, page: int) -> list:
+    """Feuilles scannées d'une copie → `[{batch, page, sheet_page}, …]`.
+
+    Une copie tient d'ordinaire sur une feuille : la liste en compte une, celle
+    de son propre JSON. Quand le sujet déborde, `seed_raw_responses` recolle
+    plusieurs feuilles dans une copie et note leur provenance dans `_sheets` —
+    c'est cette liste qui dit quelle IMAGE montre quelle partie des réponses.
+    """
+    sheets = d.get("_sheets")
+    if sheets:
+        return [{"batch": s.get("batch", batch), "page": int(s.get("page", page)),
+                 "sheet_page": s.get("sheet_page")} for s in sheets]
+    return [{"batch": batch, "page": page, "sheet_page": d.get("_sheet_page")}]
+
+
+def sheet_of_question(d: dict, batch: str, page: int) -> dict:
+    """question → la feuille scannée qui la porte (`{batch, page, sheet_page}`).
+
+    Sans ça, le zoom d'une case de la 2ᵉ feuille irait la chercher dans l'image
+    de la 1ʳᵉ, à des coordonnées qui n'y correspondent à rien.
+    """
+    sheets = copy_sheets(d, batch, page)
+    if len(sheets) == 1:
+        lay = layout_store.get_layout()
+        return {q: sheets[0] for q in {b.question for b in lay.sheet_boxes()}}
+    lay = layout_store.get_layout(copy=copy_id_of(d))
+    out = {}
+    for s in sheets:
+        sp = s.get("sheet_page")
+        if sp is None:
+            continue
+        for b in lay.sheet_boxes(page=int(sp)):
+            out[b.question] = s
+    return out
+
+
 def question_numbers() -> tuple[list, list]:
     """(questions QCM notées, colonnes du code étudiant) dérivées du calage.
 
@@ -1803,13 +1839,20 @@ def student(batch, page):
     canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
     qcm_qs, id_qs = question_numbers()
     qcm_set, id_set = set(qcm_qs), set(id_qs)
+    # Une image = UNE feuille : n'y poser que les ronds des cases qu'elle porte,
+    # et les mesurer sur CETTE image. Avec plusieurs feuilles, les autres cases
+    # tomberaient à des positions qui ne correspondent à rien ici. `?sheet=N`
+    # choisit la feuille affichée (0 = la première).
+    sheets = copy_sheets(d, batch, page)
+    idx = request.args.get("sheet", type=int) or 0
+    shown = sheets[idx] if 0 <= idx < len(sheets) else sheets[0]
     try:
-        _warped, offsets = get_warped(batch, page)
+        _warped, offsets = get_warped(shown["batch"], shown["page"])
     except Exception:
         offsets = {}
     sid = (d.get("student_id") or "?" * len(id_qs))
     cells = []
-    for b in lay.sheet_boxes():
+    for b in lay.sheet_boxes(page=shown.get("sheet_page")):
         dx, dy = offsets.get(b.question, (0, 0))
         common = {
             "q": b.question, "char": b.char,
@@ -1838,6 +1881,7 @@ def student(batch, page):
                            cells=cells, canon_w=canon_w, canon_h=canon_h,
                            zoom_questions=zoom_questions,
                            sidebar_copies=sidebar_copies,
+                           sheets=sheets, shown_sheet=shown,
                            active="")
 
 
@@ -2103,6 +2147,20 @@ def zoom_img(batch, page, q, char):
     if key not in by_qchar:
         abort(404)
     b = by_qchar[key]
+    # Copie à plusieurs feuilles : la case peut être sur une AUTRE image que
+    # celle du JSON de la copie. On résout l'image qui la porte réellement.
+    d = load_copy_json(batch, page)
+    if d is not None:
+        s = sheet_of_question(d, batch, page).get(int(q))
+        if s is not None and (s["batch"], s["page"]) != (batch, page):
+            batch, page = s["batch"], s["page"]
+            src = PAGES_DIR / safe_batch(batch) / f"page_{page:03d}.jpg"
+            cache_dir = zoom_cache_dir(batch, page)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"Q{q}_{char}.jpg"
+            if (cache_path.exists() and src.exists()
+                    and cache_path.stat().st_mtime >= src.stat().st_mtime):
+                return send_file(cache_path, mimetype="image/jpeg")
     warped, offsets = get_warped(batch, page)
     dx, dy = offsets.get(int(q), (0, 0))
     pad = 12
