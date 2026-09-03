@@ -12,6 +12,10 @@ Modèle de données par JSON :
                         "id_incomplet", "no_mires", "manually_edited", "validated",
                         "id_corrige", "open_answer_edited"]
   - _student_override / _cv_student_id = identité relue à la main (préservées)
+  - _reviewed_cells / _reviewed_questions = ce que le relecteur a déjà traité
+    (cf. review_state) — préservés, mais UNIQUEMENT pour les cases dont la
+    lecture CV n'a pas bougé : une nouvelle correction qui lit autrement doit
+    revenir dans la file, sinon la marque « vu » masquerait la nouveauté
 
 Sans `capture.sqlite` (examen non analysé par AMC) → mode **CV-seul** : les
 champs/flags `_amc_*` sont simplement omis.
@@ -232,6 +236,39 @@ def merge_sheets(sheets: list) -> dict:
     return merged
 
 
+def carry_review_marks(existing: dict, data: dict) -> None:
+    """Reporte les marques de relecture de l'ancien JSON vers le nouveau.
+
+    Une marque « vu » répond à une lecture précise. Si la nouvelle correction
+    lit cette case autrement, la réponse d'hier ne vaut plus : la case retourne
+    dans la file. Les marques dont la lecture CV est inchangée, elles, sont
+    conservées — sinon chaque re-correction ferait tout recommencer.
+    """
+    def _sets(d, field="_cv_answers"):
+        return {int(k): set(v) for k, v in (d.get(field) or {}).items()}
+
+    old_cv, new_cv = _sets(existing), _sets(data)
+    keep = []
+    for k in existing.get("_reviewed_cells") or []:
+        q, _, ch = str(k).partition("_")
+        if not q.isdigit() or not ch:
+            continue
+        qi = int(q)
+        if (ch in old_cv.get(qi, set())) == (ch in new_cv.get(qi, set())):
+            keep.append(str(k))
+    if keep:
+        data["_reviewed_cells"] = keep
+    keep_q = [int(q) for q in (existing.get("_reviewed_questions") or [])
+              if str(q).isdigit() and old_cv.get(int(q), set()) == new_cv.get(int(q), set())]
+    if keep_q:
+        data["_reviewed_questions"] = keep_q
+    # Même règle pour l'identité confirmée : si le numéro relu a changé, la
+    # confirmation d'hier portait sur autre chose.
+    if (existing.get("_reviewed_id")
+            and existing.get("student_id") == data.get("student_id")):
+        data["_reviewed_id"] = True
+
+
 def compute_diff(cv_answers: dict, amc_answers: dict, options: dict) -> list:
     """Liste des cases où CV ≠ AMC."""
     diffs = []
@@ -425,6 +462,12 @@ def main():
             # Préserve aussi l'override manuel des open_answers s'il existe.
             if existing.get("open_answers"):
                 data["open_answers"] = existing["open_answers"]
+
+        # Les marques de relecture survivent même sans préservation des
+        # réponses : ce sont des heures de travail humain, et elles ne
+        # contredisent pas une relecture CV rafraîchie.
+        if existing is not None:
+            carry_review_marks(existing, data)
 
         write_json(out_path, data)
         n_total += 1

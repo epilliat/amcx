@@ -135,6 +135,9 @@
             <div class="pf-stats">
               👥 <strong>{{ project_files.n_students }}</strong> étudiants
             </div>
+            {% for w in project_files.student_warnings %}
+            <div class="pf-warn-line">⚠ {{ w }}</div>
+            {% endfor %}
             {% else %}
             <div class="pf-empty">Aucune liste d'étudiants chargée.</div>
             {% endif %}
@@ -187,7 +190,10 @@
       <div class="stat-cards">
         <div class="stat-card"><div class="num">{{ stats.n }}</div><div class="label">copies</div></div>
         <div class="stat-card sc-ok"><div class="num">{{ stats.n_validated }}</div><div class="label">validées</div></div>
-        <div class="stat-card sc-warn"><div class="num">{{ stats.n_to_review }}</div><div class="label">à revoir</div></div>
+        <div class="stat-card sc-warn"><div class="num">{{ stats.n_to_review }}</div><div class="label">copies à revoir</div></div>
+        <div class="stat-card {% if stats.n_open_cells %}sc-warn{% else %}sc-ok{% endif %}">
+          <div class="num">{{ stats.n_flagged_cells - stats.n_open_cells }}/{{ stats.n_flagged_cells }}</div>
+          <div class="label"><a href="/flagged">signalements traités</a></div></div>
         <div class="stat-card sc-hi"><div class="num">{{ "%.2f"|format(stats.mean) }}</div><div class="label">moyenne μ</div></div>
         <div class="stat-card"><div class="num">{{ "%.2f"|format(stats.variance) }}</div><div class="label">variance σ²</div></div>
         <div class="stat-card"><div class="num">{{ "%.2f"|format(stats.std) }}</div><div class="label">écart-type σ</div></div>
@@ -351,17 +357,23 @@
 </div>
 
 <div class="modal-overlay" id="xlsx-modal">
-  <div class="modal">
-    <h3>Liste étudiants (xlsx)</h3>
-    <p class="modal-hint">Choisis un fichier Excel et indique les colonnes nom / prénom / ID.
-       Sert à relier les identifiants lus aux noms des étudiants.</p>
-    <label class="modal-field">Fichier xlsx
-      <input type="file" id="xlsx-file" accept=".xlsx">
+  <div class="modal modal-wide">
+    <h3>Liste étudiants</h3>
+    <p class="modal-hint">Un fichier Excel (.xlsx) ou CSV. AMCx propose les colonnes
+       d'après leur <b>contenu</b> — l'aperçu montre ce qui sera réellement chargé.</p>
+    <label class="modal-field">Fichier
+      <input type="file" id="xlsx-file" accept=".xlsx,.xlsm,.csv">
     </label>
     <div id="xlsx-cols" class="xlsx-cols" style="display:none">
-      <label class="modal-field">Colonne ID <select id="col-id"></select></label>
-      <label class="modal-field">Colonne Nom <select id="col-nom"></select></label>
-      <label class="modal-field">Colonne Prénom <select id="col-prenom"></select></label>
+      <div class="rl-preview-wrap"><table class="rl-preview" id="xlsx-preview"></table></div>
+      <div class="rl-fields">
+        <label class="modal-field">Numéro étudiant <select id="col-id"></select></label>
+        <label class="modal-field">Nom <select id="col-nom"></select></label>
+        <label class="modal-field">Prénom <select id="col-prenom"></select></label>
+        <label class="modal-field rl-field-start">1re ligne de données
+          <input type="number" id="col-start" min="1" step="1" value="2"></label>
+      </div>
+      <div id="xlsx-report" class="rl-report"></div>
     </div>
     <div id="xlsx-status" class="modal-status"></div>
     <div class="modal-actions">
@@ -830,12 +842,98 @@ document.getElementById('save-report').addEventListener('click', async () => {
   });
 })();
 
-// --- modale liste étudiants (xlsx) ---
+// --- modale liste étudiants (xlsx / csv) ---
+// Les colonnes sont désignées par INDEX : un intitulé peut changer d'un export
+// à l'autre, disparaître, ou être dupliqué. L'aperçu montre le fichier tel
+// qu'il est lu, et le compte affiché vient du serveur — c'est le nombre
+// d'étudiants réellement construits, pas de lignes.
 const xlsxModal = document.getElementById('xlsx-modal');
 const xlsxStatus = document.getElementById('xlsx-status');
 const xlsxSave = document.getElementById('xlsx-save');
-// L'ouverture est gérée via #pf-open-xlsx (carte « Liste étudiants »).
-document.getElementById('xlsx-cancel').addEventListener('click', () => xlsxModal.classList.remove('open'));
+const xlsxReport = document.getElementById('xlsx-report');
+let RL = null;   // analyse du fichier en attente
+
+function rlSel(id) { return document.getElementById(id); }
+function rlCols() {
+  return {
+    id_idx: parseInt(rlSel('col-id').value, 10),
+    nom_idx: parseInt(rlSel('col-nom').value, 10),
+    prenom_idx: parseInt(rlSel('col-prenom').value, 10),
+    // Affiché en numérotation humaine (ligne 1 = 1re ligne du fichier).
+    data_start: Math.max(0, parseInt(rlSel('col-start').value, 10) - 1),
+  };
+}
+
+function rlRenderPreview() {
+  if (!RL) return;
+  const c = rlCols();
+  const role = {}; role[c.id_idx] = 'id'; role[c.nom_idx] = 'nom';
+  if (c.prenom_idx >= 0) role[c.prenom_idx] = 'prenom';
+  const t = document.getElementById('xlsx-preview');
+  t.textContent = '';
+  RL.preview.forEach((row, ri) => {
+    const tr = document.createElement('tr');
+    if (ri < c.data_start) tr.className = 'rl-skip';
+    const th = document.createElement('td');
+    th.className = 'rl-rownum'; th.textContent = ri + 1;
+    tr.appendChild(th);
+    row.forEach((cell, ci) => {
+      const td = document.createElement('td');
+      if (role[ci]) td.className = 'rl-col-' + role[ci];
+      td.textContent = cell === null || cell === undefined ? '' : String(cell);
+      tr.appendChild(td);
+    });
+    t.appendChild(tr);
+  });
+}
+
+let rlTimer = null;
+function rlRefresh() {
+  rlRenderPreview();
+  clearTimeout(rlTimer);
+  rlTimer = setTimeout(async () => {
+    const r = await fetch('/api/student-list/preview', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(rlCols())});
+    const j = await r.json();
+    xlsxReport.textContent = '';
+    if (!r.ok) {
+      xlsxReport.className = 'rl-report is-bad';
+      xlsxReport.textContent = '✘ ' + j.error;
+      xlsxSave.disabled = true;
+      return;
+    }
+    xlsxSave.disabled = j.n_students === 0;
+    xlsxReport.className = 'rl-report' +
+      (j.n_students === 0 ? ' is-bad' : (j.problems.length ? ' is-warn' : ' is-ok'));
+    const head = document.createElement('div');
+    head.className = 'rl-report-head';
+    // Le ✓ ne s'affiche que si rien ne cloche : une coche verte au-dessus d'un
+    // avertissement invite à passer outre.
+    head.textContent = (j.n_students === 0 ? '✘ aucun étudiant lisible'
+                        : (j.problems.length ? '⚠ ' : '✓ ') + j.n_students + ' étudiants');
+    xlsxReport.appendChild(head);
+    if (j.sample.length) {
+      const ex = document.createElement('div');
+      ex.className = 'small';
+      ex.textContent = 'ex. : ' + j.sample.map(
+        s => s.id + ' — ' + s.nom + ' ' + s.prenom).join(' · ');
+      xlsxReport.appendChild(ex);
+    }
+    j.problems.forEach(pb => {
+      const d = document.createElement('div');
+      d.className = 'rl-problem'; d.textContent = '⚠ ' + pb;
+      xlsxReport.appendChild(d);
+    });
+  }, 200);
+}
+
+document.getElementById('xlsx-cancel').addEventListener('click', async () => {
+  xlsxModal.classList.remove('open');
+  RL = null;
+  // Ne pas laisser traîner le fichier en attente sur le disque du projet.
+  await fetch('/api/student-list/cancel', {method: 'POST'});
+});
 
 document.getElementById('xlsx-file').addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -846,27 +944,45 @@ document.getElementById('xlsx-file').addEventListener('change', async (e) => {
   const r = await fetch('/api/upload-xlsx', {method: 'POST', body: fd});
   const j = await r.json();
   if (!r.ok) { xlsxStatus.textContent = '✘ ' + j.error; return; }
-  const sels = ['col-id', 'col-nom', 'col-prenom'].map(id => document.getElementById(id));
-  sels.forEach((sel, k) => {
-    sel.innerHTML = (k === 2 ? '<option value="">(aucune)</option>' : '') +
-      j.columns.map(c => `<option value="${c}">${c}</option>`).join('');
-    if (j.columns[k]) sel.value = j.columns[k];
-  });
+  RL = j;
+  // ⚠ Intitulés et exemples viennent d'un fichier fourni par l'utilisateur :
+  // ils passent par textContent, jamais par innerHTML.
+  const fillSel = (sel, withNone) => {
+    sel.textContent = '';
+    if (withNone) {
+      const o = document.createElement('option');
+      o.value = '-1'; o.textContent = '(aucune)'; sel.appendChild(o);
+    }
+    j.columns.forEach(c => {
+      const o = document.createElement('option');
+      o.value = String(c.idx);
+      o.textContent = c.label + (c.sample.length ? ' — ' + c.sample.slice(0, 2).join(', ') : '');
+      sel.appendChild(o);
+    });
+  };
+  fillSel(rlSel('col-id'), false);
+  fillSel(rlSel('col-nom'), false);
+  fillSel(rlSel('col-prenom'), true);
+  const sg = j.suggested;
+  if (sg.id_idx >= 0) rlSel('col-id').value = sg.id_idx;
+  if (sg.nom_idx >= 0) rlSel('col-nom').value = sg.nom_idx;
+  rlSel('col-prenom').value = sg.prenom_idx >= 0 ? sg.prenom_idx : -1;
+  rlSel('col-start').value = sg.data_start + 1;
+  rlSel('col-start').max = j.nrow;
   document.getElementById('xlsx-cols').style.display = '';
-  xlsxSave.disabled = false;
-  xlsxStatus.textContent = j.columns.length + ' colonnes détectées.';
+  xlsxStatus.textContent = j.nrow + ' lignes · ' + j.ncol + ' colonnes détectées.';
+  rlRefresh();
 });
+
+['col-id', 'col-nom', 'col-prenom', 'col-start'].forEach(id =>
+  document.getElementById(id).addEventListener('input', rlRefresh));
 
 xlsxSave.addEventListener('click', async () => {
   xlsxStatus.textContent = 'Enregistrement…';
   const r = await fetch('/api/student-list', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      id_col: document.getElementById('col-id').value,
-      nom_col: document.getElementById('col-nom').value,
-      prenom_col: document.getElementById('col-prenom').value,
-    })
+    body: JSON.stringify(rlCols())
   });
   const j = await r.json();
   if (r.ok) { xlsxStatus.textContent = '✓ ' + j.n_students + ' étudiants — rechargement…'; location.reload(); }

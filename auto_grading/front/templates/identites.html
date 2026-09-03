@@ -37,8 +37,9 @@
       {% if c.group != ns.last_group %}
         <h3 class="rf-group-head rf-group-head-{{ c.group }}">
           {% if c.group == 'unresolved' %}🟠 À résoudre <span class="small">({{ counts.unresolved }})</span>
+          {% elif c.group == 'auto_name' %}🟡 Reconnus par le nom manuscrit seul <span class="small">({{ counts.auto_name }}) — à confirmer, le numéro n'a pas été lu</span>
           {% elif c.group == 'manual' %}🔵 Assignés à la main <span class="small">({{ counts.manual }})</span>
-          {% else %}🟢 Auto-détectés par la grille ID <span class="small">({{ counts.auto }})</span>
+          {% else %}🟢 Rattachés par le numéro lu <span class="small">({{ counts.auto_id }})</span>
           {% endif %}
         </h3>
         {% set ns.last_group = c.group %}
@@ -48,6 +49,7 @@
         <div class="rf-card-head">
           <b>{{ c.batch }}/page_{{ "%03d"|format(c.page) }}</b>
           <span class="small">ID lu&nbsp;: <code>{{ c.student_id }}</code></span>
+          {% if c.method == 'override_lost' %}<span class="badge badge-dup" title="l'assignation manuelle ne pointe plus sur personne">assignation perdue</span>{% endif %}
           {% if c.dup_of %}<span class="badge badge-dup" title="ID lu identique à une autre copie">doublon · lu {{ c.dup_of }}</span>{% endif %}
           <button type="button" class="rf-htr-btn btn-tiny" title="Lire le nom avec Claude vision" disabled>🪄</button>
           <a href="/student/{{ c.batch }}/{{ c.page }}" class="nav-btn btn-tiny">copie</a>
@@ -77,6 +79,8 @@
       (<span class="rf-pool-legend rf-pool-legend-assigned">●</span> assignés <span id="n-assigned-2">{{ n_assigned }}</span>,
        <span class="rf-pool-legend rf-pool-legend-unassigned">●</span> libres <span id="n-unassigned">{{ n_total - n_assigned }}</span>)
     </div>
+    <input type="search" id="rf-search" class="rf-search"
+           placeholder="Rechercher un nom ou un numéro…" autocomplete="off">
     <div class="rf-pool" id="rf-pool">
       {% for s in students %}
         <button type="button"
@@ -183,7 +187,7 @@ function cardMarkAssigned(card, sid, fullName) {
   // Toute assignation via l'UI (click, drag, HTR) compte comme « manuel » →
   // groupe bleu (distinct du vert « auto par grille ID »).
   card.classList.add('rf-assigned');
-  card.classList.remove('rf-group-unresolved', 'rf-group-auto');
+  card.classList.remove('rf-group-unresolved', 'rf-group-auto_id', 'rf-group-auto_name');
   card.classList.add('rf-group-manual');
   card.dataset.group = 'manual';
   const drop = card.querySelector('.rf-drop');
@@ -193,14 +197,19 @@ function cardMarkAssigned(card, sid, fullName) {
   chip.className = 'rf-chip assigned rf-card-assigned-chip';
   chip.dataset.sid = sid;
   chip.title = 'Cliquer pour désassigner';
-  chip.innerHTML = `<span class="rf-chip-name">✓ ${fullName}</span><span class="rf-chip-id">${sid}</span>`;
+  // Le nom vient de la liste fournie par l'utilisateur : textContent, pas innerHTML.
+  const nameEl = document.createElement('span');
+  nameEl.className = 'rf-chip-name'; nameEl.textContent = '✓ ' + fullName;
+  const idEl = document.createElement('span');
+  idEl.className = 'rf-chip-id'; idEl.textContent = sid;
+  chip.append(nameEl, idEl);
   chip.addEventListener('click', e => { e.stopPropagation(); embeddedChipOnClick(chip); });
   drop.appendChild(chip);
 }
 
 function cardMarkUnresolved(card) {
   // Carte gauche : remet le drop hint à la place du chip embarqué.
-  card.classList.remove('rf-assigned', 'selected', 'rf-group-manual', 'rf-group-auto');
+  card.classList.remove('rf-assigned', 'selected', 'rf-group-manual', 'rf-group-auto_id', 'rf-group-auto_name');
   card.classList.add('rf-group-unresolved');
   card.dataset.group = 'unresolved';
   if (selectedCard === card) selectedCard = null;
@@ -314,6 +323,22 @@ function wireDrag(chip) {
   });
 }
 document.querySelectorAll('.rf-chip').forEach(wireDrag);
+
+// Recherche dans le pool — 174 chips ne se parcourent pas à l'œil.
+// Filtre sur le nom ET le numéro : on cherche parfois d'après la grille lue.
+(function () {
+  const box = document.getElementById('rf-search');
+  if (!box) return;
+  box.addEventListener('input', () => {
+    const q = box.value.trim().toLowerCase();
+    pool.querySelectorAll('.rf-chip').forEach(chip => {
+      const hay = (chip.querySelector('.rf-chip-name').textContent + ' '
+                   + (chip.dataset.sid || '')).toLowerCase();
+      chip.hidden = q !== '' && !hay.includes(q);
+    });
+  });
+  box.addEventListener('keydown', e => { if (e.key === 'Escape') { box.value = ''; box.dispatchEvent(new Event('input')); } });
+})();
 
 document.querySelectorAll('.rf-card').forEach(card => {
   card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });

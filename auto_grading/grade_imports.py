@@ -35,18 +35,37 @@ def ensure_imports_dir() -> Path:
 # --------------------------------------------------------------------------
 # Lecture brute csv / xlsx → table de cellules (aucune hypothèse d'en-tête)
 # --------------------------------------------------------------------------
-def _sniff_delimiter(sample: str) -> str:
-    """Devine le séparateur d'une ligne csv (';' fréquent sur les exports FR)."""
-    counts = {d: sample.count(d) for d in (";", ",", "\t", "|")}
-    best = max(counts, key=counts.get)
-    return best if counts[best] > 0 else ","
+def _sniff_delimiter(lines: list[str]) -> str:
+    """Devine le séparateur d'un csv (';' fréquent sur les exports FR).
+
+    ⚠ Sur PLUSIEURS lignes, pas seulement la première : un export de scolarité
+    commence souvent par une ligne de titre sans aucun séparateur. En ne
+    regardant qu'elle, on retombait sur la virgule et le fichier entier était lu
+    comme **une seule colonne** — donc les index de colonnes choisis par
+    l'utilisateur devenaient hors bornes, sans message compréhensible.
+
+    Le bon séparateur est celui qui découpe le plus de lignes en un **même**
+    nombre de champs : un séparateur qui n'en est pas produit des comptes
+    erratiques.
+    """
+    best, best_score = ",", (0, 0)
+    for d in (";", ",", "\t", "|"):
+        counts = [ln.count(d) for ln in lines if ln.strip()]
+        counts = [c for c in counts if c > 0]
+        if not counts:
+            continue
+        modal = max(set(counts), key=counts.count)
+        score = (counts.count(modal), modal)
+        if score > best_score:
+            best, best_score = d, score
+    return best
 
 
 def _read_csv(path) -> list[list]:
     with open(path, encoding="utf-8-sig", newline="") as f:
         content = f.read()
-    first_line = content.split("\n", 1)[0]
-    reader = csv.reader(io.StringIO(content), delimiter=_sniff_delimiter(first_line))
+    head = content.split("\n")[:10]
+    reader = csv.reader(io.StringIO(content), delimiter=_sniff_delimiter(head))
     return [[(c if (c is not None and c != "") else None) for c in row]
             for row in reader]
 
@@ -145,6 +164,10 @@ def analyze_table(rows: list[list], matcher) -> dict:
                 "suggested": {"join_mode": "name", "join_col": 0,
                               "data_start": 0, "grade_cols": []}}
     full_ids = {s.id for s in matcher.students}
+    # Suffixes de 4 chiffres : un fichier de notes de scolarité ne porte pas
+    # forcément l'identifiant complet. Le rattachement réel passe par
+    # `matcher.by_id`, qui accepte n'importe quelle largeur — ceci ne sert
+    # qu'à repérer la colonne de jointure.
     last4_ids = {s.id[-4:] for s in matcher.students if len(s.id) >= 4}
 
     # passe 1 : par colonne, repérer matches nom / id (numérique = _coerce_float ok,
@@ -234,8 +257,8 @@ def _resolve_join_cell(cell, join_mode: str, matcher, overrides: dict) -> str | 
         if not cid:
             return None
         s = matcher.by_full_id(cid)
-        if s is None and len(cid) == 4 and cid.isdigit():
-            s = matcher.by_id(cid)
+        if s is None:
+            s = matcher.by_id(cid)   # suffixe de n'importe quelle largeur
         return s.id if s is not None else None
     raw = str(cell).strip()
     if not raw:

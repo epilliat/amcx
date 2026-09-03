@@ -45,6 +45,7 @@ from cv_grade import (
 import config
 import layout_store
 import masked_detect
+import review_state
 
 ROOT = config.project_root()  # projet actif : pour les données
 PAGES_DIR = ROOT / "pages"
@@ -95,12 +96,23 @@ def load_amc_labels() -> dict:
 
 
 def load_ui_labels() -> dict:
-    """(batch, page) → {(q, char): bool}  pour les copies UI-validated.
+    """(batch, page) → {(q, char): (label, source)} depuis la relecture humaine.
 
-    Pour une copie `validated` : toutes les Q×options ont un label défini par answers.
-    Pour `manually_edited` sans `validated` : on prend uniquement les cells dont la
-    décision est plus sûre que CV — soit cellules différentes de _cv_answers (édits
-    explicites). On les ajoute (label = answers, source = ui_edit).
+    Deux niveaux, volontairement distincts :
+
+    - **`validated` = « copie relue en entier »** → toutes les cases servent de
+      vérité terrain. Ce drapeau ne se pose que depuis la vue copie ou le zoom,
+      qui montrent bien toutes les cases.
+    - **sinon** → seules les cases que le relecteur a effectivement traitées
+      (`_reviewed_cells`, plus les corrections explicites) sont étiquetées ; le
+      reste retombe sur AMC quand il est disponible.
+
+    ⚠ C'est le point qui motive toute la distinction. Sur EXAM_2026,
+    `validated` était posé depuis la vue « review rapide », qui ne montrait que
+    les cases signalées : les 26 469 étiquettes du jeu d'entraînement venaient
+    *toutes* de `ui_validated`, alors qu'au plus ~3 % des cases avaient été mises
+    sous les yeux de quelqu'un. Le modèle réapprenait donc sa propre sortie sur
+    les 97 % restants, et la validation croisée mesurait cette reproduction.
     """
     from sujet_store import effective_spec, parse_tex
     qopts = {q: effective_spec(q)["options"] for q in parse_tex()}
@@ -114,7 +126,6 @@ def load_ui_labels() -> dict:
                 d = json.load(f)
             flags = set(d.get("_flags", []))
             answers = {int(k): set(v) for k, v in d.get("answers", {}).items()}
-            cv_answers = {int(k): set(v) for k, v in d.get("_cv_answers", {}).items()}
             bp = (batch_dir.name, int(jp.stem.split("_")[1]))
 
             if "validated" in flags:
@@ -122,14 +133,15 @@ def load_ui_labels() -> dict:
                     sel = answers.get(q, set())
                     for ch in opts:
                         out[bp][(q, ch)] = (ch in sel, "ui_validated")
-            elif "manually_edited" in flags:
-                for q, opts in qopts.items():
-                    sel = answers.get(q, set())
-                    cv_sel = cv_answers.get(q, set())
-                    for ch in opts:
-                        # uniquement les cells qui diffèrent du CV (édits explicites)
-                        if (ch in sel) != (ch in cv_sel):
-                            out[bp][(q, ch)] = (ch in sel, "ui_edit")
+                continue
+            for key in review_state.reviewed_cells(d):
+                q, _, ch = key.partition("_")
+                if not q.isdigit():
+                    continue
+                q = int(q)
+                if ch not in qopts.get(q, ()):
+                    continue
+                out[bp][(q, ch)] = (ch in answers.get(q, set()), "ui_reviewed")
     return dict(out)
 
 

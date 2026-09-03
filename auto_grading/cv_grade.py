@@ -1441,20 +1441,16 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
     # INDÉPENDANTS divergent ou sont incertains —
     #   E1 = seuil adaptatif sur le masked_ratio (noirceur hors encre imprimée),
     #   E2 = seuil adaptatif sur le fill_ratio shrink (mesure brute),
-    #   E3 = décision du GBM,  E4 = predict_proba du GBM,
-    #   E6 = contrainte structurelle (question `single` ⇒ exactement 1 cochée).
+    #   E3 = décision du GBM,  E4 = predict_proba du GBM.
     # cf. masked_detect.py et FLAGGING_PLAN.md.
-    qtypes = {}
-    try:
-        from sujet_store import effective_spec
-        for q in qcm_questions:
-            try:
-                qtypes[q] = effective_spec(q).get("type", "mult")
-            except Exception:
-                qtypes[q] = "mult"
-    except Exception:
-        qtypes = {q: "mult" for q in qcm_questions}
-
+    #
+    # ⚠ La contrainte structurelle (E6 : une question `single` doit avoir
+    # exactement 1 case cochée) N'EST PLUS écrite ici. C'est une fonction pure
+    # des réponses courantes : `review_state.structural_reason` la recalcule à
+    # l'affichage. La stocker par case avait deux défauts — elle devenait
+    # périmée dès la première correction du relecteur, et elle signalait les 5
+    # ou 6 cases d'une question simplement laissée blanche (496 des 885 cases
+    # signalées d'EXAM_2026), noyant les vraies divergences de mesure.
     answers: dict[int, list[str]] = {}
     confidences = {}
     thresholds_used = {}
@@ -1545,7 +1541,6 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
         confidences[q] = {b.char: round(r, 3) for b, r in q_boxes}
 
         # --- flagging : on signale toute case où les estimateurs divergent ---
-        bad_struct = qtypes.get(q, "mult") == "single" and len(sel) != 1
         for b, r, mf, e1, e2, e3, proba in cells:
             n_cells += 1
             if mf["frame_detected"] == 0.0:
@@ -1556,8 +1551,6 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
                 reasons.append("disagree")          # E1/E2/E3 divergent
             if proba is not None and 0.30 <= proba <= 0.70:
                 reasons.append("uncertain")         # GBM peu sûr (E4)
-            if bad_struct:
-                reasons.append("structural")        # contrainte `single` violée (E6)
             if reasons:
                 mr = mf["masked_ratio_e5"]
                 ambiguous.append({

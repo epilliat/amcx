@@ -176,6 +176,24 @@ h1 .small { font-weight: 400; color: #888; font-size: 14px; }
 .cell-mark.sel:hover { stroke: #b02890; }
 .cell-mark.busy      { stroke: rgba(208, 64, 176, 0.25); }
 
+/* ⚠ Le rond PLEIN veut dire « lu comme coché ». Une case signalée mais non
+   cochée n'avait donc aucune marque sur l'image — 78 % des signalements
+   d'EXAM_2026. Le halo pointillé dit « à relire », et disparaît une fois la
+   case traitée. */
+.cell-halo {
+  fill: none; stroke: #d040b0;
+  /* ⚠ Le viewBox est la page canonique (~2480 px) ramenée à ~600 px à
+     l'écran : une épaisseur en unités utilisateur y devient sous-pixel et le
+     halo disparaît. `non-scaling-stroke` la fixe en pixels écran. Le tireté,
+     lui, reste en unités utilisateur — d'où les valeurs élevées. */
+  stroke-width: 2; vector-effect: non-scaling-stroke;
+  stroke-dasharray: 26 18; pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cell-halo { animation: haloPulse 2.4s ease-in-out infinite; }
+}
+@keyframes haloPulse { 0%, 100% { opacity: 0.95; } 50% { opacity: 0.45; } }
+
 .copy-overlay-wrap > img { cursor: pointer; }
 
 /* Zoom-grid embarqué dans le panel droit de la vue copie */
@@ -243,6 +261,10 @@ img.case.diff { box-shadow: 0 0 0 3px #f80; }
 img.case.selected.diff { box-shadow: 0 0 0 3px #f80; }
 img.case.doubtful { box-shadow: 0 0 0 3px #d040b0; }
 img.case.selected.doubtful { box-shadow: 0 0 0 3px #d040b0; }
+/* Signalée PUIS traitée : vert. Sans ça, deux passes de relecture sont
+   indistinguables et on rouvre indéfiniment les mêmes cases. */
+img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8; }
+.seen-mark { color: #2a8; font-weight: bold; }
 
 /* Deux zones côte à côte (positifs / négatifs) — remplace l'encadré vert */
 .cases-row {
@@ -859,22 +881,66 @@ img.case.selected.doubtful { box-shadow: 0 0 0 3px #d040b0; }
 .student-link { color: #06c; text-decoration: none; }
 .student-link:hover { text-decoration: underline; }
 .btn-small { padding: 2px 8px; font-size: 12px; }
-.flagged-cells {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.flagged-row.is-done { border-left-color: #2a8; opacity: 0.55; }
+.flagged-row.is-done:hover { opacity: 1; }
+.flagged-student .cell-count.rev-open-count { background: #fdeaf6; color: #a01f86; }
+.flagged-row.is-done .cell-count.rev-open-count { background: #e7f6ef; color: #197a52; }
+.rev-progress { font-size: 13px; }
+.flagged-list .status, header .status { min-width: 0; flex: 0 0 auto; }
+.rev-empty { padding: 24px; color: #6b7280; font-size: 14px; }
+.filters-sep { display: inline-block; width: 14px; }
+.legend-context { color: #9aa1ac; font-weight: 600; }
+.badge-validated { background: #2a8; color: white; }
+.rev-id-hint {
+  font-size: 12px; color: #6b7280;
+  background: #fff8f0; border: 1px solid #f2e0c9;
+  border-radius: 4px; padding: 5px 8px;
 }
-.flagged-case {
-  text-align: center;
+.rev-id-hint code { background: #fff; padding: 0 4px; border-radius: 3px; }
+
+/* Un bloc = une question. Les cases non signalées restent visibles, en
+   contexte : juger « aucune réponse lue » demande de voir la question entière. */
+.rev-q {
+  border: 1px solid #eceef1; border-radius: 5px;
+  padding: 6px 8px; background: #fcfcfd;
 }
-.flagged-case img.case {
-  max-height: 50px;
-  border-width: 3px;
+.rev-q.is-done { opacity: 0.5; }
+.rev-q.is-done:hover { opacity: 1; }
+.rev-q-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  font-size: 12px; margin-bottom: 5px;
 }
-.flagged-case img.case.ambig { box-shadow: 0 0 0 2px #fb0; }
-.flagged-case img.case.diff { box-shadow: 0 0 0 2px #f80; }
-.flagged-case img.case.doubtful { box-shadow: 0 0 0 2px #d040b0; }
-.flagged-case .case-label { font-size: 10px; line-height: 1.2; }
+.rev-reason {
+  background: #fdeaf6; color: #a01f86;
+  padding: 1px 7px; border-radius: 3px; font-weight: 600;
+}
+.rev-cells { display: flex; flex-wrap: wrap; gap: 6px; }
+.rev-case { text-align: center; position: relative; }
+.rev-case img.case {
+  max-height: 50px; display: block; cursor: pointer;
+  border: 2px solid transparent; border-radius: 3px;
+  /* Les crops sont en `loading="lazy"` : sans plancher, une vignette pas
+     encore chargée réduit la case à sa lettre et la ligne se réorganise sous
+     l'œil du relecteur au fil du défilement. */
+  min-width: 34px; min-height: 34px; background: #f4f5f7;
+}
+.rev-case.is-context img.case { opacity: 0.42; }
+.rev-case.is-context:hover img.case { opacity: 1; }
+.rev-case.is-selected img.case { border-color: #444; }
+.rev-case.is-flagged img.case { box-shadow: 0 0 0 3px #d040b0; }
+.rev-case.is-flagged.is-reviewed img.case { box-shadow: 0 0 0 3px #2a8; }
+.rev-case .case-label {
+  font-size: 10px; line-height: 1.3;
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+}
+.rev-case .ch { font-weight: 700; }
+.rev-seen {
+  border: 1px solid #d5d8dd; background: white; color: #6b7280;
+  border-radius: 3px; cursor: pointer;
+  font-size: 10px; line-height: 1; padding: 1px 4px;
+}
+.rev-seen:hover { border-color: #2a8; color: #2a8; }
+.rev-case.is-reviewed .rev-seen { background: #2a8; border-color: #2a8; color: white; }
 .amb-mark { color: #fb0; font-weight: bold; }
 
 /* Top nav */
@@ -3980,3 +4046,72 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .sheet-tab.is-active {
   background: #2769d8; border-color: #2769d8; color: #fff; font-weight: 600;
 }
+
+/* Rappel de l'avancement de la relecture sur la vue copie. */
+.rev-inline {
+  font-size: 12px; color: #197a52;
+  background: #e7f6ef; border-radius: 3px; padding: 2px 8px;
+}
+.rev-inline.is-open { color: #a01f86; background: #fdeaf6; }
+.rev-inline a { color: inherit; }
+.rev-done-fold > summary {
+  cursor: pointer; font-size: 12px; color: #6b7280;
+  padding: 3px 2px; list-style-position: inside;
+}
+.rev-done-fold > summary:hover { color: #374151; }
+.rev-done-fold[open] > summary { margin-bottom: 5px; }
+.rev-done-fold .rev-q { margin-bottom: 5px; }
+
+/* ---- Import de la liste étudiants : aperçu + colonnes par index ---- */
+.modal.modal-wide { width: min(860px, 94vw); }
+.rl-preview-wrap {
+  max-height: 210px; overflow: auto;
+  border: 1px solid #e3e6ea; border-radius: 5px; margin-bottom: 10px;
+}
+.rl-preview { border-collapse: collapse; font-size: 12px; width: 100%; }
+.rl-preview td {
+  border-bottom: 1px solid #f0f2f5; padding: 3px 7px;
+  white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.rl-preview .rl-rownum {
+  color: #9aa1ac; text-align: right; background: #fafbfc;
+  position: sticky; left: 0; font-variant-numeric: tabular-nums;
+}
+/* Lignes au-dessus de la 1re ligne de données : montrées, mais visiblement
+   hors du jeu — c'est ce qui permet de vérifier d'un coup d'œil qu'un titre
+   d'export n'est pas lu comme un étudiant. */
+.rl-preview .rl-skip td { color: #b6bcc5; background: #fcfcfd; font-style: italic; }
+.rl-preview .rl-col-id { background: #eaf3ff; font-weight: 600; }
+.rl-preview .rl-col-nom { background: #eafaf0; }
+.rl-preview .rl-col-prenom { background: #f4f1fd; }
+.rl-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+.rl-fields .modal-field { flex: 1 1 170px; margin: 0; }
+.rl-fields select, .rl-fields input { max-width: 100%; }
+.rl-report {
+  margin-top: 10px; padding: 8px 10px; border-radius: 5px;
+  font-size: 13px; background: #f6f7f9; border: 1px solid #e3e6ea;
+}
+.rl-report.is-ok { background: #e7f6ef; border-color: #b8e3cd; }
+.rl-report.is-warn { background: #fff8e8; border-color: #f0dfb5; }
+.rl-report.is-bad { background: #fdecec; border-color: #f2c4c4; }
+.rl-report-head { font-weight: 600; }
+.rl-report .rl-problem { margin-top: 4px; color: #8a5a00; }
+.rl-report.is-bad .rl-problem { color: #a12; }
+.pf-warn-line {
+  font-size: 12px; color: #8a5a00; background: #fff8e8;
+  border: 1px solid #f0dfb5; border-radius: 4px;
+  padding: 4px 7px; margin-top: 5px;
+}
+.rf-group-head-auto_id { color: #1e6b3a; background: #e7f6ec; border: 1px solid #69b97a; }
+/* Reconnu par le nom manuscrit seul : ni acquis, ni à résoudre — à confirmer. */
+.rf-group-head-auto_name { color: #8a5a00; background: #fff8e8; border: 1px solid #e5b95c; }
+.rf-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px;
+  padding: 5px 9px; font: inherit; font-size: 13px;
+  border: 1px solid #d5d8dd; border-radius: 5px;
+}
+.rf-search:focus { outline: 2px solid #7ba3d8; outline-offset: -1px; }
+/* Le libellé de ce champ est plus long que les autres : sans base propre, il
+   se coupe en trois lignes et casse l'alignement de la rangée. */
+.rl-fields .rl-field-start { flex: 0 0 150px; }
+.rl-fields .rl-field-start input { width: 100%; }

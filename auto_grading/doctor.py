@@ -230,9 +230,48 @@ def _printed_code() -> tuple[str, str, str]:
             "(source : %s)" % (getattr(lay, "source", "") or "?"))
 
 
+def _student_roster() -> tuple[str, str, str]:
+    """La liste des étudiants est-elle chargeable, et sépare-t-elle les copies ?
+
+    Trois pannes que rien ne signalait avant : une colonne configurée qui a
+    disparu du fichier (la liste devenait silencieusement fausse), des
+    homonymes (avertissement imprimé sur `stdout`, donc invisible), et des
+    étudiants que la grille du numéro ne suffit pas à séparer.
+    """
+    try:
+        import config
+        from student_list import StudentMatcher
+    except Exception as e:                              # noqa: BLE001
+        return (WARN, "liste étudiants", f"non vérifiable : {e}")
+    if not (config.load_config().get("student_xlsx") or "").strip():
+        return (WARN, "liste étudiants",
+                "aucune liste chargée — les copies ne peuvent pas être reliées "
+                "à des noms (tableau de bord → « Charger la liste »).")
+    m = StudentMatcher()
+    if m.error:
+        return (FAIL, "liste étudiants", m.error)
+    width = None
+    try:
+        from sujet_store import amc_question_map
+        width = len(amc_question_map()["id"]) or None
+    except Exception:                                   # noqa: BLE001
+        pass
+    warns = m.warnings(width)
+    detail = f"{len(m.students)} étudiants"
+    if width:
+        detail += f" · grille du numéro : {width} chiffres"
+    if not m.students:
+        return (FAIL, "liste étudiants",
+                detail + " — fichier lu mais aucune ligne exploitable "
+                         "(vérifier la colonne d'identifiant et la 1re ligne de données).")
+    if warns:
+        return (WARN, "liste étudiants", detail + "\n    · " + "\n    · ".join(warns))
+    return (OK, "liste étudiants", detail)
+
+
 CHECKS = (_system, _python, _deps, _pdflatex, _amc_sty, _sklearn_vs_model,
           _paths, _project, _layout_consistency, _printed_code,
-          _one_answer_sheet)
+          _one_answer_sheet, _student_roster)
 
 
 def run_checks() -> list[dict]:

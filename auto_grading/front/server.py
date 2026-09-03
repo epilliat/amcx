@@ -48,6 +48,7 @@ sys.path.insert(0, str(_INSTALL_DIR))
 import config
 import project_state
 import layout_store
+import review_state
 from cv_grade import (detect_mires, warp_to_canonical, load_layout,
                       compute_per_question_offsets, load_name_field)
 from student_list import StudentMatcher
@@ -386,12 +387,23 @@ def copy_id_of(d: dict) -> int:
 
 
 def resolve_student(d: dict, matcher) -> dict:
-    """Comme matcher.resolve() mais honore d['_student_override'] (id canonique posé manuellement)."""
+    """Comme matcher.resolve(), mais honore `_student_override` (posé à la main).
+
+    ⚠ Si l'override ne désigne plus personne — la liste a changé depuis —, on
+    **s'arrête là**. L'ancienne version retombait sans un mot sur la lecture de
+    la grille : une copie explicitement attribuée à ABIDELLI s'affichait alors
+    au nom d'ADJEBA MBA, toujours estampillée « assignée à la main », sans
+    aucun drapeau. Une décision humaine ne doit pas être remplacée en silence
+    par une lecture machine ; la copie redevient à traiter.
+    """
     override = d.get("_student_override")
     if override:
         s = matcher.by_full_id(str(override))
         if s is not None:
             return {"matched": s, "method": "override", "score": 1.0, "flag": ""}
+        return {"matched": None, "method": "override_lost", "score": 0.0,
+                "flag": f"l'étudiant {override} assigné à la main ne figure plus "
+                        f"dans la liste"}
     return matcher.resolve(d.get("student_id", ""), d.get("student_name", ""))
 
 
@@ -417,7 +429,11 @@ def list_all_copies():
             canon = match["matched"]
             diff = d.get("_cv_amc_diff", [])
             has_amc = "_amc_answers" in d
+            rev = copy_review(d)
             out.append({
+                "n_open": rev["n_open"],
+                "n_flagged": rev["n_flagged"],
+                "id_issue": bool(id_state(d, match)),
                 "batch": batch,
                 "page": page,
                 "student_id": sid,
@@ -473,18 +489,70 @@ def doubt_set(d: dict) -> set:
     return {(a["q"], a["char"]) for a in d.get("_ambiguous_cells", [])}
 
 
+def copy_review(d: dict) -> dict:
+    """État de relecture d'une copie : items groupés par question, restant à voir.
+
+    Unique point d'entrée — la vue `/flagged`, l'aperçu de la copie, le compteur
+    du tableau de bord et l'entraînement doivent compter la MÊME chose, sinon
+    l'un dit « terminé » pendant qu'un autre dit « 107 à revoir ».
+    """
+    copy = copy_id_of(d)
+    return review_state.copy_review(
+        d, lambda q: effective_spec(q, copy=copy), question_numbers()[0])
+
+
+def review_open_cells(d: dict) -> set:
+    """(q, char) des cases signalées ENCORE à traiter — pour l'aperçu de la copie."""
+    out = set()
+    for it in copy_review(d)["items"]:
+        for c in it["cells"]:
+            if c["flagged"] and not c["reviewed"]:
+                out.add((it["q"], c["char"]))
+    return out
+
+
 # Palette des séries (QCM = index 0, puis colonnes importées)
 SERIES_COLORS = ["#0a6ed1", "#e8820c", "#1f9d57", "#9b59b6",
                  "#d6485a", "#0a9bb5", "#c0392b", "#7f8c8d"]
 
 
+def id_state(d: dict, match: dict) -> str | None:
+    """L'identité de cette copie demande-t-elle un coup d'œil, et de quelle sorte ?
+
+    - `"unresolved"` : aucun étudiant ne correspond. Rien n'est attribuable.
+    - `"weak"` : la grille du numéro est illisible et le rattachement ne tient
+      qu'à un nom manuscrit reconnu de façon approchée. Ça se confirme en deux
+      secondes, et l'erreur qu'on évite — donner la note d'un étudiant à un
+      autre — est la plus coûteuse du système.
+    - `None` : le numéro est lu, ou l'identité a été posée à la main.
+
+    ⚠ Un rattachement par `override` (glissé dans /identites) ou `id_corrige`
+    n'est PAS douteux : quelqu'un l'a décidé. Les compter aurait rempli la file
+    de copies déjà tranchées.
+    """
+    if d.get("_reviewed_id"):
+        return None
+    if match["method"] == "override_lost":
+        return "lost"
+    if match["matched"] is None:
+        return "unresolved"
+    if match["method"] == "override" or "id_corrige" in (d.get("_flags") or []):
+        return None
+    return "weak" if "?" in (d.get("student_id") or "") else None
+
+
 def _is_to_review(c: dict) -> bool:
-    """Copie nécessitant une vérification (diff CV/AMC, ambiguë, ou problème de lecture)."""
-    if c.get("cv_amc_diff_count"):
-        return True
-    fl = c.get("flags", [])
-    return any(f in fl or f.startswith("cv_differs_amc")
-               for f in ("ambiguous", "no_mires", "id_incomplet"))
+    """Copie où il RESTE quelque chose à regarder.
+
+    ⚠ La version précédente comptait les drapeaux posés par la correction
+    automatique et ignorait la relecture : le tableau de bord affichait « 107 à
+    revoir » sur EXAM_2026 alors que 106 de ces copies étaient déjà validées, et
+    le nombre ne décroissait jamais. Il mesurait la sortie du CV, pas le travail
+    restant. (Il portait aussi une comparaison morte — `f.startswith(
+    "cv_differs_amc")` testait la chaîne littérale de la boucle, jamais les
+    drapeaux de la copie.)
+    """
+    return bool(c.get("n_open")) or bool(c.get("id_issue"))
 
 
 def series_stats(values: list) -> dict:
@@ -765,6 +833,7 @@ def _project_files_info() -> dict:
         "student_xlsx_name": "",
         "student_xlsx_exists": False,
         "n_students":   0,
+        "student_warnings": [],
     }
     excluded = set(cfg.get("scan_pdfs_excluded") or [])
     # PDFs : auto-découvert ou liste explicite (`scan_pdfs`).
@@ -836,10 +905,14 @@ def _project_files_info() -> dict:
         info["student_xlsx_exists"] = xpath.exists()
         if xpath.exists():
             try:
-                from student_list import StudentMatcher as _SM
-                m = _SM(); info["n_students"] = len(getattr(m, "students", []) or [])
-            except Exception:
+                m = get_matcher()
+                info["n_students"] = len(m.students)
+                # Homonymes, collisions de numéros, colonne disparue : ça se
+                # voit sur la carte, plus seulement sur `stdout`.
+                info["student_warnings"] = m.warnings(len(id_columns() or []))
+            except Exception as e:                      # noqa: BLE001
                 info["n_students"] = 0
+                info["student_warnings"] = [str(e)]
     return info
 
 
@@ -876,6 +949,9 @@ def index():
     stats = dict(bottom["series"][0]["stats"])
     stats["n_validated"] = sum(1 for c in copies if c["validated"])
     stats["n_to_review"] = sum(1 for c in copies if _is_to_review(c))
+    # Progression réelle de la relecture : signalements traités / total.
+    stats["n_flagged_cells"] = sum(c.get("n_flagged", 0) for c in copies)
+    stats["n_open_cells"] = sum(c.get("n_open", 0) for c in copies)
     stats["pass_mark"] = pass_mark
     stats["n_below"] = sum(1 for v in finals if v < pass_mark)
 
@@ -1057,45 +1133,124 @@ def api_save_report():
                     "n_rows": n_rows, "n_svg": n_svg})
 
 
+ROSTER_EXT = (".xlsx", ".xlsm", ".csv")
+
+
+def _roster_pending() -> Path | None:
+    """Le fichier de liste en attente de validation, s'il y en a un."""
+    d = ROOT / "imports"
+    for ext in ROSTER_EXT:
+        p = d / f"roster_pending{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+def _drop_roster_pending() -> None:
+    for ext in ROSTER_EXT:
+        (ROOT / "imports" / f"roster_pending{ext}").unlink(missing_ok=True)
+
+
 @app.route("/api/upload-xlsx", methods=["POST"])
 def api_upload_xlsx():
-    """Reçoit un .xlsx, le stocke en pending, renvoie ses colonnes d'en-tête."""
+    """Reçoit une liste (.xlsx/.csv) et rend son ANALYSE, pas juste son en-tête.
+
+    La modale a besoin de trois choses pour que l'utilisateur puisse trancher :
+    un aperçu des premières lignes, une proposition de colonnes déduite du
+    CONTENU, et la position de la 1re ligne de données. L'ancienne version ne
+    rendait que la ligne 1 du fichier — donc un export commençant par un titre
+    n'offrait qu'une seule « colonne », et les colonnes étaient présélectionnées
+    positionnellement, sans regarder ce qu'elles contiennent.
+    """
     f = request.files.get("file")
-    if f is None or not f.filename.lower().endswith(".xlsx"):
-        return jsonify({"error": "fichier .xlsx attendu"}), 400
-    pending = ROOT / "student_list_pending.xlsx"
+    ext = Path(f.filename or "").suffix.lower() if f is not None else ""
+    if f is None or ext not in ROSTER_EXT:
+        return jsonify({"error": "fichier .xlsx ou .csv attendu"}), 400
+    (ROOT / "imports").mkdir(parents=True, exist_ok=True)
+    _drop_roster_pending()          # jamais deux pending de formats différents
+    pending = ROOT / "imports" / f"roster_pending{ext}"
     f.save(pending)
     try:
-        from student_list import xlsx_header
-        cols = xlsx_header(pending)
-    except Exception as e:
+        from student_list import analyze_roster
+        analysis = analyze_roster(pending)
+    except Exception as e:          # noqa: BLE001
+        _drop_roster_pending()
         return jsonify({"error": f"lecture impossible : {e}"}), 400
-    return jsonify({"ok": True, "columns": cols})
+    return jsonify({"ok": True, "filename": f.filename, **analysis})
+
+
+@app.route("/api/student-list/preview", methods=["POST"])
+def api_student_list_preview():
+    """Ce que donnerait CE mapping de colonnes, sans rien enregistrer."""
+    body = request.get_json(force=True, silent=True) or {}
+    pending = _roster_pending()
+    if pending is None:
+        return jsonify({"error": "aucun fichier envoyé"}), 400
+    from student_list import RosterError, roster_report, students_from_file
+    try:
+        students = students_from_file(pending, body)
+    except RosterError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True,
+                    **roster_report(students, len(id_columns() or []), body)})
+
+
+@app.route("/api/student-list/cancel", methods=["POST"])
+def api_student_list_cancel():
+    """Abandon de l'import : le fichier en attente ne doit pas rester sur le disque."""
+    _drop_roster_pending()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/student-list", methods=["POST"])
 def api_student_list():
-    """Valide le fichier pending + le mapping de colonnes → config + rebuild matcher."""
+    """Valide le fichier en attente + le mapping de colonnes → config.
+
+    ⚠ Le contrôle a lieu AVANT d'écrire quoi que ce soit : une liste
+    inexploitable est refusée au lieu d'être enregistrée puis annoncée « ✓ N
+    étudiants » — le compte portait sur des lignes lues, pas sur des étudiants.
+    """
     global _matcher_cache, _series_cache
-    body = request.get_json(force=True)
-    pending = ROOT / "student_list_pending.xlsx"
-    if not pending.exists():
-        return jsonify({"error": "aucun fichier uploadé"}), 400
-    final = ROOT / "student_list.xlsx"
+    body = request.get_json(force=True, silent=True) or {}
+    pending = _roster_pending()
+    if pending is None:
+        return jsonify({"error": "aucun fichier envoyé"}), 400
+    from student_list import RosterError, roster_report, students_from_file
+    try:
+        students = students_from_file(pending, body)
+    except RosterError as e:
+        return jsonify({"error": str(e)}), 400
+    report = roster_report(students, len(id_columns() or []), body)
+    if not students:
+        return jsonify({"error": "aucun étudiant lisible avec ces colonnes — "
+                                 "vérifie la colonne du numéro et la 1re ligne "
+                                 "de données."}), 400
+
+    # La liste remplacée est conservée : un import raté ne doit pas détruire
+    # celle qui marchait. ⚠ Y compris quand elle a une AUTRE extension — un
+    # csv qui remplace un xlsx effaçait le xlsx sans en garder de copie.
+    for ext in ROSTER_EXT:
+        old = ROOT / f"student_list{ext}"
+        if old.exists():
+            old.replace(ROOT / f"student_list.prev{ext}")
+    final = ROOT / f"student_list{pending.suffix}"
     pending.replace(final)
     save_config({
-        "student_xlsx": "student_list.xlsx",
-        "xlsx_id_col": body.get("id_col", ""),
-        "xlsx_nom_col": body.get("nom_col", ""),
-        "xlsx_prenom_col": body.get("prenom_col", ""),
+        "student_xlsx": final.name,
+        "xlsx_id_idx": int(body.get("id_idx", -1)),
+        "xlsx_nom_idx": int(body.get("nom_idx", -1)),
+        "xlsx_prenom_idx": int(body.get("prenom_idx", -1)),
+        "xlsx_data_start": int(body.get("data_start", 1)),
+        # Les intitulés ne servent plus qu'à relire une config antérieure :
+        # on les vide pour qu'ils ne puissent pas reprendre la main.
+        "xlsx_id_col": "", "xlsx_nom_col": "", "xlsx_prenom_col": "",
     })
     _matcher_cache = None  # forcer le rechargement
     _series_cache = None   # la jointure des notes importées dépend du matcher
-    try:
-        n = len(get_matcher().students)
-    except Exception as e:
-        return jsonify({"error": f"liste invalide : {e}"}), 400
-    return jsonify({"ok": True, "n_students": n})
+    m = get_matcher()
+    return jsonify({"ok": True, "n_students": len(m.students),
+                    "warnings": m.warnings(len(id_columns() or [])),
+                    **report})
 
 
 @app.route("/api/upload-grade-file", methods=["POST"])
@@ -1245,14 +1400,19 @@ def identites():
         is_assigned = mt is not None and not is_dup
         if is_assigned:
             assigned_to[mt.id] = (batch, page)
-        # 3 groupes UI : unresolved (orange) / manual (bleu, posé à la main) /
-        # auto (vert, détecté par la grille ID ou un fuzzy HTR).
+        # 4 groupes UI. ⚠ « id » et « name_fuzzy » étaient réunis sous un même
+        # libellé « Auto-détectés par la grille ID » — faux pour les seconds, et
+        # trompeur : un rapprochement de nom manuscrit à 70 % de similarité n'a
+        # pas la solidité d'un numéro lu, et c'est justement celui qu'il faut
+        # regarder.
         if not is_assigned:
             group = "unresolved"
         elif method == "override":
             group = "manual"
-        else:                              # "id" ou "name_fuzzy"
-            group = "auto"
+        elif method == "id":
+            group = "auto_id"
+        else:                              # "name_fuzzy"
+            group = "auto_name"
         copies.append({
             "batch": batch, "page": page,
             "student_id": d.get("student_id", "????"),
@@ -1272,13 +1432,10 @@ def identites():
         (assigned_students if a else unassigned_students).append(item)
     students = unassigned_students + assigned_students
     # Ordre 3 groupes : unresolved (orange) → manual (bleu) → auto (vert).
-    group_order = {"unresolved": 0, "manual": 1, "auto": 2}
+    group_order = {"unresolved": 0, "auto_name": 1, "manual": 2, "auto_id": 3}
     copies.sort(key=lambda c: (group_order[c["group"]], c["batch"], c["page"]))
-    counts = {
-        "unresolved": sum(1 for c in copies if c["group"] == "unresolved"),
-        "manual":     sum(1 for c in copies if c["group"] == "manual"),
-        "auto":       sum(1 for c in copies if c["group"] == "auto"),
-    }
+    counts = {g: sum(1 for c in copies if c["group"] == g)
+              for g in ("unresolved", "auto_name", "manual", "auto_id")}
     return render_template("identites.html",
                            copies=copies,
                            students=students,
@@ -1851,6 +2008,12 @@ def student(batch, page):
     except Exception:
         offsets = {}
     sid = (d.get("student_id") or "?" * len(id_qs))
+    # ⚠ Sur l'image, le magenta plein veut dire « lu comme coché ». Une case
+    # SIGNALÉE mais non cochée — 78 % des signalements sur EXAM_2026 — n'avait
+    # donc aucune marque : elle n'existait que dans la grille de zoom, où le
+    # même magenta veut dire « à relire ». D'où le halo pointillé, distinct du
+    # rond plein, qui disparaît dès que la case est traitée.
+    open_cells = review_open_cells(d)
     cells = []
     for b in lay.sheet_boxes(page=shown.get("sheet_page")):
         dx, dy = offsets.get(b.question, (0, 0))
@@ -1862,6 +2025,7 @@ def student(batch, page):
         }
         if b.question in qcm_set:
             cells.append({**common, "kind": "qcm",
+                          "doubt": (b.question, b.char) in open_cells,
                           "selected": b.char in answers_int.get(b.question, [])})
         elif b.question in id_set:
             col_idx = id_qs.index(b.question)   # position dans les colonnes du calage
@@ -1871,6 +2035,7 @@ def student(batch, page):
 
     # Grille zoom (cases recadrées) embarquée dans le panel droit
     zoom_questions = build_zoom_questions(d)
+    review = copy_review(d)
 
     # Liste de TOUTES les copies pour la sidebar (mêmes données que le dashboard)
     sidebar_copies = list_all_copies()
@@ -1879,7 +2044,7 @@ def student(batch, page):
                            batch=batch, page=page, data=d,
                            match=match, scores=scores, questions=questions, nav=nav,
                            cells=cells, canon_w=canon_w, canon_h=canon_h,
-                           zoom_questions=zoom_questions,
+                           zoom_questions=zoom_questions, review=review,
                            sidebar_copies=sidebar_copies,
                            sheets=sheets, shown_sheet=shown,
                            active="")
@@ -1892,104 +2057,83 @@ def api_order():
 
 @app.route("/flagged")
 def flagged():
-    """Vue agrégée : toutes les cases flagguées (CV≠AMC ou ambiguës), groupées par étudiant.
+    """Review rapide : ce qu'il RESTE à regarder, groupé par question.
 
-    1 ligne par étudiant avec ses cases inline.
+    Trois choix qui viennent d'un défaut mesuré sur EXAM_2026 :
+
+    - **groupé par question, pas par zone cochée/non cochée.** Le signalement
+      structurel est une propriété de la question (« aucune réponse lue ») : le
+      juger demande de voir toutes ses cases ensemble. L'ancien découpage
+      Positifs/Négatifs éclatait la question sur deux colonnes qui mélangeaient
+      toutes les questions de la copie. Les cases non signalées restent
+      affichées, en contexte grisé.
+    - **le restant, pas le total.** Une case traitée sort de la file ; le
+      compteur décroît. Sans ça une relecture interrompue ne peut pas reprendre.
+    - **trié par risque décroissant** : si la relecture s'arrête en route, ce
+      qu'elle laisse derrière est ce qui compte le moins.
+
+    Les copies dont seule l'identité pose question entrent aussi dans la liste —
+    elles en étaient absentes des DEUX onglets, y compris de l'onglet Identité
+    qui existe pour elles (5 copies sur EXAM_2026).
     """
     matcher = get_matcher()
     students = []
-    if not RAW_DIR.exists():
-        return render_template("flagged.html", students=students, total_cells=0,
-                               filter_mode="all",
-                               counts={"all": 0, "not_validated": 0, "validated": 0},
-                               active="flagged")
-    for batch_dir in sorted(RAW_DIR.iterdir()):
-        if not batch_dir.is_dir():
+    for batch, page in list_ordered_keys():
+        d = load_copy_json(batch, page)
+        if d is None:
             continue
-        for jp in sorted(batch_dir.glob("page_*.json")):
-            with open(jp, encoding="utf-8") as f:
-                d = json.load(f)
-            batch = batch_dir.name
-            page = int(jp.stem.split("_")[1])
-            cells = []
-            seen = set()
-            # diff CV/AMC
-            for item in d.get("_cv_amc_diff", []):
-                q, ch = item["q"], item["char"]
-                if (q, ch) in seen:
-                    continue
-                seen.add((q, ch))
-                cells.append({
-                    "q": q, "char": ch,
-                    "selected": ch in d.get("answers", {}).get(str(q), []),
-                    "reason": "diff",
-                    "cv": item["cv"], "amc": item["amc"],
-                })
-            # cases « douteuses » du levier 2 (multi-estimateurs : masqué / seuil / GBM)
-            amb_new = d.get("_ambiguous_cells")
-            if amb_new:
-                for a in amb_new:
-                    q, ch = a["q"], a["char"]
-                    if (q, ch) in seen:
-                        continue
-                    seen.add((q, ch))
-                    cells.append({
-                        "q": q, "char": ch,
-                        "selected": ch in d.get("answers", {}).get(str(q), []),
-                        "reason": "doubtful",
-                        "reasons": a.get("reasons", []),
-                        "ratio": a.get("ratio"),
-                        "masked": a.get("masked"),
-                        "proba": a.get("proba"),
-                    })
-            else:
-                # legacy : ambiguïté CV (ancien format `Qx_Y(0.42→ml:.../thr:...)` dans notes)
-                notes = d.get("notes", "")
-                for m in re.finditer(r"Q(\d+)_([A-Z])\(([0-9.]+)→([^)]+)\)", notes):
-                    q = int(m.group(1)); ch = m.group(2); ratio = float(m.group(3))
-                    if (q, ch) in seen:
-                        continue
-                    seen.add((q, ch))
-                    cells.append({
-                        "q": q, "char": ch,
-                        "selected": ch in d.get("answers", {}).get(str(q), []),
-                        "reason": "ambiguous", "ratio": ratio,
-                    })
-            if not cells:
-                continue
-            # ordonner par q puis char
-            cells.sort(key=lambda c: (c["q"], c["char"]))
-            sid = d.get("student_id", "????")
-            name = d.get("student_name", "")
-            match = resolve_student(d, matcher)
-            canon = match["matched"]
-            students.append({
-                "batch": batch, "page": page,
-                "student_id": sid,
-                "canonical_name": f"{canon.nom} {canon.prenom}" if canon else "?",
-                "canonical_id": canon.id if canon else "",
-                "n_cells": len(cells),
-                "cells": cells,
-                "validated": "validated" in d.get("_flags", []),
-                "flags": d.get("_flags", []),
-                "id_questions": build_id_questions(d),
-            })
-    # Filtre par statut de validation (avant calcul des compteurs filtrés)
-    filter_mode = request.args.get("status", "all")
+        rev = copy_review(d)
+        match = resolve_student(d, matcher)
+        canon = match["matched"]
+        id_st = id_state(d, match)
+        id_bad = id_st is not None
+        if not rev["items"] and not id_bad:
+            continue
+        validated = "validated" in d.get("_flags", [])
+        n_open = rev["n_open"] + (1 if id_bad else 0)
+        students.append({
+            "batch": batch, "page": page,
+            "student_id": d.get("student_id", "????"),
+            "canonical_name": f"{canon.nom} {canon.prenom}" if canon else "?",
+            "canonical_id": canon.id if canon else "",
+            # ⚠ pas la clé « items » : dans un template Jinja, `s.items` résout
+            # la MÉTHODE du dict avant la clé, et la boucle explose en
+            # « 'builtin_function_or_method' object is not iterable ».
+            "questions": rev["items"],
+            "n_flagged": rev["n_flagged"] + (1 if id_bad else 0),
+            "n_open": n_open,
+            "id_issue": id_bad, "id_state": id_st,
+            "risk": rev["risk"] + (1.0 if id_bad else 0.0),
+            "validated": validated,
+            # ⚠ `validated` ne suffit pas : « relue en entier » parle des
+            # réponses, pas de l'identité. Une copie relue dont le numéro reste
+            # illisible a encore quelque chose à traiter — c'est justement le
+            # cas qui n'apparaissait nulle part.
+            "done": n_open == 0,
+            "flags": d.get("_flags", []),
+            "id_questions": build_id_questions(d),
+        })
+
+    filter_mode = request.args.get("status", "open")
+    sort_mode = request.args.get("sort", "risk")
     counts = {
         "all": len(students),
-        "validated": sum(1 for s in students if s["validated"]),
-        "not_validated": sum(1 for s in students if not s["validated"]),
+        "done": sum(1 for s in students if s["done"]),
+        "open": sum(1 for s in students if not s["done"]),
     }
-    if filter_mode == "validated":
-        students = [s for s in students if s["validated"]]
-    elif filter_mode == "not_validated":
-        students = [s for s in students if not s["validated"]]
-    total_cells = sum(s["n_cells"] for s in students)
-    return render_template("flagged.html", students=students, total_cells=total_cells,
-                           filter_mode=filter_mode, counts=counts, active="flagged")
-
-
+    totals = {
+        "flagged": sum(s["n_flagged"] for s in students),
+        "open": sum(s["n_open"] for s in students),
+    }
+    if filter_mode == "done":
+        students = [s for s in students if s["done"]]
+    elif filter_mode == "open":
+        students = [s for s in students if not s["done"]]
+    if sort_mode == "risk":
+        students.sort(key=lambda s: (s["done"], -s["risk"], s["batch"], s["page"]))
+    return render_template("flagged.html", students=students, totals=totals,
+                           filter_mode=filter_mode, sort_mode=sort_mode,
+                           counts=counts, active="flagged")
 
 
 def build_zoom_questions(d: dict) -> list:
@@ -1997,6 +2141,7 @@ def build_zoom_questions(d: dict) -> list:
     answers_int = {int(k): set(v) for k, v in d.get("answers", {}).items()}
     diff_pairs = diff_set(d)
     doubt_pairs = doubt_set(d)
+    seen = review_state.reviewed_cells(d)
     copy = copy_id_of(d)
     questions = []
     for q in question_numbers()[0]:
@@ -2010,6 +2155,7 @@ def build_zoom_questions(d: dict) -> list:
                 "correct": ch in spec["correct"],
                 "diff": (q, ch) in diff_pairs,
                 "doubtful": (q, ch) in doubt_pairs,
+                "reviewed": review_state.cell_key(q, ch) in seen,
             })
         questions.append({
             "q": q,
@@ -2079,24 +2225,165 @@ def api_toggle():
     # marquer comme modifié manuellement
     if "manually_edited" not in d.get("_flags", []):
         d.setdefault("_flags", []).append("manually_edited")
+    # Basculer une case EST la décision du relecteur : elle sort de la file
+    # sans clic supplémentaire. (Marqué explicitement plutôt que déduit de
+    # `answers` ≠ `_cv_answers` : un aller-retour reviendrait à l'état CV et
+    # ferait réapparaître une case qu'on vient pourtant d'examiner.)
+    _mark_reviewed_cells(d, [(int(q), char)])
     save_copy_json(batch, page, d)
-    return jsonify({"ok": True, "answers": d["answers"]})
+    rev = copy_review(d)
+    return jsonify({"ok": True, "answers": d["answers"], "n_open": rev["n_open"]})
 
 
-@app.route("/api/mark_validated", methods=["POST"])
-def api_mark_validated():
+def _mark_reviewed_cells(d: dict, pairs, reviewed: bool = True) -> None:
+    """Ajoute (ou retire) des cases de `_reviewed_cells`, en place."""
+    cur = [str(k) for k in (d.get("_reviewed_cells") or [])]
+    keys = [review_state.cell_key(q, ch) for q, ch in pairs]
+    if reviewed:
+        cur += [k for k in keys if k not in cur]
+    else:
+        cur = [k for k in cur if k not in set(keys)]
+    d["_reviewed_cells"] = cur
+
+
+def _mark_reviewed_questions(d: dict, qs, reviewed: bool = True) -> None:
+    cur = [int(q) for q in (d.get("_reviewed_questions") or [])]
+    qs = [int(q) for q in qs]
+    if reviewed:
+        cur += [q for q in qs if q not in cur]
+    else:
+        cur = [q for q in cur if q not in set(qs)]
+    d["_reviewed_questions"] = cur
+
+
+def _check_qcm_cell(d: dict, q, char=None):
+    """Valide (q, char) contre le calage. Lève ValueError sinon.
+
+    Une question hors calage écrirait un état de relecture fantôme, qui
+    survivrait à toutes les recorrections sans jamais correspondre à rien.
+    """
+    if not str(q).isdigit() or int(q) not in set(question_numbers()[0]):
+        raise ValueError(f"question inconnue : {q}")
+    q = int(q)
+    if char is not None:
+        if char not in effective_spec(q, copy=copy_id_of(d))["options"]:
+            raise ValueError(f"lettre hors options : {char}")
+    return q
+
+
+@app.route("/api/review-cell", methods=["POST"])
+def api_review_cell():
+    """Marque une case signalée comme traitée — sans toucher à la réponse.
+
+    C'est l'action qui manquait : « j'ai regardé, la lecture est bonne ». Sans
+    elle, seule une correction faisait sortir une case de la file, donc
+    confirmer le CV était impossible et la file ne décroissait jamais.
+    """
+    body = request.get_json(force=True, silent=True)
+    batch, page, q, char = required(body, "batch", "page", "q", "char")
+    page = int(page)
+    d = load_copy_json(batch, page)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    q = _check_qcm_cell(d, q, char)
+    reviewed = bool(body.get("reviewed", True))
+    _mark_reviewed_cells(d, [(q, char)], reviewed)
+    save_copy_json(batch, page, d)
+    return jsonify({"ok": True, "reviewed": reviewed,
+                    "n_open": copy_review(d)["n_open"]})
+
+
+@app.route("/api/review-question", methods=["POST"])
+def api_review_question():
+    """Marque le signalement de structure d'une question comme traité."""
+    body = request.get_json(force=True, silent=True)
+    batch, page, q = required(body, "batch", "page", "q")
+    page = int(page)
+    d = load_copy_json(batch, page)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    q = _check_qcm_cell(d, q)
+    reviewed = bool(body.get("reviewed", True))
+    _mark_reviewed_questions(d, [q], reviewed)
+    # Traiter la question, c'est aussi répondre pour les cases qu'elle signale.
+    rev = copy_review(d)
+    for it in rev["items"]:
+        if it["q"] == q:
+            _mark_reviewed_cells(d, [(q, c["char"]) for c in it["cells"]
+                                     if c["flagged"]], reviewed)
+    save_copy_json(batch, page, d)
+    return jsonify({"ok": True, "reviewed": reviewed,
+                    "n_open": copy_review(d)["n_open"]})
+
+
+@app.route("/api/review-copy", methods=["POST"])
+def api_review_copy():
+    """Marque TOUT ce qui reste signalé sur une copie comme traité.
+
+    ⚠ Ce n'est PAS `validated` : ça dit « les cases signalées sont traitées »,
+    pas « j'ai relu la copie entière ». La confusion des deux avait un coût
+    concret — `build_dataset` prend une copie `validated` comme vérité terrain
+    sur ses ~150 cases, y compris celles que personne n'a ouvertes.
+    """
     body = request.get_json(force=True, silent=True)
     batch, page = required(body, "batch", "page")
     page = int(page)
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "not found"}), 404
-    flags = d.get("_flags", [])
-    if "validated" not in flags:
+    rev = copy_review(d)
+    _mark_reviewed_cells(d, [(it["q"], c["char"]) for it in rev["items"]
+                             for c in it["cells"] if c["flagged"]])
+    _mark_reviewed_questions(d, [it["q"] for it in rev["items"]
+                                 if it["reason"] is not None])
+    save_copy_json(batch, page, d)
+    return jsonify({"ok": True, "n_open": copy_review(d)["n_open"]})
+
+
+@app.route("/api/review-identity", methods=["POST"])
+def api_review_identity():
+    """Confirme l'identité d'une copie dont le numéro est illisible.
+
+    Ne change rien à l'attribution : elle dit seulement que quelqu'un a regardé
+    le nom manuscrit et l'a jugé conforme. Sans ce geste, la copie resterait
+    indéfiniment dans la file — ou, comme avant, n'y entrerait jamais.
+    """
+    body = request.get_json(force=True, silent=True)
+    batch, page = required(body, "batch", "page")
+    page = int(page)
+    d = load_copy_json(batch, page)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    reviewed = bool(body.get("reviewed", True))
+    if reviewed:
+        d["_reviewed_id"] = True
+    else:
+        d.pop("_reviewed_id", None)
+    save_copy_json(batch, page, d)
+    return jsonify({"ok": True, "reviewed": reviewed})
+
+
+@app.route("/api/mark_validated", methods=["POST"])
+def api_mark_validated():
+    """Pose (ou retire) `validated` = « copie relue en entier ».
+
+    ⚠ `value: false` existe parce qu'un clic de trop était irréparable depuis
+    l'interface : le drapeau ne s'ajoutait que, et le bouton se désactivait —
+    il fallait éditer le JSON à la main.
+    """
+    body = request.get_json(force=True, silent=True)
+    batch, page = required(body, "batch", "page")
+    page = int(page)
+    d = load_copy_json(batch, page)
+    if d is None:
+        return jsonify({"error": "not found"}), 404
+    value = body.get("value", True)
+    flags = [f for f in d.get("_flags", []) if f != "validated"]
+    if value:
         flags.append("validated")
     d["_flags"] = flags
     save_copy_json(batch, page, d)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "validated": bool(value)})
 
 
 @app.route("/img/<batch>/<int:page>.jpg")

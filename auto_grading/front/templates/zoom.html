@@ -12,12 +12,13 @@
   <h1>Zoom — {{ data.student_name or '?' }} <span class="small">{{ batch }}/page_{{ "%03d"|format(page) }} (id: {{ data.student_id }})</span></h1>
   <div class="actions">
     <span id="status" class="status">Modifications sauvegardées automatiquement</span>
-    <button id="save-validate" class="btn btn-primary">Sauvegarder & valider</button>
+    <button id="save-validate" class="btn btn-primary">Relue en entier → suivante</button>
   </div>
   <p class="legend">
     Cases dans la zone <span class="legend-filled">Positifs</span> = cochées, <span class="legend-empty">Négatifs</span> = non.
     Click sur une case pour la déplacer dans l'autre zone (sauvegarde auto).
-    <span class="legend-correct">★</span> = correct, <span class="legend-diff">⚠</span> = CV ≠ AMC.
+    <span class="legend-correct">★</span> = correct, <span class="legend-diff">⚠</span> = CV ≠ AMC,
+    <span class="legend-doubtful">?</span> = signalée, <span class="ok-text">✓</span> = signalée et déjà relue.
     Raccourcis: <kbd>←</kbd>/<kbd>→</kbd> navigation.
   </p>
   <div class="tabs">

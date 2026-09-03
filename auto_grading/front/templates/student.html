@@ -25,9 +25,19 @@
   </div>
   <div class="actions">
     <a href="/student/{{ batch }}/{{ page }}/zoom" class="btn btn-primary">Zoom cases</a>
-    <button id="mark-validated" class="btn" {% if 'validated' in (data._flags or []) %}disabled{% endif %}>
-      {% if 'validated' in (data._flags or []) %}✓ Validé{% else %}Marquer validé{% endif %}
+    {# ⚠ « Relue en entier » n'est pas « signalements traités » : ce drapeau sert
+       de vérité terrain à build_dataset sur TOUTES les cases de la copie. Il ne
+       se pose que d'ici et du zoom, jamais depuis la review rapide. #}
+    <button id="mark-validated" class="btn"
+            data-validated="{{ 1 if 'validated' in (data._flags or []) else 0 }}">
+      {% if 'validated' in (data._flags or []) %}✓ Relue en entier — annuler{% else %}Marquer relue en entier{% endif %}
     </button>
+    {% if review.n_flagged %}
+    <span class="rev-inline{% if review.n_open %} is-open{% endif %}">
+      {{ review.n_flagged - review.n_open }}/{{ review.n_flagged }} signalements traités
+      {% if review.n_open %}<a href="/flagged?status=open">→ review rapide</a>{% endif %}
+    </span>
+    {% endif %}
   </div>
 </header>
 
@@ -85,6 +95,14 @@
       <img id="copy-img" src="/img_canon/{{ shown_sheet.batch }}/{{ shown_sheet.page }}.jpg" alt="copie">
       <svg id="cell-overlay" viewBox="0 0 {{ canon_w }} {{ canon_h }}"
            preserveAspectRatio="none">
+        {# Halo pointillé = case signalée non encore traitée. Dessiné AVANT les
+           ronds pour ne pas voler leurs clics (il est en pointer-events:none,
+           mais l'ordre garde le rond au-dessus). #}
+        {% for c in cells if c.doubt %}
+        <circle class="cell-halo" data-q="{{ c.q }}" data-char="{{ c.char }}"
+                cx="{{ "%.1f"|format(c.cx) }}" cy="{{ "%.1f"|format(c.cy) }}"
+                r="{{ "%.1f"|format(c.r * 1.45) }}"></circle>
+        {% endfor %}
         {% for c in cells %}
         <circle class="cell-mark{% if c.selected %} sel{% endif %}"
                 cx="{{ "%.1f"|format(c.cx) }}" cy="{{ "%.1f"|format(c.cy) }}"
@@ -131,11 +149,12 @@
 <script>
 const BATCH = '{{ batch }}', PAGE = {{ page }};
 
-document.getElementById('mark-validated').addEventListener('click', async () => {
+document.getElementById('mark-validated').addEventListener('click', async (e) => {
+  const on = e.target.dataset.validated === '1';
   await fetch('/api/mark_validated', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({batch: BATCH, page: PAGE})
+    body: JSON.stringify({batch: BATCH, page: PAGE, value: !on})
   });
   location.reload();
 });
@@ -151,6 +170,10 @@ async function toggleCell(q, ch) {
   const circle = document.querySelector(
     `#cell-overlay .cell-mark[data-q="${q}"][data-char="${ch}"]`);
   if (circle) circle.classList.toggle('sel');
+  // le halo « à relire » tombe : /api/toggle marque la case traitée
+  const halo = document.querySelector(
+    `#cell-overlay .cell-halo[data-q="${q}"][data-char="${ch}"]`);
+  if (halo) halo.remove();
   // sync case zoom-grid (déplace de positifs ↔ négatifs)
   const img = document.querySelector(
     `.embedded-zoom img.case[data-q="${q}"][data-char="${ch}"]`);

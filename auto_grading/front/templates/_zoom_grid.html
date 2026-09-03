@@ -9,7 +9,7 @@
         <div class="cases-zone-grid">
           {% for c in q.cases if c.selected %}
             <div class="case-wrap" data-char="{{ c.char }}">
-              <img class="case selected {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}"
+              <img class="case selected {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}{% if c.reviewed %} reviewed{% endif %}"
                    src="/zoom_img/{{ batch }}/{{ page }}/{{ q.q }}_{{ c.char }}.jpg"
                    data-q="{{ q.q }}" data-char="{{ c.char }}"
                    alt="Q{{ q.q }} {{ c.char }}"
@@ -17,7 +17,8 @@
               <div class="case-label {% if c.diff %}label-diff{% elif c.doubtful %}label-doubt{% endif %}">
                 <span class="ch">{{ c.char }}</span>
                 {% if c.correct %}<span class="star">★</span>{% endif %}
-                {% if c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
+                {% if c.reviewed and (c.diff or c.doubtful) %}<span class="seen-mark" title="signalée, déjà relue">✓</span>
+                {% elif c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
                 {% elif c.doubtful %}<span class="doubt-mark" title="case douteuse — relire">?</span>{% endif %}
               </div>
             </div>
@@ -29,7 +30,7 @@
         <div class="cases-zone-grid">
           {% for c in q.cases if not c.selected %}
             <div class="case-wrap" data-char="{{ c.char }}">
-              <img class="case {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}"
+              <img class="case {% if c.diff %}diff{% elif c.doubtful %}doubtful{% endif %}{% if c.reviewed %} reviewed{% endif %}"
                    src="/zoom_img/{{ batch }}/{{ page }}/{{ q.q }}_{{ c.char }}.jpg"
                    data-q="{{ q.q }}" data-char="{{ c.char }}"
                    alt="Q{{ q.q }} {{ c.char }}"
@@ -37,7 +38,8 @@
               <div class="case-label {% if c.diff %}label-diff{% elif c.doubtful %}label-doubt{% endif %}">
                 <span class="ch">{{ c.char }}</span>
                 {% if c.correct %}<span class="star">★</span>{% endif %}
-                {% if c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
+                {% if c.reviewed and (c.diff or c.doubtful) %}<span class="seen-mark" title="signalée, déjà relue">✓</span>
+                {% elif c.diff %}<span class="diff-mark" title="CV ≠ AMC">⚠</span>
                 {% elif c.doubtful %}<span class="doubt-mark" title="case douteuse — relire">?</span>{% endif %}
               </div>
             </div>

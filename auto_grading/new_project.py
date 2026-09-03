@@ -32,9 +32,13 @@ CONFIG_TEMPLATE = {
     "scan_pdfs": [],
     "answer_sheet_page": 0,
     "student_xlsx": "",
-    "xlsx_id_col": "id_etudiant",
-    "xlsx_nom_col": "nom",
-    "xlsx_prenom_col": "prenom_etat_civil",
+    # Colonnes par index, posées à l'import (cf. student_list). Un projet
+    # vierge n'en présume aucune : les intitulés d'un examen particulier
+    # n'ont rien à faire dans un gabarit.
+    "xlsx_id_idx": -1,
+    "xlsx_nom_idx": -1,
+    "xlsx_prenom_idx": -1,
+    "xlsx_data_start": 1,
     "export_template_xlsx": "",
     "grade_files": [],
     "hist_granularity": 1.0,

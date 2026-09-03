@@ -30,7 +30,7 @@ un sous-dossier `data/` avec les SQLite. Pour le test, `amc_dir` pointe sur
 | `<amc_dir>/data/layout.sqlite` | *(optionnel)* calage AMC — sinon dérivé du `.xy`, voir piège #1 |
 | `<amc_dir>/data/capture.sqlite` | *(optionnel)* analyse AMC des scans (contrôle croisé) |
 | `<amc_dir>/data/scoring.sqlite` | *(optionnel)* — non requis : barème lu dans `exam.tex` |
-| liste étudiants (xlsx) | `config.student_xlsx` : `id_etudiant`, `nom`, `prenom_etat_civil` |
+| liste étudiants (xlsx/csv) | `config.student_xlsx` + colonnes par **index** (`xlsx_*_idx`, `xlsx_data_start`) |
 
 Le sujet vit dans `auto_grading/sujet/subject.json` (**source de vérité unique** —
 voir *Store du sujet* plus bas ; `exam.tex` en est un **produit**, régénéré à la
@@ -320,6 +320,9 @@ L'UI lit/écrit là. **Ne jamais écraser les `answers` de ces fichiers** — c'
   ],
   "_cv_student_id": "30?1",                // ID lu par CV, immuable (créé au 1er edit de chiffre)
   "_student_override": "13021",            // ID canonique 5 chiffres posé manuellement (review finale)
+  "_reviewed_cells": ["22_F", "5_C"],      // cases signalées DÉJÀ traitées (cf. review_state)
+  "_reviewed_questions": [12],             // signalement de structure traité, par question
+  "_reviewed_id": true,                    // identité confirmée alors que le numéro est illisible
   "_source": "cv",
   "_flags": ["cv_differs_amc(2)", "manually_edited", "validated"]
 }
@@ -333,9 +336,19 @@ L'UI lit/écrit là. **Ne jamais écraser les `answers` de ces fichiers** — c'
 - Le **classifieur GBM tourne sur TOUTES les cases** (23 features : 18 historiques + 5 masquées : `masked_ratio_e3/e5/e7`, `frame_detected`, `align_residual`) → décision finale.
 - **Flagging multi-estimateurs (« levier 2 »)** — une case est `douteuse` ssi au moins un :
   - **E1** masked_ratio_e5 > 0.12 (seuil ABSOLU, indépendant de la calibration GBM) ≠ E2 (shrink vs seuil adaptatif) ≠ E3 (GBM) ;
-  - **E4** `predict_proba` ∈ [0.30, 0.70] (GBM peu sûr) ;
-  - **E6** structurel : question `single` avec ≠ 1 cellule cochée → question entière flaggée.
+  - **E4** `predict_proba` ∈ [0.30, 0.70] (GBM peu sûr).
 - Sortie → `_ambiguous_cells` (liste de dicts `{q, char, decision, ratio, masked, proba, reasons}`) écrite directement dans le JSON (cv_grade et seed_raw_responses la propagent ; l'UI l'affiche en magenta).
+
+⚠ **E6 (structurel : question `single` avec ≠ 1 case cochée) n'est PLUS écrit
+par `cv_grade`** — il est recalculé à l'affichage par
+[review_state.py](auto_grading/review_state.py). C'est une fonction pure des
+réponses courantes, et le stocker avait deux défauts : le signal restait affiché
+après correction (5 cases d'EXAM_2026 le portaient encore alors que leur
+question était réparée), et il signalait les 5 ou 6 cases d'une question
+simplement laissée blanche — **496 des 885 cases signalées, soit 56 %**. Le
+banc de non-régression le confirme : réponses et identités **inchangées**,
+features **identiques au bit près** sur 26 622 cases, seul `_ambiguous_cells`
+passe de 801 à 257 entrées.
 - Repli sans classifieur : `ticked = ratio > seuil adaptatif`.
 - Modèle chargé depuis `models/cell_clf_full.pkl`.
 
@@ -456,7 +469,7 @@ Détecte si une case est cochée à partir de **23 features** :
 - **18 historiques** (multi-shrink fill ratio, centroïde, composantes connexes, edge density, light-gray Tipp-Ex, contexte par question…) ;
 - **5 masquées** (cf. [masked_detect.py](auto_grading/masked_detect.py) — `MASKED_FEATURE_COLS`) : `masked_ratio_e3/e5/e7` à 3 érosions de l'intérieur, `frame_detected` (0/1), `align_residual` (MSE des 4 coins après similarité réf→scan).
 
-- [build_dataset.py](auto_grading/build_dataset.py) — assemble `results/labeled_cells.parquet` : features + labels depuis **relecture UI** (`validated`/`manually_edited`) en **priorité 1**, AMC `manual∈{0,1}` en **repli** (AMC parfois erroné sur les marques pâles ; cf. 27 conflits sur EXAM_2026). La référence masquée (rendu du PDF sujet) est mise en cache au mtime via `masked_detect.get_reference`.
+- [build_dataset.py](auto_grading/build_dataset.py) — assemble `results/labeled_cells.parquet` : features + labels depuis **relecture UI** en **priorité 1** — toutes les cases si la copie est `validated` (= relue en entier), sinon **uniquement** ses `_reviewed_cells` (cf. *Relecture*) —, AMC `manual∈{0,1}` en **repli** (AMC parfois erroné sur les marques pâles ; cf. 27 conflits sur EXAM_2026). La référence masquée (rendu du PDF sujet) est mise en cache au mtime via `masked_detect.get_reference`.
 - [train_classifier.py](auto_grading/train_classifier.py) — `HistGradientBoostingClassifier` (sklearn), split **par copie** ; écrit `models/cell_clf_full.pkl` (prod) + `models/cell_clf.pkl` (test) + `results/clf_report.txt`.
 - `extract_features()` / `FEATURE_COLS` vivent dans [cv_grade.py](auto_grading/cv_grade.py) ; signature `(warped, box, q_ratios_s18, copy_baseline, offset, ref, ref_corners, masked_feats)` — les 3 derniers servent à brancher la détection masquée ; `masked_feats` permet de réutiliser un calcul (évite le double-calcul dans `grade_image`).
 - [cv_benchmark.py](auto_grading/cv_benchmark.py) — accuracy vs ground truth AMC ; `--no-ml` = seuil seul. Sur EXAM_2026 le « 99.89 % » est limité par les 27 erreurs d'AMC lui-même — la mesure honnête est la **CV par copie** dans `clf_report.txt`.
@@ -467,7 +480,10 @@ Détecte si une case est cochée à partir de **23 features** :
 `save_config` ne persiste que les clés de `DEFAULTS`, les clés obsolètes sont purgées). Clés :
 - **`amc_dir`** (dossier de l'examen : PDF des copies, `data/` AMC éventuel), `scan_pdfs` (liste explicite de PDF, sinon auto-découverte), `answer_sheet_page` (0 = dérivée du calage) ;
 - `export_template_xlsx` (modèle xlsx scolarité pour `export_scolarite.py`, "" = aucun) ;
-- `student_xlsx`, `xlsx_id_col`, `xlsx_nom_col`, `xlsx_prenom_col` (roster id↔nom) ;
+- `student_xlsx` (liste étudiants, .xlsx ou .csv) et ses colonnes **par index** :
+  `xlsx_id_idx`, `xlsx_nom_idx`, `xlsx_prenom_idx` (-1 = aucune), `xlsx_data_start`
+  (index de la 1re ligne de données). Les anciennes clés `xlsx_*_col`
+  (intitulés) ne servent plus qu'à relire une config antérieure ;
 - `grade_files` (fichiers de notes importés, voir [grade_imports.py](auto_grading/grade_imports.py)) — chaque entrée `{path, join_mode:"id"|"name", join_col:<idx>, data_start:<idx>, grade_cols:[{idx, label, seuil, max, agg_weight}], name_overrides:{<nom brut>:<id|null>}}` (colonnes par **index**, jointure par id ou nom fuzzy) ;
 - `hist_granularity` (largeur d'une barre d'histogramme, en points) ;
 - `qcm_seuil`, `qcm_max`, `qcm_agg_weight` (paramètres de la colonne QCM) ;
@@ -504,8 +520,10 @@ auto_grading/
 │                                 max_score, total_max, save_questions, compile_pdf
 ├── sujet/                     ← subject.json (SOURCE DE VÉRITÉ) + exam.tex (généré)
 │                                 + DOC-sujet.pdf + exam.xy (calage)
+├── review_state.py            ← ce qui reste à relire : signalements, état traité, risque (pur)
 ├── score.py                   ← applique le barème (single=value/0 ; mult=Σ b/m, peut être négatif)
-├── student_list.py            ← StudentMatcher : match par id (last4) + fuzzy nom ; config-driven
+├── student_list.py            ← import de la liste (xlsx/csv, colonnes détectées par contenu)
+│                                 + StudentMatcher : match par le numéro lu (largeur quelconque) puis nom
 ├── grade_imports.py           ← import csv/xlsx de notes externes : auto-détection de structure,
 │                                 jointure par id OU par nom (fuzzy), résolution manuelle des ambigus
 ├── extract_pages.py           ← PDF → JPEG 300 dpi (PyMuPDF)
@@ -576,7 +594,7 @@ pkill -f "front/server.py"
 | `/` | **Dashboard** : liste étudiants + fiche + 2 histogrammes + nuage de points |
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
-| `/flagged` | **Review rapide** : cases flaggées / Identité ; filtres validés |
+| `/flagged` | **Review rapide** : signalements groupés par question, triés par risque ; `?status=open\|done\|all&sort=risk\|scan` |
 | `/student/<b>/<p>` | Vue copie : image canonique + ronds magenta + zoom embedded |
 | `/student/<b>/<p>/zoom` | Onglets *Réponses* (2 zones) / *Identité* (crop nom + grille ID) |
 | `/identites` | Review finale : copies non reliées ↔ noms, drag&drop |
@@ -601,12 +619,19 @@ pkill -f "front/server.py"
 | `/api/sujet/blocks/duplicate` | POST `{bid}` → `{bid}` |
 | `/api/sujet/migrate-to-canonical` | POST → ajoute marqueurs `%%QCM-…` + backup |
 | **API correction (inchangées)** | |
-| `/api/toggle` | toggle case réponse + flag `manually_edited` |
+| `/api/toggle` | toggle case réponse + flag `manually_edited` + marque la case traitée |
+| `/api/review-cell` | POST `{batch,page,q,char,reviewed?}` — « j'ai regardé, c'est bon » |
+| `/api/review-question` | POST `{batch,page,q,reviewed?}` — signalement de structure traité |
+| `/api/review-copy` | POST `{batch,page}` — tous les signalements de la copie traités |
+| `/api/review-identity` | POST `{batch,page,reviewed?}` — identité confirmée malgré un numéro illisible |
 | `/api/set-id-digit` | fixe un chiffre du numéro étudiant |
 | `/api/assign-student` | assigne/retire un étudiant |
-| `/api/mark_validated` | flag `validated` |
+| `/api/mark_validated` | flag `validated` = **copie relue en entier** ; `{value:false}` pour l'enlever |
 | `/api/config` | GET/POST config dashboard |
-| `/api/upload-xlsx`, `/api/student-list` | xlsx liste étudiants |
+| `/api/upload-xlsx` | POST fichier (.xlsx/.csv) → analyse : colonnes, aperçu, proposition |
+| `/api/student-list/preview` | POST mapping → ce qu'il chargerait, sans rien écrire |
+| `/api/student-list` | POST mapping → contrôle, sauvegarde de l'ancienne liste, enregistrement |
+| `/api/student-list/cancel` | POST → abandonne le fichier en attente |
 | `/api/upload-grade-file`, `/api/grade-file`, `/api/grade-file/remove`, `/api/grade-file/resolve` | notes externes |
 | `/api/save-report` | écrit `compte_rendu/` : notes.csv + SVG |
 | `/api/student-card/<b>/<p>` | fragment HTML fiche étudiant |
@@ -660,10 +685,198 @@ et aucune route n'est authentifiée. Garde-fous en place — **à ne pas retirer
 La route `/api/save` (écriture d'un JSON arbitraire à un chemin fourni par le
 client, sans aucun appelant côté front) a été **supprimée**.
 
+## Relecture — ne rien louper, et savoir où on en est
+
+Module : [review_state.py](auto_grading/review_state.py) (logique pure, zéro
+I/O), consommé par `/flagged`, la vue copie, le tableau de bord et
+`build_dataset`. **Une seule implémentation de « ce qui reste »** — sinon une
+page dit « terminé » pendant qu'une autre dit « 107 à revoir ».
+
+### Le défaut d'origine : rien ne distinguait « relu » de « pas encore relu »
+
+`_ambiguous_cells` était figé à l'heure de la correction, jamais marqué. Une
+case regardée puis jugée correcte était indistinguable d'une case jamais
+ouverte, et **confirmer la lecture du CV était impossible** : seule une
+correction faisait sortir une case de la file. D'où trois clés d'état, écrites
+par l'UI et préservées au re-seed :
+
+| clé | posée par | sens |
+|---|---|---|
+| `_reviewed_cells` | `/api/review-cell`, `/api/toggle`, `/api/review-copy` | cases signalées traitées |
+| `_reviewed_questions` | `/api/review-question` | signalement de structure traité |
+| `_reviewed_id` | `/api/review-identity` | identité confirmée malgré un numéro illisible |
+
+⚠ **Basculer une case vaut décision** : `/api/toggle` pose la marque, sans clic
+supplémentaire. Elle est posée *explicitement* et pas déduite de `answers ≠
+_cv_answers` — un aller-retour ramènerait à l'état CV et ferait réapparaître une
+case qu'on vient pourtant d'examiner.
+
+⚠ **Une copie `validated` n'a rien d'ouvert, par définition** : ce drapeau ne se
+pose que depuis la vue copie ou le zoom, les seules qui montrent toutes les
+cases. Sans cette règle, une copie relue de bout en bout garderait ses halos et
+la relecture ne convergerait jamais.
+
+### `validated` ≠ « signalements traités » — et pourquoi ça compte
+
+`build_dataset` prend une copie `validated` comme **vérité terrain sur toutes
+ses cases**, en priorité 1 devant AMC. Or « Marquer validé » était aussi le
+bouton de la review rapide, qui ne montre que les cases signalées. Résultat
+mesuré : les **26 469 étiquettes** du jeu d'entraînement venaient *toutes* de
+`ui_validated`, alors qu'au plus **~3 %** des cases avaient été mises sous les
+yeux de quelqu'un — le modèle réapprenait sa propre sortie sur le reste, et la
+validation croisée mesurait cette reproduction.
+
+Depuis : la review rapide pose des marques par case (`✓ Tout traiter`), jamais
+`validated` ; seules les vues qui montrent tout posent `validated`. Côté
+`build_dataset`, une copie non `validated` n'étiquette que ses
+`_reviewed_cells` (source `ui_reviewed`), AMC reprend la main ailleurs. Les
+données déjà validées d'EXAM_2026 gardent leur sens ancien — c'est irrattrapable
+a posteriori, il faut le savoir avant de citer le chiffre d'exactitude.
+
+### `/flagged` — groupé par question, trié par risque
+
+- **Un bloc = une question, toutes ses cases visibles** (les non signalées en
+  contexte grisé). Juger « aucune réponse lue » demande de voir la question
+  entière ; l'ancien découpage Positifs/Négatifs l'éclatait sur deux colonnes
+  qui mélangeaient toutes les questions de la copie.
+- **La file montre ce qui reste** ; les questions déjà traitées sont repliées.
+- **Tri par risque décroissant** (`?sort=risk`, défaut ; `scan` pour l'ordre de
+  scan) : `Σ (1 + incertitude)` sur les signalements ouverts, avec
+  `incertitude = 1 − |2p − 1|`. **665 des 885 cases signalées d'EXAM_2026 ont
+  une probabilité GBM < 0,01** — elles ne doivent pas passer devant un vrai
+  doute. Ce qu'une relecture interrompue laisse derrière elle est alors ce qui
+  compte le moins.
+- **Les copies dont seule l'identité pose question y entrent.** Elles étaient
+  absentes des DEUX onglets, y compris de l'onglet Identité qui existe pour
+  elles (5 copies sur EXAM_2026, invisibles partout ailleurs que dans
+  `/identites`).
+
+⚠ Deux degrés d'alerte sur l'identité (`server.id_state`) : `unresolved`
+(aucun étudiant ne correspond) et `weak` (grille illisible, rattachement par le
+seul nom manuscrit reconnu de façon approchée — 9 copies sur EXAM_2026). Un
+rattachement posé à la main (`override`, `id_corrige`) n'est **pas** douteux :
+quelqu'un l'a décidé. Les compter aurait rempli la file de cas déjà tranchés.
+
+⚠ La clé du dict de copie s'appelle **`questions`**, pas `items` : dans un
+template Jinja, `s.items` résout la *méthode* du dict avant la clé et la boucle
+casse sur `'builtin_function_or_method' object is not iterable`.
+
+### Le magenta ne voulait pas dire la même chose des deux côtés
+
+Sur l'image de la copie, le rond magenta **plein** dit « lu comme coché ». Une
+case *signalée mais non cochée* — **78 %** des signalements — n'avait donc
+aucune marque sur l'image, alors que dans la grille de zoom juste en dessous le
+même magenta veut dire « à relire ». D'où le **halo pointillé** (`.cell-halo`),
+distinct du rond plein, qui disparaît dès que la case est traitée.
+
+⚠ Le `viewBox` de l'overlay est la page canonique (~2480 px) ramenée à ~600 px
+à l'écran : une épaisseur de trait en unités utilisateur y devient sous-pixel et
+le halo disparaît. `vector-effect: non-scaling-stroke` la fixe en pixels écran ;
+le tireté, lui, reste en unités utilisateur (d'où `stroke-dasharray: 26 18`).
+
+### Compteurs
+
+`_is_to_review` comptait les drapeaux posés par la correction automatique et
+ignorait la relecture : le tableau de bord affichait « 107 à revoir » sur
+EXAM_2026 alors que **106 de ces copies étaient déjà validées**, et le nombre ne
+décroissait jamais. Il portait aussi une comparaison morte —
+`f.startswith("cv_differs_amc")` testait la chaîne littérale de la boucle,
+jamais les drapeaux de la copie. Il rend désormais « il reste quelque chose »
+(signalements ouverts ou identité douteuse), et le tableau de bord affiche en
+plus `traités / total`.
+
+⚠ **Un dé-clic est possible partout** : `POST /api/mark_validated {value:false}`,
+`review-cell {reviewed:false}`, `review-identity {reviewed:false}`. Avant, le
+drapeau `validated` ne s'ajoutait que et le bouton se désactivait : un clic de
+trop se réparait en éditant le JSON à la main.
+
+⚠ **Au re-seed** (`--preserve-manual`), les marques de relecture survivent —
+mais **seulement pour les cases dont la lecture CV n'a pas bougé**
+(`seed_raw_responses.carry_review_marks`). Une nouvelle correction qui lit
+autrement doit revenir dans la file, sinon la marque « vu » masquerait la
+nouveauté. Même règle pour `_reviewed_id`, invalidée si `student_id` change.
+
+## Liste étudiants — import et rattachement
+
+### ⚠ Le rattachement suit la largeur de la grille, pas une constante
+
+`AnswerSheetConfig.id_grid_digits` va de 1 à 9, et `cv_grade` lit un chiffre par
+colonne du calage. `StudentMatcher.by_id` essaie donc, dans l'ordre :
+l'identifiant **complet**, puis le **suffixe de la longueur lue**, puis les deux
+à nouveau sans les zéros de tête.
+
+Avant, il exigeait **exactement 4 chiffres** : une grille à 5 chiffres — le
+choix naturel quand les numéros en font 5 — ne rattachait plus **aucune** copie,
+alors que le numéro complet était lu correctement et que `by_full_id` l'aurait
+résolu. EXAM_2026 fonctionnait parce que sa grille fait 4, pas parce que le code
+était juste.
+
+⚠ **Un suffixe partagé par deux étudiants ne désigne personne** (`None`, pas le
+premier arrivé) : attribuer une copie au hasard entre deux étudiants est pire
+que ne pas l'attribuer, et la copie non résolue remonte dans `/identites`.
+`matcher.collisions(width)` les liste et `matcher.warnings(width)` les formule —
+avec les homonymes, qui n'étaient jusque-là imprimés que sur `stdout`. Le
+tableau de bord et `doctor` les affichent.
+
+### ⚠ Rien n'est deviné en silence
+
+`load_students` lève `RosterError` si une colonne configurée n'existe plus dans
+le fichier. L'ancien repli positionnel sur les colonnes 0/1/2 produisait des
+étudiants dont l'identifiant valait « DUPONT », **sans un mot**, et l'interface
+annonçait « ✓ 2 étudiants ». `StudentMatcher`, lui, ne lève jamais (toutes les
+pages en construisent un) : il porte le message dans `matcher.error`.
+
+### Import : détection par contenu, aperçu, contrôle avant écriture
+
+`analyze_roster()` lit xlsx **et csv** (`grade_imports.read_table`) et propose
+les colonnes **d'après leur contenu** — une colonne d'identifiants est faite de
+nombres de largeur constante ; les lignes de données commencent au premier bloc
+de trois lignes consécutives où elle est remplie ; entre deux colonnes
+alphabétiques, celle qui est le plus en MAJUSCULES est le nom de famille.
+
+⚠ **La détection ne peut pas passer par `grade_imports.analyze_table`** : celui-ci
+reconnaît les identifiants en les cherchant dans le roster — circulaire quand
+c'est justement le roster qu'on charge.
+
+La modale montre les premières lignes du fichier, grise celles situées avant la
+1re ligne de données et teinte les trois colonnes retenues : c'est ce qui rend
+visible qu'un titre d'export n'est pas lu comme un étudiant. Le compte affiché
+vient de `/api/student-list/preview`, donc c'est un nombre **d'étudiants
+construits**, pas de lignes lues — un import raté ne peut plus afficher « ✓ 3
+étudiants » dont l'un était la ligne d'en-tête. `roster_report` signale en plus
+les identifiants non numériques, les doublons, les largeurs hétérogènes, la même
+colonne choisie deux fois, et une grille plus large que les numéros.
+
+⚠ Intitulés et exemples viennent d'un fichier fourni par l'utilisateur : ils
+passent par `textContent`, jamais par `innerHTML`.
+
+⚠ **La liste remplacée est conservée** en `student_list.prev<ext>`, y compris
+quand la nouvelle a une autre extension — un csv qui remplaçait un xlsx
+effaçait le xlsx sans copie. Le fichier en attente vit dans `imports/` et
+l'abandon de la modale le supprime.
+
+⚠ **`_sniff_delimiter` regarde plusieurs lignes**, pas seulement la première :
+un export commence souvent par un titre sans séparateur, et le fichier entier
+était alors lu comme **une seule colonne**.
+
 ## Identités — match étudiant & doublons
 
-- `student_list.StudentMatcher` : `by_id` (4 derniers chiffres), fuzzy `by_name`, `by_full_id` (id 5 chiffres, pour les overrides).
-- `server.resolve_student(d, matcher)` : honore `_student_override` en priorité, sinon `matcher.resolve()`.
+- `student_list.StudentMatcher` : `by_id` (numéro complet **ou** suffixe de la
+  largeur lue), fuzzy `by_name`, `by_full_id` (pour les overrides).
+- `server.resolve_student(d, matcher)` : honore `_student_override` en priorité.
+  ⚠ **Si l'override ne désigne plus personne — la liste a changé —, on s'arrête
+  là** (`method="override_lost"`). L'ancienne version retombait sans un mot sur
+  la lecture de la grille : une copie explicitement attribuée à ABIDELLI
+  s'affichait au nom d'ADJEBA MBA, toujours estampillée « assignée à la main »,
+  sans aucun drapeau. Une décision humaine ne doit pas être remplacée en
+  silence par une lecture machine ; la copie redevient à traiter.
+- **`/identites` distingue les quatre provenances** : à résoudre · reconnus par
+  le **nom manuscrit seul** (à confirmer) · assignés à la main · rattachés par
+  le **numéro lu**. ⚠ Les deux derniers étaient réunis sous « Auto-détectés par
+  la grille ID » — faux pour un rapprochement de nom à 70 % de similarité, et
+  c'est justement celui qu'il faut regarder (11 copies sur EXAM_2026).
+- Le pool de droite a une **recherche** (nom ou numéro) : 174 chips ne se
+  parcourent pas à l'œil.
 - **Doublons** : si ≥2 copies résolvent vers le même étudiant (ex. ID mal lu), `/identites` met **toutes** ces copies à gauche (badge « doublon ») et libère les noms candidats dans le pool de droite.
 - Corriger une identité : soit glisser un nom dans `/identites`, soit cliquer les bons chiffres dans l'onglet *Identité* du zoom (`/api/set-id-digit`).
 

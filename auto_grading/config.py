@@ -40,8 +40,16 @@ DEFAULTS = {
     "scan_pdfs_excluded": [], # PDF à ignorer dans l'auto-découverte (UI "Retirer")
     "answer_sheet_page": 0,   # 0 = page de réponses dérivée du layout ; sinon forcée
     # --- liste étudiants ----------------------------------------------------
-    "student_xlsx": "",       # xlsx liste étudiants (vide tant que non fournie)
-    "xlsx_id_col": "id_etudiant",
+    "student_xlsx": "",       # liste étudiants (xlsx/csv ; vide tant que non fournie)
+    # Colonnes par INDEX (-1 = aucune). C'est la forme qui fait foi : un index
+    # survit à un intitulé changé, à un en-tête sur plusieurs lignes, et à deux
+    # colonnes homonymes. Les clés `*_col` ci-dessous ne servent plus qu'à
+    # relire une config antérieure (résolues en index au chargement).
+    "xlsx_id_idx": -1,
+    "xlsx_nom_idx": -1,
+    "xlsx_prenom_idx": -1,
+    "xlsx_data_start": 1,     # index de la 1re ligne de DONNÉES (en-tête au-dessus)
+    "xlsx_id_col": "id_etudiant",       # legacy : intitulés (repli si *_idx = -1)
     "xlsx_nom_col": "nom",
     "xlsx_prenom_col": "prenom_etat_civil",
     # --- notes importées + dashboard ---------------------------------------

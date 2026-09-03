@@ -1,24 +1,68 @@
 {% extends "base.html" %}
-{% block title %}Cases flaggées — review rapide{% endblock %}
+{% block title %}Review rapide — signalements{% endblock %}
+
+{# Un bloc = une question, toutes ses cases visibles. Le signalement de
+   structure (« aucune réponse lue ») est une propriété de la question : le
+   juger demande de voir ses cases ensemble, pas réparties sur deux colonnes
+   qui mélangeraient toutes les questions de la copie. #}
+{% macro rev_question(s, it) %}
+<div class="rev-q{% if it.n_open == 0 %} is-done{% endif %}" data-q="{{ it.q }}">
+  <div class="rev-q-head">
+    <b>Q{{ it.q }}</b>
+    <span class="q-tag">{{ it.tag }}</span>
+    <span class="q-type">[{{ it.type }}]</span>
+    <span class="small">correct : <b>{{ it.correct }}</b></span>
+    {% if it.reason == 'no_answer' %}
+      <span class="rev-reason">aucune réponse lue{% if it.reviewed %} · vu{% endif %}</span>
+    {% elif it.reason == 'multi_answer' %}
+      <span class="rev-reason">plusieurs réponses pour un choix unique{% if it.reviewed %} · vu{% endif %}</span>
+    {% endif %}
+    {% if it.reason and not it.reviewed %}
+    <button class="btn btn-small rev-q-done" data-q="{{ it.q }}">✓ vu</button>
+    {% endif %}
+  </div>
+  <div class="rev-cells">
+    {% for c in it.cells %}
+    <div class="rev-case{% if c.flagged %} is-flagged{% else %} is-context{% endif %}{% if c.selected %} is-selected{% endif %}{% if c.flagged and c.reviewed %} is-reviewed{% endif %}"
+         data-q="{{ it.q }}" data-char="{{ c.char }}"
+         title="{% if c.flagged %}{{ c.reasons|join(', ') }}{% if c.cv is not none %} — CV={{ c.cv }} AMC={{ c.amc }}{% endif %}{% if c.ratio is not none %} — r={{ c.ratio }} m={{ c.masked }} p={{ c.proba }}{% endif %}{% else %}contexte{% endif %}">
+      <img class="case" src="/zoom_img/{{ s.batch }}/{{ s.page }}/{{ it.q }}_{{ c.char }}.jpg"
+           data-batch="{{ s.batch }}" data-page="{{ s.page }}"
+           data-q="{{ it.q }}" data-char="{{ c.char }}" loading="lazy">
+      <div class="case-label">
+        <span class="ch">{{ c.char }}</span>
+        {% if c.correct %}<span class="star">★</span>{% endif %}
+        {% if c.flagged %}<button class="rev-seen" title="j'ai regardé, la lecture est bonne">✓</button>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
 {% block content %}
 <header class="sticky">
-  <h1>Review rapide — cases flaggées</h1>
+  <h1>Review rapide</h1>
   <div class="filters">
-    <a class="btn-filter {% if filter_mode == 'all' %}active{% endif %}" href="/flagged">Tous ({{ counts.all }})</a>
-    <a class="btn-filter {% if filter_mode == 'not_validated' %}active{% endif %}" href="/flagged?status=not_validated">Non validés ({{ counts.not_validated }})</a>
-    <a class="btn-filter {% if filter_mode == 'validated' %}active{% endif %}" href="/flagged?status=validated">Validés ({{ counts.validated }})</a>
+    <a class="btn-filter {% if filter_mode == 'open' %}active{% endif %}" href="/flagged?status=open&sort={{ sort_mode }}">À traiter ({{ counts.open }})</a>
+    <a class="btn-filter {% if filter_mode == 'done' %}active{% endif %}" href="/flagged?status=done&sort={{ sort_mode }}">Traités ({{ counts.done }})</a>
+    <a class="btn-filter {% if filter_mode == 'all' %}active{% endif %}" href="/flagged?status=all&sort={{ sort_mode }}">Tous ({{ counts.all }})</a>
+    <span class="filters-sep"></span>
+    <a class="btn-filter {% if sort_mode == 'risk' %}active{% endif %}" href="/flagged?status={{ filter_mode }}&sort=risk" title="Le plus incertain d'abord : une relecture interrompue laisse derrière elle ce qui compte le moins">↓ risque</a>
+    <a class="btn-filter {% if sort_mode == 'scan' %}active{% endif %}" href="/flagged?status={{ filter_mode }}&sort=scan">ordre de scan</a>
   </div>
   <div class="meta">
     <span><b>{{ students|length }}</b> copies affichées</span>
-    <span><b>{{ total_cells }}</b> cases au total</span>
+    <span class="rev-progress"><b id="open-total">{{ totals.open }}</b> signalements à traiter
+      <span class="small">sur {{ totals.flagged }}</span></span>
+    <span id="status" class="status">prêt</span>
   </div>
   <p class="legend">
-    Cases dans la zone <span class="legend-filled">Positifs</span> = cochées, <span class="legend-empty">Négatifs</span> = non.
-    Click sur une case pour la déplacer (sauvegarde auto).
-    <span class="legend-diff">orange ⚠</span> = CV ≠ AMC,
-    <span class="legend-doubtful">magenta ?</span> = case douteuse (estimateurs divergent),
-    <span class="legend-ambig">jaune</span> = ambigu (legacy).
-    <span id="status" class="status">prêt</span>
+    Un bloc = une question, toutes ses cases visibles.
+    <span class="legend-doubtful">magenta</span> = signalée,
+    <span class="legend-context">grisée</span> = contexte.
+    Clic sur une case : corriger la réponse. Clic sur <b>✓</b> : « j'ai regardé, c'est bon ».
+    Les deux la sortent de la file.
   </p>
   <div class="tabs">
     <button class="tab-btn active" data-tab="reponses">Réponses</button>
@@ -29,63 +73,54 @@
 <div class="tab-panel" id="tab-reponses">
 <div class="flagged-list">
 {% for s in students %}
-  <div class="flagged-row clickable"
-       data-stem="{{ s.batch }}_page_{{ "%03d"|format(s.page) }}"
-       data-copie-href="/student/{{ s.batch }}/{{ s.page }}"
-       {% if s.validated %}data-validated="1"{% endif %}>
+  <div class="flagged-row{% if s.done %} is-done{% endif %}"
+       data-batch="{{ s.batch }}" data-page="{{ s.page }}">
     <div class="flagged-student">
       <a href="/student/{{ s.batch }}/{{ s.page }}" class="student-link">
         <b>{{ s.canonical_name }}</b>
       </a>
       <span class="small">({{ s.canonical_id }} — {{ s.batch }}/p.{{ s.page }})</span>
-      <span class="cell-count">{{ s.n_cells }} cases</span>
-      {% for f in s.flags %}{% if f.startswith('cv_differs_amc') or f.startswith('amc_unvalidated') or f.startswith('ambiguous') or f.startswith('no_mires') or f.startswith('id_incomplet') %}<span class="badge badge-{{ f.split('(')[0] }}">{{ f }}</span>{% endif %}{% endfor %}
-      <button class="btn btn-small mark-validated">{% if s.validated %}✓ Validé{% else %}Marquer validé{% endif %}</button>
+      <span class="cell-count rev-open-count">{{ s.n_open }} / {{ s.n_flagged }} à traiter</span>
+      {% if s.id_state == 'lost' %}<span class="badge badge-no_mires">assignation perdue</span>
+      {% elif s.id_state == 'unresolved' %}<span class="badge badge-no_mires">aucun étudiant trouvé</span>
+      {% elif s.id_state == 'weak' %}<span class="badge badge-id_incomplet">identité à confirmer</span>{% endif %}
+      {% for f in s.flags %}{% if f.startswith('cv_differs_amc') or f == 'amc_unvalidated' or f == 'no_mires' %}<span class="badge badge-{{ f.split('(')[0] }}">{{ f }}</span>{% endif %}{% endfor %}
+      {% if s.validated %}<span class="badge badge-validated">✓ relue en entier</span>{% endif %}
+      <button class="btn btn-small rev-copy-done">✓ Tout traiter</button>
     </div>
-    <div class="cases-row cases-row-small">
-      <div class="cases-zone cases-positifs">
-        <span class="cases-zone-label">Positifs</span>
-        <div class="cases-zone-grid">
-          {% for c in s.cells if c.selected %}
-            <div class="case-wrap flagged-case" data-char="{{ c.q }}_{{ c.char }}"
-                 title="{% if c.reason == 'diff' %}CV={{ c.cv }} AMC={{ c.amc }}{% elif c.reason == 'doubtful' %}{{ c.reasons|join(', ') }} — r={{ c.ratio }} m={{ c.masked }} p={{ c.proba }}{% else %}ratio CV={{ c.ratio }}{% endif %}">
-              <img class="case selected {% if c.reason == 'diff' %}diff{% elif c.reason == 'doubtful' %}doubtful{% else %}ambig{% endif %}"
-                   src="/zoom_img/{{ s.batch }}/{{ s.page }}/{{ c.q }}_{{ c.char }}.jpg"
-                   data-batch="{{ s.batch }}" data-page="{{ s.page }}" data-q="{{ c.q }}" data-char="{{ c.char }}"
-                   loading="lazy">
-              <div class="case-label">
-                <span class="ch">Q{{ c.q }}-{{ c.char }}</span>
-                {% if c.reason == 'diff' %}<span class="diff-mark">⚠</span>
-                {% elif c.reason == 'doubtful' %}<span class="doubt-mark">?</span>
-                {% else %}<span class="amb-mark">?</span>{% endif %}
-              </div>
-            </div>
-          {% endfor %}
-        </div>
-      </div>
-      <div class="cases-zone cases-negatifs">
-        <span class="cases-zone-label">Négatifs</span>
-        <div class="cases-zone-grid">
-          {% for c in s.cells if not c.selected %}
-            <div class="case-wrap flagged-case" data-char="{{ c.q }}_{{ c.char }}"
-                 title="{% if c.reason == 'diff' %}CV={{ c.cv }} AMC={{ c.amc }}{% elif c.reason == 'doubtful' %}{{ c.reasons|join(', ') }} — r={{ c.ratio }} m={{ c.masked }} p={{ c.proba }}{% else %}ratio CV={{ c.ratio }}{% endif %}">
-              <img class="case {% if c.reason == 'diff' %}diff{% elif c.reason == 'doubtful' %}doubtful{% else %}ambig{% endif %}"
-                   src="/zoom_img/{{ s.batch }}/{{ s.page }}/{{ c.q }}_{{ c.char }}.jpg"
-                   data-batch="{{ s.batch }}" data-page="{{ s.page }}" data-q="{{ c.q }}" data-char="{{ c.char }}"
-                   loading="lazy">
-              <div class="case-label">
-                <span class="ch">Q{{ c.q }}-{{ c.char }}</span>
-                {% if c.reason == 'diff' %}<span class="diff-mark">⚠</span>
-                {% elif c.reason == 'doubtful' %}<span class="doubt-mark">?</span>
-                {% else %}<span class="amb-mark">?</span>{% endif %}
-              </div>
-            </div>
-          {% endfor %}
-        </div>
-      </div>
+
+    {% if s.id_issue %}
+    <div class="rev-id-hint">
+      Numéro lu : <code>{{ s.student_id }}</code>
+      {% if s.id_state == 'weak' %}
+        — rattaché à <b>{{ s.canonical_name }}</b> par le nom manuscrit seul.
+        <button class="btn btn-small rev-id-ok">✓ C'est bien lui</button>
+      {% elif s.id_state == 'lost' %}
+        — l'étudiant assigné à la main ne figure plus dans la liste chargée.
+      {% else %}
+        — aucun étudiant ne correspond.
+      {% endif %}
+      <a href="/student/{{ s.batch }}/{{ s.page }}/zoom">corriger les chiffres</a>
+      ou <a href="/identites">assigner un nom</a>.
     </div>
+    {% endif %}
+
+    {# Ce qui reste d'abord ; le déjà-traité est replié, consultable mais hors
+       du chemin — l'intérêt d'une file est ce qu'il y reste. #}
+    {% set open_qs = s.questions | selectattr('n_open') | list %}
+    {% set done_qs = s.questions | rejectattr('n_open') | list %}
+    {% for it in open_qs %}{{ rev_question(s, it) }}{% endfor %}
+    {% if done_qs %}
+    <details class="rev-done-fold">
+      <summary>{{ done_qs|length }} question{{ 's' if done_qs|length > 1 else '' }} déjà traitée{{ 's' if done_qs|length > 1 else '' }}</summary>
+      {% for it in done_qs %}{{ rev_question(s, it) }}{% endfor %}
+    </details>
+    {% endif %}
   </div>
 {% endfor %}
+{% if not students %}
+  <p class="rev-empty">Rien à traiter ici. 🎉</p>
+{% endif %}
 </div>
 </div>
 
@@ -96,6 +131,7 @@
     <div class="identite-head">
       <a href="/student/{{ s.batch }}/{{ s.page }}" class="student-link"><b>{{ s.canonical_name }}</b></a>
       <span class="small">({{ s.canonical_id }} — {{ s.batch }}/p.{{ s.page }} · id lu {{ s.student_id }})</span>
+      {% if s.id_issue %}<span class="badge badge-id_incomplet">à vérifier</span>{% endif %}
     </div>
     {% set batch = s.batch %}{% set page = s.page %}{% set id_questions = s.id_questions %}
     {% include "_id_grid.html" %}
@@ -108,77 +144,126 @@
 {% block scripts %}
 <script>
 const status = document.getElementById('status');
+const openTotal = document.getElementById('open-total');
 
-// Déplace la case-wrap dans la zone opposée (positifs ↔ négatifs) en triant par data-char.
-function moveCaseToOtherZone(wrap) {
-  const block = wrap.closest('.flagged-row, .q-block');
-  const fromZone = wrap.closest('.cases-zone');
-  const targetClass = fromZone.classList.contains('cases-positifs') ? 'cases-negatifs' : 'cases-positifs';
-  const targetGrid = block.querySelector('.' + targetClass + ' .cases-zone-grid');
-  const ch = wrap.dataset.char;
-  let inserted = false;
-  for (const sib of targetGrid.querySelectorAll(':scope > .case-wrap')) {
-    if (sib.dataset.char > ch) { targetGrid.insertBefore(wrap, sib); inserted = true; break; }
-  }
-  if (!inserted) targetGrid.appendChild(wrap);
+function post(url, body) {
+  return fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                     body: JSON.stringify(body)});
 }
 
+/* Le nombre restant est recalculé par le SERVEUR (une seule implémentation de
+   « ce qui reste ») ; le front ne fait que le reporter. */
+function applyCount(row, nOpen) {
+  const before = parseInt(row.dataset.open, 10);
+  const label = row.querySelector('.rev-open-count');
+  const total = label.textContent.split('/')[1].trim().split(' ')[0];
+  label.textContent = nOpen + ' / ' + total + ' à traiter';
+  row.dataset.open = nOpen;
+  if (!isNaN(before)) {
+    openTotal.textContent = Math.max(0, parseInt(openTotal.textContent, 10) + (nOpen - before));
+  }
+  row.classList.toggle('is-done', nOpen === 0);
+}
+
+document.querySelectorAll('.flagged-row').forEach(row => {
+  row.dataset.open = row.querySelector('.rev-open-count').textContent.trim().split(' ')[0];
+});
+
+/* Clic sur l'image : corriger la réponse (et donc la traiter). */
 document.querySelectorAll('#tab-reponses img.case').forEach(img => {
   img.addEventListener('click', async (ev) => {
-    ev.stopPropagation();  // ne pas déclencher la navigation de la ligne
+    ev.stopPropagation();
     const {batch, page, q, char} = img.dataset;
-    status.textContent = '...';
-    const r = await fetch('/api/toggle', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({batch: batch, page: parseInt(page), q: q, char: char})
-    });
-    if (r.ok) {
-      img.classList.toggle('selected');
-      moveCaseToOtherZone(img.closest('.case-wrap'));
-      status.textContent = '✓ ' + batch + '/p.' + page + ' Q' + q + char;
-    } else {
-      status.textContent = '✘ erreur';
-    }
+    status.textContent = '…';
+    const r = await post('/api/toggle', {batch, page: parseInt(page), q, char});
+    if (!r.ok) { status.textContent = '✘ erreur'; return; }
+    const j = await r.json();
+    const box = img.closest('.rev-case');
+    box.classList.toggle('is-selected');
+    box.classList.add('is-reviewed');
+    applyCount(img.closest('.flagged-row'), j.n_open);
+    status.textContent = '✓ ' + batch + '/p.' + page + ' Q' + q + char;
   });
 });
 
-document.querySelectorAll('.mark-validated').forEach(btn => {
-  btn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const row = e.target.closest('.flagged-row');
-    const page = parseInt(row.dataset.stem.split('_page_')[1]);
-    const batch = row.dataset.stem.split('_page_')[0];
-    const r = await fetch('/api/mark_validated', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({batch: batch, page: page})
-    });
-    if (r.ok) {
-      row.style.opacity = '0.45';
-      row.dataset.validated = '1';
-      e.target.textContent = '✓ Validé';
-      e.target.disabled = true;
-      status.textContent = '✓ validé ' + row.dataset.stem;
-    }
+/* Clic sur ✓ : confirmer la lecture sans rien changer. */
+document.querySelectorAll('.rev-seen').forEach(btn => {
+  btn.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const box = btn.closest('.rev-case');
+    const row = btn.closest('.flagged-row');
+    const reviewed = !box.classList.contains('is-reviewed');
+    const r = await post('/api/review-cell', {
+      batch: row.dataset.batch, page: parseInt(row.dataset.page),
+      q: box.dataset.q, char: box.dataset.char, reviewed: reviewed});
+    if (!r.ok) { status.textContent = '✘ erreur'; return; }
+    const j = await r.json();
+    box.classList.toggle('is-reviewed', reviewed);
+    applyCount(row, j.n_open);
+    status.textContent = reviewed ? '✓ vu' : '↩ remis dans la file';
   });
 });
 
-// Click sur la ligne (en dehors des éléments interactifs) → ouvre la vue copie
-document.querySelectorAll('.flagged-row.clickable').forEach(row => {
-  row.addEventListener('click', (e) => {
-    // ignorer si la cible est interactive
-    if (e.target.closest('a, button, img.case')) return;
-    window.location.href = row.dataset.copieHref;
+/* « ✓ vu » d'une question : le signalement de structure est traité. */
+document.querySelectorAll('.rev-q-done').forEach(btn => {
+  btn.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const row = btn.closest('.flagged-row');
+    const r = await post('/api/review-question', {
+      batch: row.dataset.batch, page: parseInt(row.dataset.page), q: btn.dataset.q});
+    if (!r.ok) { status.textContent = '✘ erreur'; return; }
+    const j = await r.json();
+    const blk = btn.closest('.rev-q');
+    blk.querySelectorAll('.rev-case.is-flagged').forEach(b => b.classList.add('is-reviewed'));
+    blk.classList.add('is-done');
+    btn.remove();
+    applyCount(row, j.n_open);
+    status.textContent = '✓ Q' + blk.dataset.q + ' vue';
   });
 });
 
-// Les liens explicites (nom étudiant) ne doivent pas propager au row
+/* « Tout traiter » : les signalements de CETTE copie sont traités.
+   Ce n'est PAS « relue en entier » — ce drapeau-là se pose sur la vue copie,
+   la seule qui montre vraiment toutes les cases. */
+document.querySelectorAll('.rev-copy-done').forEach(btn => {
+  btn.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const row = btn.closest('.flagged-row');
+    const r = await post('/api/review-copy', {
+      batch: row.dataset.batch, page: parseInt(row.dataset.page)});
+    if (!r.ok) { status.textContent = '✘ erreur'; return; }
+    const j = await r.json();
+    row.querySelectorAll('.rev-case.is-flagged').forEach(b => b.classList.add('is-reviewed'));
+    row.querySelectorAll('.rev-q').forEach(b => b.classList.add('is-done'));
+    row.querySelectorAll('.rev-q-done').forEach(b => b.remove());
+    applyCount(row, j.n_open);
+    status.textContent = '✓ signalements traités';
+  });
+});
+
+/* « C'est bien lui » : l'identité reconnue par le nom est confirmée. */
+document.querySelectorAll('.rev-id-ok').forEach(btn => {
+  btn.addEventListener('click', async (ev) => {
+    ev.stopPropagation();
+    const row = btn.closest('.flagged-row');
+    const r = await post('/api/review-identity', {
+      batch: row.dataset.batch, page: parseInt(row.dataset.page),
+      reviewed: btn.dataset.on !== '1'});
+    if (!r.ok) { status.textContent = '✘ erreur'; return; }
+    const on = btn.dataset.on !== '1';
+    applyCount(row, parseInt(row.dataset.open, 10) + (on ? -1 : 1));
+    btn.dataset.on = on ? '1' : '0';
+    btn.textContent = on ? "↩ annuler" : "✓ C'est bien lui";
+    const badge = row.querySelector('.badge-id_incomplet');
+    if (badge) badge.style.display = on ? 'none' : '';
+    status.textContent = on ? '✓ identité confirmée' : '↩ remise dans la file';
+  });
+});
+
 document.querySelectorAll('.student-link').forEach(a => {
   a.addEventListener('click', (e) => e.stopPropagation());
 });
 
-// bascule d'onglets Réponses / Identité
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
