@@ -163,6 +163,42 @@ def _system() -> tuple[str, str, str]:
             f"{platform.system()} {platform.release()} ({platform.machine()})")
 
 
+def _one_answer_sheet() -> tuple[str, str, str]:
+    """Le sujet tient-il ses réponses sur UNE seule feuille ?
+
+    Le pipeline lit une page de réponses par copie (`Layout.answer_sheet_page`,
+    la page qui en porte le plus). Si le sujet a assez de questions pour que la
+    feuille déborde, les cases des autres pages ne sont **jamais lues** : le
+    garde-fou `_is_answer_sheet` les écarte proprement plutôt que de les lire
+    de travers, mais ces questions manquent alors à toutes les copies.
+    Mesuré sur un sujet à 80 questions : 2 pages de réponses, 47 % des cases
+    ignorées. Sans ce contrôle, la perte est silencieuse.
+    """
+    try:
+        import layout_store
+        lay = layout_store.get_layout()
+    except Exception as e:                              # noqa: BLE001
+        return (WARN, "feuille de réponses", f"non vérifiable : {e}")
+    per_page: dict[int, int] = {}
+    for b in lay.boxes:
+        if b.role == layout_store.ROLE_ANSWER:
+            per_page[b.page] = per_page.get(b.page, 0) + 1
+    if not per_page:
+        return (WARN, "feuille de réponses", "aucune case de réponse dans le calage")
+    read = per_page.get(lay.answer_sheet_page, 0)
+    total = sum(per_page.values())
+    if len(per_page) == 1:
+        return (OK, "feuille de réponses",
+                f"1 page ({read} cases), page {lay.answer_sheet_page}")
+    pages = ", ".join(f"p{p} ({n})" for p, n in sorted(per_page.items()))
+    return (FAIL, "feuille de réponses",
+            f"{len(per_page)} pages portent des cases de réponse : {pages}.\n"
+            f"    Le pipeline ne lit que la page {lay.answer_sheet_page} → "
+            f"{total - read} cases sur {total} ne seront JAMAIS lues.\n"
+            "    Réduire le nombre de questions, ou les répartir sur plusieurs "
+            "sujets, en attendant la prise en charge du multi-feuilles.")
+
+
 def _printed_code() -> tuple[str, str, str]:
     """Le calage décrit-il le code imprimé en haut de page (copie/page/checksum) ?
 
@@ -188,7 +224,8 @@ def _printed_code() -> tuple[str, str, str]:
 
 
 CHECKS = (_system, _python, _deps, _pdflatex, _amc_sty, _sklearn_vs_model,
-          _paths, _project, _layout_consistency, _printed_code)
+          _paths, _project, _layout_consistency, _printed_code,
+          _one_answer_sheet)
 
 
 def run_checks() -> list[dict]:
