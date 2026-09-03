@@ -258,7 +258,10 @@ def get_warped(batch: str, page: int) -> tuple[np.ndarray, dict]:
         lay = layout_store.get_layout()
         canon_mires = np.asarray(lay.mires, dtype=np.float32)
         canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
-        mires = detect_mires(gray)
+        # Même recalage que le grade : les mires sont cherchées autour de
+        # leur position canonique. Sans le calage, l'image affichée pourrait
+        # être warpée autrement que celle qui a servi à lire les cases.
+        mires = detect_mires(gray, layout=lay)
         if mires is None or len(canon_mires) != 4:
             warped = cv2.resize(gray, (canon_w, canon_h))
         else:

@@ -77,7 +77,7 @@ def load_copy_to_file(sheet_page: int) -> dict:
 
 
 def grade_image_raw(image_path: Path, layout, canon_mires, canon_w, canon_h,
-                    shrink: float = 0.18, refine: bool = True):
+                    shrink: float = 0.18, refine: bool = True, lay=None):
     """Comme cv_grade.grade_image mais retourne aussi warped+offsets pour features ML.
 
     Retourne (ratios_by_qa, warped, offsets, layout_by_qa) ou None.
@@ -86,7 +86,7 @@ def grade_image_raw(image_path: Path, layout, canon_mires, canon_w, canon_h,
     if img is None:
         return None
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    mires = detect_mires(gray)
+    mires = detect_mires(gray, layout=lay)
     if mires is None or len(canon_mires) != 4:
         return None
     warped = warp_to_canonical(gray, mires, canon_mires, canon_w, canon_h)
@@ -143,7 +143,7 @@ def run_benchmark(shrink: float,
         if not img_path.exists():
             continue
 
-        result = grade_image_raw(img_path, layout, canon_mires, canon_w, canon_h,
+        result = grade_image_raw(img_path, layout, canon_mires, canon_w, canon_h, lay=lay,
                                  shrink=shrink)
         if result is None:
             no_mires_copies.append((copy_id, batch, page))

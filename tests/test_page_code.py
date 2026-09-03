@@ -198,3 +198,77 @@ class TestLayoutParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIntegralEqualsDirect(unittest.TestCase):
+    """L'image intégrale doit donner EXACTEMENT la même mesure que le crop.
+
+    C'est ce qui autorise à l'utiliser pour accélérer le balayage : si les deux
+    divergeaient, un décalage validé par l'une pourrait être refusé par l'autre.
+    """
+
+    def test_same_darkness_everywhere(self):
+        lay = make_layout([(1, 1, 60)])
+        img = render(lay, (1, 1, 60))
+        rng = np.random.default_rng(3)
+        img = np.clip(img.astype(np.int16) + rng.integers(-20, 20, img.shape), 0, 255).astype(np.uint8)
+        boxes = lay.code_boxes_on_page(1)
+        y0 = int(min(c.ymin for c in boxes)) - 24
+        y1 = int(max(c.ymax for c in boxes)) + 124
+        integ = cv_grade._CodeIntegral(img, y0, y1)
+        for off in ((0, 0), (3, -7), (-5, 40), (12, 100)):
+            for c in boxes:
+                direct = cv_grade._code_cell_darkness(img, c, off, 0.18)
+                fast = cv_grade._code_cell_darkness(img, c, off, 0.18, integ)
+                self.assertAlmostEqual(direct, fast, places=12,
+                                       msg=f"offset {off}, kind {c.kind} rang {c.rank}")
+
+    def test_out_of_band_falls_back_to_zero(self):
+        lay = make_layout([(1, 1, 60)])
+        img = render(lay, (1, 1, 60))
+        boxes = lay.code_boxes_on_page(1)
+        integ = cv_grade._CodeIntegral(img, 0, 40)          # bande trop courte
+        self.assertEqual(cv_grade._code_cell_darkness(img, boxes[0], (0, 0), 0.18, integ), 0.0)
+
+    def test_sweep_result_unchanged_by_integral(self):
+        """Le balayage accéléré retrouve le même triplet qu'avant."""
+        lay = make_layout([(7, 3, 42), (1, 1, 60)])
+        img = render(lay, (7, 3, 42), offset=(5, 70))
+        self.assertEqual(cv_grade.decode_page_code(img, lay), (7, 3, 42))
+
+
+class TestSweepVectorised(unittest.TestCase):
+    """Le balayage vectorisé doit rendre EXACTEMENT ce que rendrait la boucle."""
+
+    def test_matches_loop_on_every_offset(self):
+        lay = make_layout([(1, 1, 60)])
+        rng = np.random.default_rng(11)
+        img = render(lay, (5, 9, 33), offset=(4, 60), ink=40, paper=210)
+        img = np.clip(img.astype(np.int16) + rng.integers(-25, 25, img.shape),
+                      0, 255).astype(np.uint8)
+        boxes = lay.code_boxes_on_page(1)
+        y0 = int(min(c.ymin for c in boxes)) - 24
+        y1 = int(max(c.ymax for c in boxes)) + 124
+        integ = cv_grade._CodeIntegral(img, y0, y1)
+        offs = [(dx, dy) for dy in range(-20, 121, 4) for dx in range(-20, 21, 4)]
+        fast = cv_grade._sweep_decode(img, boxes, offs, 0.18, integ)
+        for o, got in zip(offs, fast):
+            want = cv_grade._decode_code_at(img, boxes, o, 0.18, integ)
+            self.assertEqual(got, want, msg=f"décalage {o}")
+
+    def test_out_of_band_offsets_are_none(self):
+        lay = make_layout([(1, 1, 60)])
+        img = render(lay, (1, 1, 60))
+        boxes = lay.code_boxes_on_page(1)
+        integ = cv_grade._CodeIntegral(img, 150, 300)
+        got = cv_grade._sweep_decode(img, boxes, [(0, 0), (0, 900), (-5000, 0)], 0.18, integ)
+        self.assertIsNotNone(got[0])
+        self.assertIsNone(got[1])
+        self.assertIsNone(got[2])
+
+    def test_empty_offsets(self):
+        lay = make_layout([(1, 1, 60)])
+        img = render(lay, (1, 1, 60))
+        boxes = lay.code_boxes_on_page(1)
+        integ = cv_grade._CodeIntegral(img, 150, 400)
+        self.assertEqual(cv_grade._sweep_decode(img, boxes, [], 0.18, integ), [])

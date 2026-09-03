@@ -443,6 +443,21 @@ def parse_sqlite_all_copies(path) -> dict[int, Layout]:
                 "SELECT question, name FROM layout_question")}
         except sqlite3.Error:
             question_names = {}
+        # Bits du code imprimé en haut de page : AMC les range dans
+        # `layout_digit` (numberid = kind, digitid = rang) et le checksum de
+        # chaque page dans `layout_page`. Sans eux, `decode_page_code` ne
+        # peut rien lire sur un examen préparé par AMC.
+        try:
+            digits_raw = list(con.execute(
+                "SELECT student, page, numberid, digitid, xmin, xmax, ymin, ymax "
+                "FROM layout_digit"))
+        except sqlite3.Error:
+            digits_raw = []
+        try:
+            checksums = {(s, pg): int(c or 0) for s, pg, c in con.execute(
+                "SELECT student, page, checksum FROM layout_page")}
+        except sqlite3.Error:
+            checksums = {}
     finally:
         con.close()
 
@@ -468,6 +483,15 @@ def parse_sqlite_all_copies(path) -> dict[int, Layout]:
     if not by_copy:
         return {}
 
+    code_by_copy: dict[int, list] = {}
+    for s, pg, kind, rank, xn, xx, yn, yx in digits_raw:
+        code_by_copy.setdefault(s, []).append(
+            CodeBox(page=pg, kind=int(kind), rank=int(rank),
+                    xmin=xn, xmax=xx, ymin=yn, ymax=yx))
+    # Triplets valides de TOUTES les copies : c'est contre eux qu'un code lu
+    # est validé (cf. cv_grade.decode_page_code).
+    page_ids = tuple(sorted((s, pg, c) for (s, pg), c in checksums.items()))
+
     out: dict[int, Layout] = {}
     for s, d in by_copy.items():
         dpi = DPI
@@ -478,9 +502,13 @@ def parse_sqlite_all_copies(path) -> dict[int, Layout]:
             mires = (tuple(cm[c] for c in (1, 2, 3, 4))
                      if all(c in cm for c in (1, 2, 3, 4)) else ())
             pages[pg] = PageInfo(page=pg, width=w, height=h,
-                                 mark_diameter=md or 0.0, mires=mires)
-        out[s] = _assemble(dpi, pages, d["boxes"], d["zones"],
-                           question_names, str(path), copy=s)
+                                 mark_diameter=md or 0.0, mires=mires,
+                                 checksum=checksums.get((s, pg), 0))
+        lay = _assemble(dpi, pages, d["boxes"], d["zones"],
+                        question_names, str(path), copy=s)
+        lay.code_boxes = code_by_copy.get(s, [])
+        lay.page_ids = page_ids
+        out[s] = lay
     return out
 
 

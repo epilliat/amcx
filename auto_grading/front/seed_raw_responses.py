@@ -258,6 +258,12 @@ def main():
         # flagging levier 2 (cv_grade) — propagé tel quel de raw_responses_cv
         if cv.get("_ambiguous_cells"):
             data["_ambiguous_cells"] = cv["_ambiguous_cells"]
+        # Numéro de copie (sujets randomisés) et sa provenance : le serveur
+        # note avec la carte case↔lettre de CETTE copie (`copy_id_of`). Sans
+        # ces clés, tout est noté avec la copie 1.
+        for k in ("_copy_id", "_copy_id_source", "_page_no"):
+            if k in cv:
+                data[k] = cv[k]
 
         # Feature B (HTR) : transcription + auto-grade des questions freeform.
         # Propagé tel quel depuis raw_responses_cv (clé `open_answers`).

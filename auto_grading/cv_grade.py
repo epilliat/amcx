@@ -31,27 +31,72 @@ from layout_store import Box as BoxLayout
 from masked_detect import MASKED_FEATURE_COLS
 
 
+# Un worker coûte ≈ 0,9 s à démarrer (imports sklearn/pandas/pyarrow via le
+# pickle du modèle) pour ≈ 0,16 s de grade par page : en dessous de quelques
+# pages par worker, ajouter des workers ralentit. Mesuré : sur 16 pages, 4, 8
+# et 22 workers font le même temps ; sur 50 pages, 8 = 22.
+PAGES_PER_WORKER = 6
+
+
 def _resolve_workers(workers: int | None, n_jobs: int) -> int:
-    """`workers=None` ou 0 → auto (cpu_count, cap à n_jobs). Toujours ≥ 1.
-    Garantit qu'un user mono-coeur tombe sur la boucle série (no Pool overhead)."""
+    """`workers=None` ou 0 → auto : cpu_count, mais jamais plus d'un worker
+    pour `PAGES_PER_WORKER` pages. Toujours ≥ 1 et ≤ n_jobs. Un `workers`
+    explicite est respecté (cap à n_jobs). Un poste mono-cœur tombe sur la
+    boucle série (pas d'overhead de Pool)."""
     if not workers:
-        workers = os.cpu_count() or 1
+        wanted = -(-max(1, n_jobs) // PAGES_PER_WORKER)      # ceil
+        workers = min(os.cpu_count() or 1, wanted)
     return max(1, min(workers, max(1, n_jobs)))
+
+
+_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+class _single_thread_env:
+    """Pose les variables de threads BLAS/OpenMP à 1 dans le PARENT le temps
+    de créer le pool, puis les restaure.
+
+    En mode `spawn`, l'enfant importe le module de l'initializer (donc numpy
+    et ses deux OpenBLAS) AVANT d'exécuter l'initializer : les poser là est
+    trop tard, le pool de threads existe déjà. Mesuré : 44 threads par worker
+    avec l'ancien `_worker_init`, 2 avec les variables posées ici. La
+    restauration compte : le serveur Flask ne doit pas garder un BLAS
+    mono-thread pour le reste de sa vie.
+    """
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in _THREAD_ENV_VARS}
+        for k in _THREAD_ENV_VARS:
+            os.environ[k] = "1"
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
 
 
 def _worker_init():
     """Init worker process : 1 thread BLAS/OpenMP/OpenCV par worker.
 
-    Sans ça, sur une machine N coeurs avec N workers, chaque worker spawnerait
-    lui-même N threads OpenMP (sklearn/numpy/cv2) → N² threads → contention
-    sévère ou deadlock à la prochaine `fork()` interne.
+    Ceinture et bretelles avec `_single_thread_env` : `threadpoolctl` agit sur
+    les bibliothèques DÉJÀ chargées (c'est une dépendance de sklearn, donc
+    toujours là), et les variables d'environnement couvrent celles qui seront
+    chargées ensuite (libgomp de sklearn, au `joblib.load`).
     """
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    for k in _THREAD_ENV_VARS:
+        os.environ.setdefault(k, "1")
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(1)
+    except Exception:
+        pass
     try:
         import cv2 as _cv2
-        _cv2.setNumThreads(0)
+        _cv2.setNumThreads(1)
     except Exception:
         pass
 
@@ -119,61 +164,192 @@ def load_name_field() -> tuple[float, float, float, float]:
     return NAME_FIELD_FALLBACK
 
 
-def detect_mires(img_gray: np.ndarray, edge_margin: int = 50) -> np.ndarray | None:
-    """Détecte les 4 mires (cercles noirs ~42px de diamètre) aux 4 coins.
+# --- mires ------------------------------------------------------------------
+# Une mire est un DISQUE. Le filtre historique (aire 600–3000, circularité
+# 4πA/P² ≥ 0.65) laissait passer tout carré noir : une case cochée (aire ≈ 2000,
+# circularité 0.79), un bit noir du code imprimé (1430, 0.79), deux bits
+# contigus (2920, 0.69). Mesuré sur EXAM_2026 : 133 à 201 candidats par page, et
+# seule la règle « le plus proche du coin » choisissait — le premier bit du code
+# est à 736 px du coin haut-gauche, sous l'ancien seuil de 744. Une mire absente
+# donnait alors une homographie fausse avec un `method=cv_full` rassurant.
+#
+# D'où : tests de forme disque/carré, recherche dans des FENÊTRES autour des
+# positions attendues quand le calage est connu, et validation du quadrilatère
+# avant de rendre quoi que ce soit. Un échec est un `None` honnête (→
+# `cv_no_mires`), pas un recalage de travers.
+#
+# Seuils MESURÉS sur les 692 vraies mires des 173 scans d'EXAM_2026 (scans
+# « pas oufs » : disques déformés, JPEG) contre 599 autres candidats tombant
+# dans les fenêtres (cases cochées, bits du code, taches) :
+#   rondeur = aire / cercle englobant : vraies 0.73–0.96, autres p99 0.68 ;
+#   remplissage du rectangle minimal  : vraies 0.76–0.82, autres méd. 0.88
+#                                       (un carré → 1.0) ;
+#   circularité 4πA/P²                : vraies 0.80–0.91, autres p99 0.79.
+# Chaque seuil garde 100 % des vraies mires avec une marge ; combinés, ils
+# laissent passer 1 à 2 autres candidats sur 599, que la distance à la
+# position attendue et la validation du quadrilatère écartent.
+MIRE_MIN_ROUNDNESS = 0.70     # aire / aire du cercle englobant
+MIRE_MAX_RECT_FILL = 0.86     # aire / aire du rectangle minimal (carré ≈ 1)
+MIRE_MIN_CIRCULARITY = 0.75   # 4πA/P²
+MIRE_AREA_RANGE = (0.5, 1.6)  # × l'aire attendue (calage), sinon [600, 3000] px²
+MIRE_SEARCH_FRAC = 0.12       # demi-côté de la fenêtre, × min(w, h) (≈ 300 px)
+# Géométrie du quadrilatère, mesurée sur les mêmes 173 pages : côtés opposés
+# et diagonales à moins de 4.6 % l'un de l'autre ; rapport largeur/hauteur
+# jusqu'à 8.5 % du canonique (chargeur qui étire la page). Une mire prise sur
+# un bit du code (≥ 300 px de décalage) dévie de plus de 15 % — rejetée.
+MIRE_QUAD_TOL = 0.08          # côtés opposés, diagonales
+MIRE_ASPECT_TOL = 0.15        # rapport L/H vs canonique
 
-    edge_margin: distance minimale d'un bord pour qu'un candidat soit considéré
-    (filtre les artefacts dans les marges extrêmes, ex: barcode tout en haut).
 
-    Retourne un array (4, 2) trié [TL, TR, BR, BL] ou None si échec.
-    """
-    h, w = img_gray.shape
-    # binariser : noir → blanc (inverse)
-    _, bw = cv2.threshold(img_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-
-    # Contours
-    contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    candidates = []
+def _mire_candidates(bw: np.ndarray, roi, area_range, edge_margin, shape) -> list:
+    """Disques candidats dans une ROI de l'image binaire → [(cx, cy)] en
+    coordonnées globales. `roi` = (x1, y1, x2, y2)."""
+    h, w = shape
+    x1, y1, x2, y2 = roi
+    sub = bw[y1:y2, x1:x2]
+    if sub.size == 0:
+        return []
+    contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                                   offset=(x1, y1))
+    lo, hi = area_range
+    out = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # diamètre attendu ~42px → aire ≈ pi*r² ≈ 1400. On accepte 600-3000.
-        if not (600 <= area <= 3000):
+        if not (lo <= area <= hi):
+            continue
+        (_, _), r = cv2.minEnclosingCircle(cnt)
+        if r <= 0 or area / (np.pi * r * r) < MIRE_MIN_ROUNDNESS:
+            continue
+        (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+        if rw * rh <= 0 or area / (rw * rh) > MIRE_MAX_RECT_FILL:
             continue
         perim = cv2.arcLength(cnt, True)
-        if perim == 0:
+        if perim <= 0 or 4 * np.pi * area / (perim * perim) < MIRE_MIN_CIRCULARITY:
             continue
-        circularity = 4 * np.pi * area / (perim * perim)
-        if circularity < 0.65:
-            continue
-        # centroïde
         M = cv2.moments(cnt)
         if M["m00"] == 0:
             continue
-        cx = M["m10"] / M["m00"]
-        cy = M["m01"] / M["m00"]
-        # filtrer les candidats trop proches d'un bord (artefacts marge)
-        if cx < edge_margin or cx > w - edge_margin:
+        cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        if cx < edge_margin or cx > w - edge_margin or cy < edge_margin or cy > h - edge_margin:
             continue
-        if cy < edge_margin or cy > h - edge_margin:
-            continue
-        candidates.append((cx, cy, area, circularity))
+        out.append((cx, cy))
+    return out
 
-    if len(candidates) < 4:
+
+def _quad_ok(pts: np.ndarray, canon: np.ndarray | None, tol: float = MIRE_QUAD_TOL) -> bool:
+    """Les 4 points [TL, TR, BR, BL] forment-ils le quadrilatère attendu ?
+
+    Sans calage : convexe, orienté comme la page, côtés opposés égaux,
+    diagonales égales (à `tol` près). Avec calage : en plus, le rapport
+    largeur/hauteur est celui des mires canoniques — indépendant de l'échelle
+    du scan."""
+    p = np.asarray(pts, dtype=np.float64)
+    tl, tr, br, bl = p
+    top, bottom = np.linalg.norm(tr - tl), np.linalg.norm(br - bl)
+    left, right = np.linalg.norm(bl - tl), np.linalg.norm(br - tr)
+    d1, d2 = np.linalg.norm(br - tl), np.linalg.norm(bl - tr)
+    if min(top, bottom, left, right) <= 0:
+        return False
+    # orientation : TR à droite de TL, BL sous TL, et convexité (produits
+    # vectoriels de même signe en tournant TL → TR → BR → BL)
+    if not (tr[0] > tl[0] and br[0] > bl[0] and bl[1] > tl[1] and br[1] > tr[1]):
+        return False
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+    signs = [cross(tl, tr, br), cross(tr, br, bl), cross(br, bl, tl), cross(bl, tl, tr)]
+    if not (all(s > 0 for s in signs) or all(s < 0 for s in signs)):
+        return False
+    if abs(top / bottom - 1) > tol or abs(left / right - 1) > tol or abs(d1 / d2 - 1) > tol:
+        return False
+    if canon is not None:
+        c = np.asarray(canon, dtype=np.float64)
+        c_top = np.linalg.norm(c[1] - c[0])
+        c_left = np.linalg.norm(c[3] - c[0])
+        if c_top > 0 and c_left > 0:
+            if abs((top / left) / (c_top / c_left) - 1) > MIRE_ASPECT_TOL:
+                return False
+    return True
+
+
+def _pick_nearest(cands: list, targets: np.ndarray, max_dist: float) -> np.ndarray | None:
+    """Pour chaque cible, le candidat le plus proche (à moins de `max_dist`),
+    chaque candidat servant au plus une fois."""
+    if len(cands) < 4:
         return None
-
-    # Trouver les 4 candidats les plus proches des 4 coins de l'image
-    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32)
-    selected = []
-    pts = np.array([(c[0], c[1]) for c in candidates])
-    for corner in corners:
-        d = np.linalg.norm(pts - corner, axis=1)
-        idx = int(np.argmin(d))
-        # vérifier que c'est bien dans le quart correspondant
-        if d[idx] > 0.30 * min(w, h):
+    pts = np.array(cands, dtype=np.float64)
+    used = set()
+    sel = []
+    for t in targets:
+        d = np.linalg.norm(pts - t, axis=1)
+        for idx in np.argsort(d):
+            idx = int(idx)
+            if idx in used:
+                continue
+            if d[idx] > max_dist:
+                return None
+            used.add(idx)
+            sel.append(pts[idx])
+            break
+        else:
             return None
-        selected.append(pts[idx])
-    return np.array(selected, dtype=np.float32)
+    return np.array(sel, dtype=np.float32)
+
+
+def detect_mires(img_gray: np.ndarray, edge_margin: int = 50,
+                 layout: "layout_store.Layout | None" = None) -> np.ndarray | None:
+    """Détecte les 4 mires (disques noirs ≈ 42 px de diamètre) aux 4 coins.
+
+    `layout` (optionnel) : le calage donne la position canonique des mires et
+    leur diamètre → la recherche se limite à une fenêtre autour de chaque
+    position attendue (rapide, et rien du code imprimé n'y tombe), l'aire
+    attendue borne les candidats, et le quadrilatère trouvé est comparé au
+    canonique. Sans calage, ou si la recherche par fenêtres échoue, on cherche
+    sur toute la page — mais toujours avec le test de rondeur et la validation
+    géométrique.
+
+    `edge_margin` : distance minimale d'un bord pour qu'un candidat compte
+    (artefacts de marge). Retourne un array (4, 2) [TL, TR, BR, BL] ou None.
+    """
+    h, w = img_gray.shape
+    # Un seul seuil d'Otsu pour toute la page : la binarisation est identique
+    # à celle d'avant, fenêtre ou non — les centroïdes trouvés le sont aussi.
+    _, bw = cv2.threshold(img_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    canon = None
+    area_range = (600.0, 3000.0)
+    if layout is not None:
+        try:
+            canon = np.asarray(layout.mires, dtype=np.float64)
+            if canon.shape != (4, 2):
+                canon = None
+            md = float(layout.mark_diameter or 0.0)
+            if md > 0:
+                expected = np.pi * (md / 2.0) ** 2
+                area_range = (MIRE_AREA_RANGE[0] * expected, MIRE_AREA_RANGE[1] * expected)
+        except Exception:
+            canon = None
+
+    if canon is not None and layout.page_w and layout.page_h:
+        # 1. Fenêtres autour des positions attendues (mises à l'échelle du scan).
+        sx, sy = w / float(layout.page_w), h / float(layout.page_h)
+        targets = canon * np.array([sx, sy])
+        half = int(MIRE_SEARCH_FRAC * min(w, h))
+        cands = []
+        for tx, ty in targets:
+            roi = (max(0, int(tx) - half), max(0, int(ty) - half),
+                   min(w, int(tx) + half), min(h, int(ty) + half))
+            cands.extend(_mire_candidates(bw, roi, area_range, edge_margin, (h, w)))
+        sel = _pick_nearest(cands, targets, max_dist=half * 1.5)
+        if sel is not None and _quad_ok(sel, canon):
+            return sel
+
+    # 2. Page entière (pas de calage, scan à une autre échelle ou mal cadré).
+    cands = _mire_candidates(bw, (0, 0, w, h), area_range, edge_margin, (h, w))
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float64)
+    sel = _pick_nearest(cands, corners, max_dist=0.30 * min(w, h))
+    if sel is None or not _quad_ok(sel, canon):
+        return None
+    return sel
 
 
 def refine_box_offset(warped: np.ndarray, box: "BoxLayout",
@@ -256,9 +432,42 @@ def box_fill_ratio(img_warped_gray: np.ndarray, box: BoxLayout, shrink: float = 
     return float(np.mean(bw > 0))
 
 
+# Le seuil dur à 128 de `box_fill_ratio` rend « blanc » tout scan pâle dont
+# l'encre plafonne au-dessus (constaté sur le code imprimé : triplet (0,0,0)).
+# Pour tout ce qui n'est PAS une feature du GBM — code étudiant, grille copie,
+# estimateur E2 du flagging — on mesure donc relativement au papier de la page,
+# comme le fait déjà `masked_detect` : un point est sombre s'il est sous
+# PAPER_DARK_FRAC × le niveau du papier. Mesuré sur 164 identités vérifiées :
+# 163 codes étudiants exacts contre 161 avec le seuil dur.
+# ⚠ Les features `fill_ratio_*` gardent `box_fill_ratio` : les changer
+# impose de ré-entraîner le modèle.
+PAPER_DARK_FRAC = masked_detect._DARK_FRAC
+
+
+def paper_level(warped: np.ndarray) -> float:
+    """Niveau de gris du papier (p85 de la page sous-échantillonnée), ≥ 1."""
+    return max(float(np.percentile(warped[::8, ::8], 85)), 1.0)
+
+
+def box_dark_ratio(img_warped_gray: np.ndarray, box: BoxLayout, paper: float,
+                   shrink: float = 0.18, offset: tuple[int, int] = (0, 0)) -> float:
+    """Comme `box_fill_ratio`, mais seuillé relativement au papier de la page."""
+    dx_off, dy_off = offset
+    x1 = int(box.xmin) + dx_off
+    x2 = int(box.xmax) + dx_off
+    y1 = int(box.ymin) + dy_off
+    y2 = int(box.ymax) + dy_off
+    dx = (x2 - x1) * shrink
+    dy = (y2 - y1) * shrink
+    crop = img_warped_gray[int(y1 + dy):int(y2 - dy), int(x1 + dx):int(x2 - dx)]
+    if crop.size == 0:
+        return 0.0
+    return float(np.mean(crop < PAPER_DARK_FRAC * paper))
+
+
 def detect_copy_id(warped: np.ndarray, layout: "layout_store.Layout",
                    offsets_by_q: dict | None = None,
-                   shrink: float = 0.18) -> int | None:
+                   shrink: float = 0.18, paper: float | None = None) -> int | None:
     """Lit la grille `\\AMCcode{copie}{N}` imprimée sur la feuille → entier copie.
 
     Convention AMC : `\\AMCcode{copie}{N}` crée N colonnes nommées `copie[1]`,
@@ -293,7 +502,10 @@ def detect_copy_id(warped: np.ndarray, layout: "layout_store.Layout",
         if not cells:
             return None
         off = offsets_by_q.get(q, (0, 0))
-        ratios = [box_fill_ratio(warped, b, shrink=shrink, offset=off) for b in cells]
+        if paper is not None:
+            ratios = [box_dark_ratio(warped, b, paper, shrink=shrink, offset=off) for b in cells]
+        else:
+            ratios = [box_fill_ratio(warped, b, shrink=shrink, offset=off) for b in cells]
         idx = int(np.argmax(ratios))
         sorted_r = sorted(ratios, reverse=True)
         gap = sorted_r[0] - (sorted_r[1] if len(sorted_r) > 1 else 0.0)
@@ -349,7 +561,7 @@ CODE_FINE_PX = 3
 
 
 def _code_cell_darkness(warped: np.ndarray, box, offset: tuple[int, int],
-                        shrink: float) -> float:
+                        shrink: float, integral: "_CodeIntegral | None" = None) -> float:
     """Noirceur moyenne dans une case du code, sur [0, 1].
 
     ⚠ On n'utilise PAS `box_fill_ratio` ici : il binarise à 128 en dur, et un
@@ -358,15 +570,53 @@ def _code_cell_darkness(warped: np.ndarray, box, offset: tuple[int, int],
     Le contenu étant imprimé et bimodal, une mesure d'intensité BRUTE, seuillée
     ensuite relativement aux 24 bits de la page, se cale toute seule sur
     l'exposition du scan.
+
+    `integral` : image intégrale de la bande du code, qui donne la même moyenne
+    en 4 lectures au lieu d'un crop + `np.mean`. Le balayage teste des centaines
+    de décalages : sans elle il coûte 104 ms, avec elle 2 ms (mesuré).
     """
     dx_off, dy_off = offset
     x1, x2 = int(box.xmin) + dx_off, int(box.xmax) + dx_off
     y1, y2 = int(box.ymin) + dy_off, int(box.ymax) + dy_off
     mx, my = (x2 - x1) * shrink, (y2 - y1) * shrink
-    crop = warped[int(y1 + my):int(y2 - my), int(x1 + mx):int(x2 - mx)]
+    xa, xb = int(x1 + mx), int(x2 - mx)
+    ya, yb = int(y1 + my), int(y2 - my)
+    if integral is not None:
+        m = integral.mean(xa, ya, xb, yb)
+        return 0.0 if m is None else 1.0 - m / 255.0
+    crop = warped[ya:yb, xa:xb]
     if crop.size == 0:
         return 0.0
     return 1.0 - float(np.mean(crop)) / 255.0
+
+
+class _CodeIntegral:
+    """Image intégrale de la bande horizontale portant le code imprimé.
+
+    `cv2.integral` d'une image uint8 donne des sommes ENTIÈRES exactes : la
+    moyenne d'un rectangle est donc identique au bit près à `np.mean` du crop
+    correspondant — le balayage accéléré lit exactement les mêmes bits.
+    """
+
+    def __init__(self, warped: np.ndarray, y0: int, y1: int):
+        h = warped.shape[0]
+        self.y0 = max(0, min(y0, h))
+        self.y1 = max(self.y0, min(y1, h))
+        self.w = warped.shape[1]
+        band = warped[self.y0:self.y1]
+        self.ii = cv2.integral(band) if band.size else None
+
+    def mean(self, xa: int, ya: int, xb: int, yb: int) -> float | None:
+        """Moyenne sur [ya, yb) × [xa, xb), ou None si hors de la bande."""
+        if self.ii is None or xb <= xa or yb <= ya:
+            return None
+        ya -= self.y0
+        yb -= self.y0
+        if xa < 0 or ya < 0 or xb > self.w or yb > self.ii.shape[0] - 1:
+            return None
+        s = (float(self.ii[yb, xb]) - float(self.ii[ya, xb])
+             - float(self.ii[yb, xa]) + float(self.ii[ya, xa]))
+        return s / ((yb - ya) * (xb - xa))
 
 
 def _code_bits_value(bits: list, threshold: float) -> int | None:
@@ -404,9 +654,10 @@ def _code_threshold(ratios: list[float]) -> float:
 
 
 def _decode_code_at(warped: np.ndarray, code_boxes: list,
-                    offset: tuple[int, int], shrink: float) -> tuple | None:
+                    offset: tuple[int, int], shrink: float,
+                    integral: "_CodeIntegral | None" = None) -> tuple | None:
     """Décode (copie, page, checksum) à un décalage donné, sans validation."""
-    ratios = [(c, _code_cell_darkness(warped, c, offset, shrink))
+    ratios = [(c, _code_cell_darkness(warped, c, offset, shrink, integral))
               for c in code_boxes]
     thr = _code_threshold([r for _, r in ratios])
     out = {}
@@ -416,6 +667,77 @@ def _decode_code_at(warped: np.ndarray, code_boxes: list,
     if any(out[k] is None for k in (1, 2, 3)):
         return None
     return (out[1], out[2], out[3])
+
+
+def _sweep_decode(warped: np.ndarray, code_boxes: list, offsets: list,
+                  shrink: float, integral: "_CodeIntegral") -> list:
+    """Décode le code à TOUS les décalages d'un coup → `[(triplet | None), …]`.
+
+    Même calcul que `_decode_code_at` appliqué à chaque décalage, mais en une
+    passe numpy. Le balayage teste ≈ 400 décalages × 24 cases : en boucle
+    Python, c'est 9 600 appels de fonction pour des mesures de 4 lectures
+    chacune — le surcoût d'appel domine (mesuré : 104 ms avant l'image
+    intégrale, 49 ms avec, 2 ms ici).
+
+    Les rectangles se translatent EXACTEMENT avec le décalage (la marge de
+    shrink ne dépend que de la taille de la case, entière), ce qui autorise à
+    précalculer les bornes une fois et à leur ajouter (dx, dy).
+    """
+    ii = integral.ii
+    if ii is None or not offsets:
+        return [None] * len(offsets)
+    order = sorted(range(len(code_boxes)), key=lambda i: (code_boxes[i].kind,
+                                                          code_boxes[i].rank))
+    xa0, xb0, ya0, yb0 = [], [], [], []
+    for i in order:
+        c = code_boxes[i]
+        x1, x2 = int(c.xmin), int(c.xmax)
+        y1, y2 = int(c.ymin), int(c.ymax)
+        mx, my = (x2 - x1) * shrink, (y2 - y1) * shrink
+        xa0.append(int(x1 + mx)); xb0.append(int(x2 - mx))
+        ya0.append(int(y1 + my) - integral.y0); yb0.append(int(y2 - my) - integral.y0)
+    xa0 = np.array(xa0); xb0 = np.array(xb0)
+    ya0 = np.array(ya0); yb0 = np.array(yb0)
+    off = np.asarray(offsets, dtype=np.int64)              # (N, 2)
+    XA = xa0[None, :] + off[:, 0:1]
+    XB = xb0[None, :] + off[:, 0:1]
+    YA = ya0[None, :] + off[:, 1:2]
+    YB = yb0[None, :] + off[:, 1:2]
+    hh, ww = ii.shape[0] - 1, ii.shape[1] - 1
+    ok = ((XA >= 0) & (YA >= 0) & (XB <= ww) & (YB <= hh)
+          & (XB > XA) & (YB > YA)).all(axis=1)
+    if not ok.any():
+        return [None] * len(offsets)
+    XA, XB, YA, YB = XA[ok], XB[ok], YA[ok], YB[ok]
+    s = (ii[YB, XB] - ii[YA, XB] - ii[YB, XA] + ii[YA, XA]).astype(np.float64)
+    dark = 1.0 - s / ((YB - YA) * (XB - XA)) / 255.0        # (M, 24)
+
+    # Seuil par décalage : le plus grand écart entre deux mesures triées,
+    # exigé ≥ 0.15 (cf. `_code_threshold`), repli 0.5 sinon.
+    srt = -np.sort(-dark, axis=1)
+    gaps = srt[:, :-1] - srt[:, 1:]
+    j = gaps.argmax(axis=1)
+    rows = np.arange(srt.shape[0])
+    best = gaps[rows, j]
+    boundary = (srt[rows, j] + srt[rows, j + 1]) / 2.0
+    thr = np.where(best >= 0.15, boundary, 0.5)
+    bits = dark > thr[:, None]
+
+    # Bits → entier, rang 1 = poids fort, par kind.
+    vals = {}
+    pos = 0
+    for kind in (1, 2, 3):
+        n = sum(1 for i in order if code_boxes[i].kind == kind)
+        if n == 0:
+            return [None] * len(offsets)
+        w = (1 << np.arange(n - 1, -1, -1)).astype(np.int64)
+        vals[kind] = bits[:, pos:pos + n] @ w
+        pos += n
+    triples = list(zip(vals[1].tolist(), vals[2].tolist(), vals[3].tolist()))
+    out: list = [None] * len(offsets)
+    for k, i in enumerate(np.flatnonzero(ok).tolist()):
+        out[i] = triples[k]
+    return out
 
 
 def _code_box_dy(warped: np.ndarray, box, span: int = 18,
@@ -522,26 +844,32 @@ def decode_page_code(warped: np.ndarray, layout: "layout_store.Layout",
 
     # Rattrapage : on balaye un voisinage. La validation par triplet connu sert
     # aussi de critère d'alignement — inutile de deviner le recalage
-    # géométriquement.
+    # géométriquement. L'image intégrale de la bande rend chaque essai
+    # quasi gratuit (4 lectures par case au lieu d'un crop + moyenne).
+    y0 = int(min(c.ymin for c in code_boxes)) - search - 4
+    y1 = int(max(c.ymax for c in code_boxes)) + CODE_DRIFT_DOWN + 4
+    integral = _CodeIntegral(warped, y0, y1)
     found = {}
+    coarse_offsets = [(dx, dy)
+                      for dy in range(-search, CODE_DRIFT_DOWN + 1, step)
+                      for dx in range(-search, search + 1, step)
+                      if not (dx == 0 and dy == 0)]
     coarse = []
-    for dy in range(-search, CODE_DRIFT_DOWN + 1, step):
-        for dx in range(-search, search + 1, step):
-            if dx == 0 and dy == 0:
-                continue
-            got = _decode_code_at(warped, code_boxes, (dx, dy), shrink)
-            if got in known:
-                found.setdefault(got, (dx, dy))
-                coarse.append((dx, dy))
+    for o, got in zip(coarse_offsets, _sweep_decode(warped, code_boxes,
+                                                    coarse_offsets, shrink, integral)):
+        if got in known:
+            found.setdefault(got, o)
+            coarse.append(o)
     # Affinage autour des positions grossières retenues : un pas de 4 px peut
     # tomber juste à côté du bon alignement, et une case voisine à demi
     # recouverte suffit à inverser un bit.
-    for cx, cy in coarse[:4]:
-        for dy in range(cy - CODE_FINE_PX, cy + CODE_FINE_PX + 1):
-            for dx in range(cx - CODE_FINE_PX, cx + CODE_FINE_PX + 1):
-                got = _decode_code_at(warped, code_boxes, (dx, dy), shrink)
-                if got in known:
-                    found.setdefault(got, (dx, dy))
+    fine = [(dx, dy)
+            for cx, cy in coarse[:4]
+            for dy in range(cy - CODE_FINE_PX, cy + CODE_FINE_PX + 1)
+            for dx in range(cx - CODE_FINE_PX, cx + CODE_FINE_PX + 1)]
+    for o, got in zip(fine, _sweep_decode(warped, code_boxes, fine, shrink, integral)):
+        if got in known:
+            found.setdefault(got, o)
     if len(found) == 1:
         return next(iter(found))
     if len(found) > 1:
@@ -762,8 +1090,7 @@ def compute_copy_baseline(ratios_all: list[float]) -> float:
     return s[len(s) // 2]
 
 
-def grade_image(image_path: Path | None = None,
-                fill_threshold: float = 0.30, debug: bool = False,
+def grade_image(image_path: Path | None = None, debug: bool = False,
                 shrink: float = 0.18, adaptive: bool = True, refine: bool = True,
                 *, gray: "np.ndarray | None" = None,
                 page_index: int | None = None) -> dict:
@@ -798,7 +1125,7 @@ def grade_image(image_path: Path | None = None,
     canon_mires = np.asarray(lay.mires, dtype=np.float32)
     canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
 
-    mires = detect_mires(gray)
+    mires = detect_mires(gray, layout=lay)
     method = "cv_full"
     if mires is None or len(canon_mires) != 4:
         method = "cv_no_mires"
@@ -810,6 +1137,7 @@ def grade_image(image_path: Path | None = None,
 
     layout = lay.sheet_boxes()
     offsets_by_q = compute_per_question_offsets(warped, layout) if refine else {}
+    paper = paper_level(warped)   # niveau du papier, pour les mesures relatives
 
     # --- identification de la copie (sujets randomisés multi-copies) ---
     # Deux sources, dans cet ordre :
@@ -827,7 +1155,7 @@ def grade_image(image_path: Path | None = None,
         copy_id, page_no, _cs = page_code
         copy_src = "printed"
     else:
-        copy_id = detect_copy_id(warped, lay, offsets_by_q) or 1
+        copy_id = detect_copy_id(warped, lay, offsets_by_q, paper=paper) or 1
         page_no = None
         copy_src = "grid" if copy_id != 1 else "default"
     if copy_id != 1:
@@ -924,6 +1252,12 @@ def grade_image(image_path: Path | None = None,
         t_q = adaptive_threshold(ratios)
         thresholds_used[q] = round(t_q, 3)
         off_q = offsets_by_q.get(q, (0, 0))
+        # Estimateur E2 (flagging seulement, pas une feature) : même règle de
+        # seuil adaptatif, mais sur la mesure relative au papier — un scan pâle
+        # ne doit pas faire diverger E2 de E1/E3 sur toute la page.
+        ratios_rel = [box_dark_ratio(warped, b, paper, shrink=shrink, offset=off_q)
+                      for b, _r in q_boxes]
+        t_q_rel = adaptive_threshold(ratios_rel)
         # features masquées par case — 1 seul calcul, réutilisé pour E1 et le GBM
         mfeats: dict = {}
         for b, _r in q_boxes:
@@ -933,7 +1267,8 @@ def grade_image(image_path: Path | None = None,
             else:
                 mfeats[b.char] = {k: float("nan") for k in MASKED_FEATURE_COLS}
         q_data[q] = {"q_boxes": q_boxes, "ratios": ratios, "t_q": t_q,
-                     "off_q": off_q, "mfeats": mfeats}
+                     "off_q": off_q, "mfeats": mfeats,
+                     "ratios_rel": ratios_rel, "t_q_rel": t_q_rel}
         if clf_bundle is not None:
             for b, _r in q_boxes:
                 feats = extract_features(warped, b, ratios, copy_baseline,
@@ -952,16 +1287,17 @@ def grade_image(image_path: Path | None = None,
     for q in qcm_questions:
         d = q_data[q]
         q_boxes, t_q, mfeats = d["q_boxes"], d["t_q"], d["mfeats"]
+        ratios_rel, t_q_rel = d["ratios_rel"], d["t_q_rel"]
         sel = []
         cells = []  # (b, r, mf, e1, e2, e3, proba)
-        for b, r in q_boxes:
+        for k, (b, r) in enumerate(q_boxes):
             mf = mfeats[b.char]
             mr = mf["masked_ratio_e5"]
             # E1 : la détection masquée voit-elle de l'encre ? Seuil ABSOLU (case
             # vide ≈ 0). Indépendant de la calibration du GBM et du seuil adaptatif
             # → repère les marques pâles que E2/E3 ratent ensemble.
             e1 = (mr > MASKED_INK_ABS) if mr == mr else None
-            e2 = r > t_q                                  # estimateur seuil brut
+            e2 = ratios_rel[k] > t_q_rel                  # estimateur seuil brut (relatif papier)
             if clf_bundle is not None:
                 proba = proba_by_cell[(q, b.char)]
                 e3 = proba >= 0.5                         # décision GBM (finale)
@@ -1001,9 +1337,13 @@ def grade_image(image_path: Path | None = None,
                 })
 
     # Code étudiant : une colonne de chiffres par position du numéro
+    # Mesure relative au papier (pas une feature du GBM) : un scan pâle ne
+    # doit pas rendre un code « ? » ou, pire, un faux chiffre.
     id_digits = []
     for col in id_columns:
-        col_boxes = [(b, r) for b, r in fills if b.question == col]
+        off = offsets_by_q.get(col, (0, 0))
+        col_boxes = [(b, box_dark_ratio(warped, b, paper, shrink=shrink, offset=off))
+                     for b in layout if b.question == col]
         col_boxes.sort(key=lambda x: x[0].char)  # '0'..'9'
         ratios = [r for _, r in col_boxes]
         if not ratios:
@@ -1166,21 +1506,46 @@ def _grade_freeform_open_answers(warped: np.ndarray, page_index: int) -> dict:
     return out
 
 
-def _grade_and_write(img_path_str: str, out_path_str: str,
-                     threshold: float = 0.30) -> dict:
+# Clés privées de `grade_image` qui DOIVENT survivre dans raw_responses_cv/ :
+# le seed les propage vers raw_responses/ et le serveur les lit (`copy_id_of`
+# pour noter avec la bonne carte case↔lettre, `_is_answer_sheet` pour écarter
+# une page sans grille). Les autres clés `_…` (confidences, méthode) restent
+# internes.
+_JSON_PRIVATE_KEYS = ("_ambiguous_cells", "_is_answer_sheet", "_n_frame_fail",
+                      "_n_cells", "_copy_id", "_copy_id_source", "_page_no")
+
+
+def result_to_json(r: dict) -> dict:
+    """Le résultat de `grade_image` → dict à écrire dans raw_responses_cv/.
+
+    Une seule définition pour les deux voies (`grade_many` et la voie
+    fusionnée) : elles produisaient deux fichiers différents, et aucune des
+    deux n'écrivait `_copy_id` — le numéro de copie était donc perdu entre le
+    grade et le serveur.
+    """
+    to_save = {k: v for k, v in r.items() if not k.startswith("_")}
+    to_save["answers"] = {str(k): v for k, v in to_save["answers"].items()}
+    to_save["_ambiguous_cells"] = r.get("_ambiguous_cells", [])
+    for k in _JSON_PRIVATE_KEYS:
+        if k in r:
+            to_save[k] = r[k]
+    return to_save
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _grade_and_write(img_path_str: str, out_path_str: str) -> dict:
     """Grade une image et écrit son JSON. Retourne un résumé léger pour IPC.
 
     Module-level (picklable) → utilisable par ProcessPoolExecutor.
     """
     img_path = Path(img_path_str)
-    r = grade_image(img_path, fill_threshold=threshold)
-    out_path = Path(out_path_str)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    to_save = {k: v for k, v in r.items() if not k.startswith("_")}
-    to_save["answers"] = {str(k): v for k, v in to_save["answers"].items()}
-    to_save["_ambiguous_cells"] = r.get("_ambiguous_cells", [])
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(to_save, f, ensure_ascii=False, indent=2)
+    r = grade_image(img_path)
+    _write_json(Path(out_path_str), result_to_json(r))
     return {
         "method": r["_cv_method"],
         "student_id": r["student_id"],
@@ -1188,7 +1553,7 @@ def _grade_and_write(img_path_str: str, out_path_str: str,
     }
 
 
-def grade_many(targets, out_dir: Path, threshold: float = 0.30,
+def grade_many(targets, out_dir: Path,
                workers: int | None = None, on_progress=None) -> list:
     """Grade plusieurs pages (en parallèle si workers>1, sinon série).
 
@@ -1210,8 +1575,7 @@ def grade_many(targets, out_dir: Path, threshold: float = 0.30,
     if w == 1:
         for i, (batch, img_path) in enumerate(targets):
             try:
-                r = _grade_and_write(str(img_path), str(_out_for(batch, img_path)),
-                                     threshold=threshold)
+                r = _grade_and_write(str(img_path), str(_out_for(batch, img_path)))
                 results.append((batch, img_path, r))
             except Exception as e:
                 results.append((batch, img_path, e))
@@ -1228,11 +1592,11 @@ def grade_many(targets, out_dir: Path, threshold: float = 0.30,
     # même process. `spawn` repart d'un interpréteur propre. Coût : ~200 ms
     # par worker au démarrage, négligeable sur >30 pages.
     ctx = _mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=w, mp_context=ctx,
-                             initializer=_worker_init) as ex:
+    with _single_thread_env(), ProcessPoolExecutor(
+            max_workers=w, mp_context=ctx, initializer=_worker_init) as ex:
         futures = {
             ex.submit(_grade_and_write, str(img_path),
-                      str(_out_for(batch, img_path)), threshold):
+                      str(_out_for(batch, img_path))):
             (batch, img_path)
             for batch, img_path in targets
         }
@@ -1254,13 +1618,13 @@ def grade_many(targets, out_dir: Path, threshold: float = 0.30,
 def _fused_worker(args):
     """Worker pipeline fusionné : PDF page → pixmap → grade + JPG.
 
-    Reçoit `(pdf_path, page_idx, dpi, quality, jpg_path, json_path, threshold)`.
+    Reçoit `(pdf_path, page_idx, dpi, quality, jpg_path, json_path)`.
     Ouvre le PDF, rend UNE page en pixmap, écrit le JPG (pour l'UI) et grade en
     mémoire directement depuis le gray (skip cv2.imread + décodage JPEG).
     Retourne un summary léger pour IPC.
     """
     (pdf_path_str, page_idx, dpi, quality,
-     jpg_path_str, json_path_str, threshold) = args
+     jpg_path_str, json_path_str) = args
     import fitz  # PyMuPDF, importé dans le worker
 
     pdf_path = Path(pdf_path_str)
@@ -1285,16 +1649,10 @@ def _fused_worker(args):
     finally:
         doc.close()
 
-    r = grade_image(gray=gray, fill_threshold=threshold)
-    to_save = {k: v for k, v in r.items() if not k.startswith("_")}
-    to_save["answers"] = {str(k): v for k, v in to_save["answers"].items()}
-    to_save["_ambiguous_cells"] = r.get("_ambiguous_cells", [])
-    # Signal « feuille de réponses ? » (copies multi-pages) — propagé au seed.
-    for _k in ("_is_answer_sheet", "_n_frame_fail", "_n_cells"):
-        if _k in r:
-            to_save[_k] = r[_k]
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(to_save, f, ensure_ascii=False, indent=2)
+    # `page_index` : n° de page dans le PDF, comme le nom `page_NNN.jpg` — sert
+    # au HTR freeform (Feature B), qui reste sauté sans clé API.
+    r = grade_image(gray=gray, page_index=page_idx + 1)
+    _write_json(json_path, result_to_json(r))
 
     return {
         "pdf": pdf_path.stem, "page": page_idx + 1,
@@ -1304,7 +1662,7 @@ def _fused_worker(args):
 
 
 def grade_pdfs_fused(pdfs, jpg_root: Path, json_root: Path,
-                     dpi: int = 300, quality: int = 85, threshold: float = 0.30,
+                     dpi: int = 300, quality: int = 85,
                      workers: int | None = None, on_progress=None) -> list:
     """Pipeline fusionné PDF → (JPG d'UI + JSON CV) en 1 seule passe parallèle.
 
@@ -1332,8 +1690,7 @@ def grade_pdfs_fused(pdfs, jpg_root: Path, json_root: Path,
         for i in range(n_pages):
             jpg = jpg_root / pdf.stem / f"page_{i + 1:03d}.jpg"
             jsn = json_root / pdf.stem / f"page_{i + 1:03d}.json"
-            tasks.append((str(pdf), i, dpi, quality,
-                          str(jpg), str(jsn), threshold))
+            tasks.append((str(pdf), i, dpi, quality, str(jpg), str(jsn)))
 
     w = _resolve_workers(workers, len(tasks))
     results: list = []
@@ -1355,8 +1712,8 @@ def grade_pdfs_fused(pdfs, jpg_root: Path, json_root: Path,
     from concurrent.futures import ProcessPoolExecutor, as_completed
     import multiprocessing as _mp
     ctx = _mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=w, mp_context=ctx,
-                             initializer=_worker_init) as ex:
+    with _single_thread_env(), ProcessPoolExecutor(
+            max_workers=w, mp_context=ctx, initializer=_worker_init) as ex:
         futures = {ex.submit(_fused_worker, args):
                    (Path(args[0]).stem, args[1] + 1)
                    for args in tasks}
@@ -1379,7 +1736,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image", nargs="?")
     ap.add_argument("--debug", action="store_true")
-    ap.add_argument("--threshold", type=float, default=0.30)
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--failed-only", action="store_true")
     ap.add_argument("--out-dir", default=None,
@@ -1389,7 +1745,7 @@ def main():
     args = ap.parse_args()
 
     if args.image:
-        r = grade_image(Path(args.image), fill_threshold=args.threshold, debug=args.debug)
+        r = grade_image(Path(args.image), debug=args.debug)
         print(json.dumps(r, indent=2, ensure_ascii=False))
         return
 
@@ -1443,8 +1799,7 @@ def main():
         print(f"  [{done}/{total}] [{tag:8s}] {batch}/{page_name}  "
               f"id={summary['student_id']}  cells={summary['n_cells']}")
 
-    grade_many(targets, out_dir=out_dir, threshold=args.threshold,
-               workers=args.workers, on_progress=_progress)
+    grade_many(targets, out_dir=out_dir, workers=args.workers, on_progress=_progress)
 
     print(f"\nFini. OK={n_ok}  no_mires={n_no_mires}  fail={n_failed}")
     print(f"JSONs dans: {out_dir}")

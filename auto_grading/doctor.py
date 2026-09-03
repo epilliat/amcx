@@ -163,8 +163,32 @@ def _system() -> tuple[str, str, str]:
             f"{platform.system()} {platform.release()} ({platform.machine()})")
 
 
+def _printed_code() -> tuple[str, str, str]:
+    """Le calage décrit-il le code imprimé en haut de page (copie/page/checksum) ?
+
+    Sans lui, `cv_grade.decode_page_code` ne peut rien lire : le numéro de
+    copie retombe sur la grille manuelle (si le sujet en a une) ou sur 1, et le
+    numéro de page n'est jamais connu. Cas typiques : calage produit par un
+    style AMC ancien, ou `layout.sqlite` d'une version d'AMC sans
+    `layout_digit`.
+    """
+    try:
+        import layout_store
+        lay = layout_store.get_layout()
+    except Exception as e:                              # noqa: BLE001
+        return (WARN, "code imprimé", f"non vérifiable : {e}")
+    n_bits = len(getattr(lay, "code_boxes", []) or [])
+    n_ids = len(getattr(lay, "page_ids", ()) or ())
+    if n_bits and n_ids:
+        return (OK, "code imprimé",
+                f"{n_bits} bits dans le calage, {n_ids} triplet(s) copie/page/checksum")
+    return (WARN, "code imprimé",
+            "absent du calage : numéro de copie et de page non lisibles "
+            "(source : %s)" % (getattr(lay, "source", "") or "?"))
+
+
 CHECKS = (_system, _python, _deps, _pdflatex, _amc_sty, _sklearn_vs_model,
-          _paths, _project, _layout_consistency)
+          _paths, _project, _layout_consistency, _printed_code)
 
 
 def run_checks() -> list[dict]:

@@ -148,7 +148,7 @@ def process_copy(batch: str, page: int, layout: list[BoxLayout],
     if img is None:
         return []
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    mires = detect_mires(gray)
+    mires = detect_mires(gray, layout=layout_store.get_layout())
     if mires is None or len(canon_mires) != 4:
         return []  # NO_MIRES — pas de label utilisable de toute façon
     warped = warp_to_canonical(gray, mires, canon_mires, canon_w, canon_h)
