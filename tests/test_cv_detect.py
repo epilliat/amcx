@@ -220,3 +220,80 @@ class TestPaperLevel(unittest.TestCase):
     def test_empty(self):
         import masked_detect
         self.assertEqual(masked_detect.paper_p85(np.zeros(0, np.uint8)), 0.0)
+
+
+class TestAlignByFrames(unittest.TestCase):
+    """Recalage d'une page dont les mires manquent, sur la grille des cadres.
+
+    Le repli historique (redimensionnement) lisait juste 33 % des questions sur
+    de vraies copies dont on masquait les mires ; le recalage par les cadres
+    monte à 100 %. Ces tests vérifient les garde-fous : une page qui n'est pas
+    une feuille de réponses doit être REFUSÉE, pas recalée de travers.
+    """
+
+    def _sheet(self, cols=6, rows=8):
+        """Layout d'une feuille : une grille de cases, plus les mires."""
+        boxes, x0, y0, pitch = [], 400, 900, 220
+        for r in range(rows):
+            for c in range(cols):
+                boxes.append(ls.Box(page=1, role=1, question=r + 1, answer=c,
+                                    char="ABCDEF"[c],
+                                    xmin=x0 + c * pitch, xmax=x0 + c * pitch + BOX,
+                                    ymin=y0 + r * pitch, ymax=y0 + r * pitch + BOX))
+        page = ls.PageInfo(page=1, width=W, height=H, mark_diameter=DIAM,
+                           mires=tuple(map(tuple, MIRES.tolist())))
+        return ls.Layout(dpi=300, pages={1: page}, boxes=boxes, zones=[],
+                         answer_sheet_page=1)
+
+    def _render(self, lay, filled=()):
+        img = blank()
+        draw_mires(img)
+        for i, b in enumerate(lay.sheet_boxes()):
+            draw_box(img, int(b.xmin), int(b.ymin), filled=i in filled)
+        return img
+
+    def test_recovers_a_shifted_page(self):
+        lay = self._sheet()
+        img = self._render(lay, filled={3, 11, 25})
+        rng = np.random.default_rng(2)
+        Hm = random_homography(rng, max_shift=25)
+        scan = apply(img, Hm)
+        warped, info = cv_grade.align_by_frames(scan, lay)
+        self.assertTrue(info["ok"], info)
+        self.assertLessEqual(info["resid"], cv_grade.FRAME_ALIGN_MAX_RESID)
+        # les cases retrouvent leur place : une case noircie se lit comme telle
+        for i, b in enumerate(lay.sheet_boxes()):
+            r = cv_grade.box_fill_ratio(warped, b)
+            if i in {3, 11, 25}:
+                self.assertGreater(r, 0.8, f"case {i} noircie non retrouvée")
+            else:
+                self.assertLess(r, 0.2, f"case {i} vide vue comme noircie")
+
+    def test_blank_page_is_refused(self):
+        lay = self._sheet()
+        warped, info = cv_grade.align_by_frames(blank(), lay)
+        self.assertFalse(info["ok"])
+
+    def test_page_of_unrelated_content_is_refused(self):
+        """Une page pleine de texte et de traits n'est pas une feuille de réponses."""
+        lay = self._sheet()
+        img = blank()
+        rng = np.random.default_rng(9)
+        for _ in range(120):
+            x, y = int(rng.integers(50, W - 400)), int(rng.integers(50, H - 60))
+            cv2.line(img, (x, y), (x + int(rng.integers(60, 380)), y), 0, 3)
+        warped, info = cv_grade.align_by_frames(img, lay)
+        self.assertFalse(info["ok"], info)
+
+    def test_reports_counts(self):
+        lay = self._sheet()
+        _, info = cv_grade.align_by_frames(self._render(lay), lay)
+        self.assertEqual(info["n_boxes"], 48)
+        self.assertGreaterEqual(info["n_frames"], 24)
+
+    def test_empty_layout_is_refused(self):
+        page = ls.PageInfo(page=1, width=W, height=H, mark_diameter=DIAM, mires=())
+        lay = ls.Layout(dpi=300, pages={1: page}, boxes=[], zones=[], answer_sheet_page=1)
+        warped, info = cv_grade.align_by_frames(blank(), lay)
+        self.assertFalse(info["ok"])
+        self.assertEqual(warped.shape, (H, W))

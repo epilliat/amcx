@@ -348,8 +348,52 @@ pour EXAM_2026 c'est la page 12, pour le gabarit vierge la page 2. De même le
 nombre de questions QCM et de colonnes du code étudiant sont dérivés du calage
 (cases à lettres = QCM ; cases à chiffres = colonnes ID). Rien n'est figé à 31/35.
 
-### 7. Détection des mires
-`cv_grade.detect_mires(edge_margin=50)` filtre les candidats trop proches des bords. Si tu changes cette valeur, relance `cv_benchmark.py`.
+### 7. Recalage : mires d'abord, cadres imprimés en repli
+
+`cv_grade.detect_mires(gray, layout=lay)` cherche les 4 disques **dans des
+fenêtres autour de leur position canonique** (donnée par le calage), teste la
+forme par trois critères et **valide le quadrilatère** avant de rendre quoi que
+ce soit. Le filtre historique (aire + circularité ≥ 0,65) acceptait tout carré
+noir : une case cochée, un bit du code imprimé, deux bits contigus — 133 à 201
+candidats par page, départagés par la seule distance au coin, alors que le
+premier bit du code est à 736 px du coin haut-gauche pour un seuil de 744. Une
+mire absente donnait une homographie fausse sous un `method=cv_full` rassurant.
+Les seuils sont **mesurés** sur 692 vraies mires contre 599 autres candidats
+des scans d'EXAM_2026 ; chacun garde 100 % des vraies. **Toujours passer
+`layout=`** — sinon la recherche retombe sur la page entière.
+
+**Sans mires, on ne redimensionne plus : on recale sur les ~193 cadres
+imprimés** (`align_by_frames`). Amorce par corrélation avec le rendu du PDF du
+sujet, puis quelques homographies robustes sur les cadres retrouvés. Mesuré sur
+15 vraies copies dont les 4 coins sont rognés : **100 % des questions justes
+(465/465) et 15 identités sur 15**, contre **33 %** avec l'ancien
+redimensionnement — une page sans mires versait donc du bruit dans
+`raw_responses/` sans que rien ne le signale. Le résidu obtenu (0,8 à 1,6 px)
+est meilleur que celui du recalage par les mires (3 à 8 px).
+
+⚠ **Le critère d'acceptation est indispensable** : une page qui n'est pas une
+feuille de réponses ne retrouve presque aucun cadre (14 sur 193, corrélation
+0,04 sur la pub CamScanner d'EXAM_2026). Elle est refusée et le pipeline
+retombe sur `cv_no_mires`, plutôt que de rendre une lecture plausible et
+fausse. `method` vaut donc `cv_full`, `cv_frames` ou `cv_no_mires`.
+
+### 7bis. Banc de non-régression — à lancer avant/après toute optimisation
+
+[cv_regress.py](auto_grading/cv_regress.py) fige le résultat de `grade_image`
+**et la matrice des 23 features telle que le GBM la reçoit**, puis compare deux
+instantanés bit à bit :
+
+```bash
+python auto_grading/cv_regress.py snapshot avant     # code de référence
+# … modifications …
+python auto_grading/cv_regress.py snapshot apres
+python auto_grading/cv_regress.py compare avant apres
+```
+
+« features : IDENTIQUES au bit près » est la seule preuve qu'une optimisation
+ne touche pas le modèle. Les temps affichés ne valent que sur machine calme :
+pour comparer, alterner les deux versions (un `git worktree` sur l'ancien
+commit) plutôt que de comparer deux exécutions éloignées.
 
 ## Le classifieur ML (GBM)
 
@@ -450,6 +494,10 @@ pkill -f "front/server.py"
 # Re-grader (n'écrit que dans raw_responses_cv/) puis re-seed (préserve les modifs user)
 .venv/bin/python auto_grading/cv_grade.py --all
 .venv/bin/python auto_grading/front/seed_raw_responses.py --preserve-manual
+
+# Non-régression du pipeline de détection (cf. piège 7bis)
+.venv/bin/python auto_grading/cv_regress.py snapshot <nom>
+.venv/bin/python auto_grading/cv_regress.py compare <ref> <nouveau>
 
 # Classifieur : (ré)entraîner
 .venv/bin/python auto_grading/build_dataset.py
