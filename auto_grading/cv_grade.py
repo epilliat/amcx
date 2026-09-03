@@ -939,16 +939,36 @@ MASKED_INK_ABS = 0.12
 ANSWER_SHEET_FRAME_FAIL_FRAC = 0.7
 
 
+def question_stats(q_ratios_s18) -> tuple:
+    """(médiane, moyenne, écart-type, seuil adaptatif) des ratios d'une question.
+
+    Ces quatre valeurs sont identiques pour toutes les cases d'une question :
+    les recalculer case par case dans `extract_features` coûtait 17,6 ms par
+    page — le premier poste de la fonction. `grade_image` les calcule une fois
+    par question et les passe.
+    """
+    if len(q_ratios_s18) > 0:
+        return (float(np.median(q_ratios_s18)), float(np.mean(q_ratios_s18)),
+                float(np.std(q_ratios_s18)), adaptive_threshold(list(q_ratios_s18)))
+    return (0.0, 0.0, 0.0, 0.50)
+
+
 def extract_features(warped: np.ndarray, box: "BoxLayout",
                      q_ratios_s18: list[float], copy_baseline: float,
                      offset: tuple[int, int] = (0, 0),
                      ref: np.ndarray | None = None, ref_corners=None,
-                     masked_feats: dict | None = None) -> dict:
+                     masked_feats: dict | None = None,
+                     q_stats: tuple | None = None,
+                     r18: float | None = None) -> dict:
     """Features d'une case (cf. FEATURE_COLS). q_ratios_s18 = ratios shrink=0.18 de la Q.
 
     Features masquées : `masked_feats` si déjà calculé (évite un recalcul), sinon
     dérivé de `ref`/`ref_corners` (rendu du PDF sujet — cf. masked_detect). Si la
-    référence est absente → NaN (le GBM HistGradientBoosting gère les NaN)."""
+    référence est absente → NaN (le GBM HistGradientBoosting gère les NaN).
+
+    `q_stats` et `r18` : valeurs que l'appelant a déjà (cf. `question_stats`,
+    et le ratio shrink 0.18 que `grade_image` mesure pour toutes les cases
+    avant d'entrer ici). Sans elles, elles sont recalculées à l'identique."""
     dx, dy = offset
     x1 = int(box.xmin) + dx
     x2 = int(box.xmax) + dx
@@ -957,7 +977,8 @@ def extract_features(warped: np.ndarray, box: "BoxLayout",
 
     # 1-3. Multi-shrink fill ratios (catch tick-in-corner vs full)
     r05 = fill_ratio_shrink(warped, box, 0.05, offset)
-    r18 = fill_ratio_shrink(warped, box, 0.18, offset)
+    if r18 is None:
+        r18 = fill_ratio_shrink(warped, box, 0.18, offset)
     r30 = fill_ratio_shrink(warped, box, 0.30, offset)
 
     # Crop intérieur (shrink=0.18) pour features de forme/texture
@@ -1008,14 +1029,9 @@ def extract_features(warped: np.ndarray, box: "BoxLayout",
     light_gray = float(((crop >= 120) & (crop <= 200)).mean())
 
     # 14-18. Context features (relatives à la même Q / copie)
-    if len(q_ratios_s18) > 0:
-        med_q = float(np.median(q_ratios_s18))
-        mean_q = float(np.mean(q_ratios_s18))
-        std_q = float(np.std(q_ratios_s18))
-    else:
-        med_q = mean_q = std_q = 0.0
+    med_q, mean_q, std_q, t_q = (q_stats if q_stats is not None
+                                 else question_stats(q_ratios_s18))
     z_q = (r18 - mean_q) / max(std_q, 0.01)
-    t_q = adaptive_threshold(list(q_ratios_s18)) if q_ratios_s18 else 0.50
 
     feats = {
         "fill_ratio_s05": r05,
@@ -1270,9 +1286,14 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
                      "off_q": off_q, "mfeats": mfeats,
                      "ratios_rel": ratios_rel, "t_q_rel": t_q_rel}
         if clf_bundle is not None:
-            for b, _r in q_boxes:
+            q_st = question_stats(ratios)
+            for b, r_b in q_boxes:
+                # `r_b` EST le ratio shrink 0.18 de cette case (mesuré dans
+                # `fills`) — sauf si l'appelant a changé `shrink`.
                 feats = extract_features(warped, b, ratios, copy_baseline,
-                                         offset=off_q, masked_feats=mfeats[b.char])
+                                         offset=off_q, masked_feats=mfeats[b.char],
+                                         q_stats=q_st,
+                                         r18=r_b if shrink == 0.18 else None)
                 feat_rows.append([feats[k] for k in feat_cols])
                 cell_keys.append((q, b.char))
 

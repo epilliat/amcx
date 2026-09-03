@@ -198,3 +198,25 @@ class TestFillRatio(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPaperLevel(unittest.TestCase):
+    """Le niveau du papier par histogramme doit égaler np.percentile au bit près.
+
+    C'est une entrée des features masquées du modèle : un écart, même infime,
+    invaliderait le classifieur entraîné.
+    """
+
+    def test_matches_numpy_percentile(self):
+        import masked_detect
+        rng = np.random.default_rng(5)
+        for k in range(2000):
+            n = int(rng.choice([74 * 74, 40 * 40, 7, 1]))
+            a = rng.integers(0, 256, n).astype(np.uint8)
+            if k % 4 == 0:
+                a[:] = int(rng.integers(0, 256))          # crop uniforme
+            self.assertEqual(masked_detect.paper_p85(a), float(np.percentile(a, 85)))
+
+    def test_empty(self):
+        import masked_detect
+        self.assertEqual(masked_detect.paper_p85(np.zeros(0, np.uint8)), 0.0)
