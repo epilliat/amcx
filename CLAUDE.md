@@ -3266,8 +3266,9 @@ deux cours.
 **Volontairement non fait** : la vue SQL `category_counts`. Les comptages sont
 agrégés côté client à partir d'une seule requête sur `question_categories` —
 avec des banques de quelques centaines de questions, une vue `security_invoker`
-serait de la complexité sans gain mesurable. À revoir si une banque dépasse le
-plafond de 500 lignes de `list_questions`, qui mordra bien avant.
+serait de la complexité sans gain mesurable. Le plafond de 500 lignes qui
+mordait avant a été remplacé par une pagination (`_fetch_paged`) : à revoir si
+une banque approche `MAX_ROWS` (20 000).
 
 ⚠ **Après toute édition de template ou de statique, redémarrer le serveur** :
 Jinja est en `auto_reload=False` (debug off) et met `banque.html` en cache dès
