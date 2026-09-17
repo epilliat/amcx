@@ -36,24 +36,36 @@ select must_fail($$update bank_categories
 select must_pass($$insert into bank_categories(parent_id, name, created_by) values
                    ('c0000000-0000-0000-0000-000000000003', 'N4',
                     'aaaaaaaa-0000-0000-0000-000000000001')$$, '4e niveau');
-select must_fail($$insert into bank_categories(parent_id, name, created_by)
+select must_pass($$insert into bank_categories(parent_id, name, created_by)
                    select id, 'N5', 'aaaaaaaa-0000-0000-0000-000000000001'
                    from bank_categories where name = 'N4'$$, '5e niveau');
-delete from bank_categories where name = 'N4';
+select must_pass($$insert into bank_categories(parent_id, name, created_by)
+                   select id, 'N6', 'aaaaaaaa-0000-0000-0000-000000000001'
+                   from bank_categories where name = 'N5'$$, '6e niveau');
+select must_fail($$insert into bank_categories(parent_id, name, created_by)
+                   select id, 'N7', 'aaaaaaaa-0000-0000-0000-000000000001'
+                   from bank_categories where name = 'N6'$$, '7e niveau');
+delete from bank_categories where name in ('N4', 'N5', 'N6');
 
 select '--- déplacement : la profondeur du SOUS-ARBRE compte ---';
--- A2[B2[C2]] = hauteur 3 ; Y est à la profondeur 2.
+-- A2[B2[C2]] = hauteur 3 : le déplacer sous un parent de profondeur p le met
+-- à p+1 et pousse ses descendants à p+3. Sous Z (profondeur 3) → 6 pile ;
+-- sous D2 (profondeur 4) → 7, refusé.
 insert into bank_categories(id, parent_id, name, created_by) values
  ('c0000000-0000-0000-0000-0000000000a1', null, 'A2', 'aaaaaaaa-0000-0000-0000-000000000001'),
  ('c0000000-0000-0000-0000-0000000000a2', 'c0000000-0000-0000-0000-0000000000a1', 'B2', 'aaaaaaaa-0000-0000-0000-000000000001'),
  ('c0000000-0000-0000-0000-0000000000a3', 'c0000000-0000-0000-0000-0000000000a2', 'C2', 'aaaaaaaa-0000-0000-0000-000000000001'),
  ('c0000000-0000-0000-0000-0000000000b1', null, 'X', 'aaaaaaaa-0000-0000-0000-000000000001'),
  ('c0000000-0000-0000-0000-0000000000b2', 'c0000000-0000-0000-0000-0000000000b1', 'Y', 'aaaaaaaa-0000-0000-0000-000000000001');
-select must_fail($$update bank_categories set parent_id = 'c0000000-0000-0000-0000-0000000000b2'
-                   where name = 'A2'$$, 'A2[B2[C2]] sous Y (profondeur 2) → 5 niveaux');
-select must_pass($$update bank_categories set parent_id = 'c0000000-0000-0000-0000-0000000000b1'
-                   where name = 'A2'$$, 'A2[B2[C2]] sous X (profondeur 1) → 4 niveaux pile');
+insert into bank_categories(id, parent_id, name, created_by) values
+ ('c0000000-0000-0000-0000-0000000000b3', 'c0000000-0000-0000-0000-0000000000b2', 'Z', 'aaaaaaaa-0000-0000-0000-000000000001'),
+ ('c0000000-0000-0000-0000-0000000000b4', 'c0000000-0000-0000-0000-0000000000b3', 'D2', 'aaaaaaaa-0000-0000-0000-000000000001');
+select must_fail($$update bank_categories set parent_id = 'c0000000-0000-0000-0000-0000000000b4'
+                   where name = 'A2'$$, 'A2[B2[C2]] sous D2 (profondeur 4) → 7 niveaux');
+select must_pass($$update bank_categories set parent_id = 'c0000000-0000-0000-0000-0000000000b3'
+                   where name = 'A2'$$, 'A2[B2[C2]] sous Z (profondeur 3) → 6 niveaux pile');
 update bank_categories set parent_id = null where name = 'A2';
+delete from bank_categories where name in ('D2', 'Z');
 
 select '--- unicité des noms entre frères ---';
 select must_fail($$insert into bank_categories(parent_id, name, created_by) values

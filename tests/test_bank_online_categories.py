@@ -102,14 +102,17 @@ class TestMove(OnlineCase):
             bo.update_category(inf["id"], parent_id=tests["id"])
 
     def test_subtree_depth_refused(self):
+        """⚠ Bâti sur `tx.MAX_DEPTH`, jamais sur le nombre du jour."""
         a = bo.create_category("a")
         b = bo.create_category("b", a["id"])
-        bo.create_category("c", b["id"])
-        x = bo.create_category("x")
-        y = bo.create_category("y", x["id"])
+        bo.create_category("c", b["id"])                 # a[b[c]] : hauteur 3
+        chain, parent = [], None
+        for i in range(tx.MAX_DEPTH - 2):
+            parent = bo.create_category(f"x{i}", parent)["id"]
+            chain.append(parent)
         with self.assertRaises(tx.TaxonomyConflict):
-            bo.update_category(a["id"], parent_id=y["id"])
-        bo.update_category(a["id"], parent_id=x["id"])   # un niveau de moins : OK
+            bo.update_category(a["id"], parent_id=chain[-1])
+        bo.update_category(a["id"], parent_id=chain[-2])  # un cran plus haut : OK
 
     def test_noop_update_emits_no_write(self):
         _inf, tests, *_ = self.chapter()

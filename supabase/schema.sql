@@ -265,9 +265,11 @@ create unique index if not exists bank_categories_sibling_name_idx
     lower(btrim(name)));
 create index if not exists bank_categories_parent_idx on bank_categories (parent_id);
 
--- Intégrité de l'arbre : pas de cycle, pas plus de 4 niveaux.
--- ⚠ La constante 4 double `bank_taxonomy.MAX_DEPTH` côté Python. Les deux
--- doivent bouger ensemble.
+-- Intégrité de l'arbre : pas de cycle, pas plus de 6 niveaux.
+-- ⚠ La constante 6 double `bank_taxonomy.MAX_DEPTH` côté Python. Les deux
+-- doivent bouger ensemble : sinon la base accepte ce que le client refuse, ou
+-- l'inverse. Portée de 4 à 6 pour qu'une banque puisse rassembler plusieurs
+-- cours (`cours › chapitre › sous-chapitre` fait déjà 3 niveaux pour un seul).
 create or replace function bank_categories_check_tree()
 returns trigger language plpgsql as $$
 declare
@@ -288,8 +290,8 @@ begin
         using errcode = 'P0001';
     end if;
     d := d + 1;
-    if d > 4 then
-      raise exception 'Profondeur maximale dépassée (4 niveaux).'
+    if d > 6 then
+      raise exception 'Profondeur maximale dépassée (6 niveaux).'
         using errcode = 'P0001';
     end if;
     select parent_id into cur from bank_categories where id = cur;
@@ -305,8 +307,8 @@ begin
       select c.id, s.lvl + 1 from bank_categories c join sub s on c.parent_id = s.id
     )
     select coalesce(max(lvl), 1) into h from sub;
-    if d + h - 1 > 4 then
-      raise exception 'Ce déplacement dépasserait 4 niveaux.'
+    if d + h - 1 > 6 then
+      raise exception 'Ce déplacement dépasserait 6 niveaux.'
         using errcode = 'P0001';
     end if;
   end if;

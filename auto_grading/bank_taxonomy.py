@@ -26,10 +26,19 @@ from __future__ import annotations
 import re
 import uuid
 
-# Profondeur maximale de l'arbre (racine = niveau 1). Le besoin décrit 2-3
-# niveaux (cours → chapitre → sous-chapitre) ; au-delà, l'indentation du
-# panneau de gauche (280 px) devient illisible.
-MAX_DEPTH = 4
+# Profondeur maximale de l'arbre (racine = niveau 1).
+#
+# ⚠ Portée de 4 à 6 pour le passage à l'échelle. À 4, une banque qui rassemble
+# plusieurs cours était au plafond dès le départ : `cours › chapitre ›
+# sous-chapitre` fait déjà 3 niveaux pour UN cours (mesuré sur la banque de
+# régression : 37 nœuds, 3 niveaux), et mettre le cours en racine n'en laissait
+# aucun de libre. La limite garde un sens — un arbre n'est pas un système de
+# fichiers, et l'indentation du panneau (14 px par niveau) reste lisible à 6.
+#
+# ⚠ La constante est DOUBLÉE dans le trigger `bank_categories_check_tree` de
+# [supabase/schema.sql](../supabase/schema.sql) : les deux doivent bouger
+# ensemble, sinon la base accepte ce que le client refuse, ou l'inverse.
+MAX_DEPTH = 6
 
 # Longueur max d'un nom de catégorie (aligné sur le `check` SQL).
 NAME_MAX = 80

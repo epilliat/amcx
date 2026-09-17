@@ -21,6 +21,7 @@ _TMP = tempfile.TemporaryDirectory()
 os.environ.setdefault("AMCX_PROJECT_DIR", str(Path(_TMP.name) / "projet"))
 os.environ["AMCX_BANK_DIR"] = str(Path(_TMP.name) / "banque")
 
+import bank_taxonomy as tx   # noqa: E402
 import bank         # noqa: E402
 import bank_online  # noqa: E402
 import config       # noqa: E402
@@ -83,7 +84,7 @@ class TestTreeRoutes(RouteCase):
         code, j = self.get("/api/bank/categories")
         self.assertEqual(code, 200)
         self.assertEqual(j["nodes"], [])
-        self.assertEqual(j["max_depth"], 4)
+        self.assertEqual(j["max_depth"], tx.MAX_DEPTH)
         self.assertTrue(j["can_edit"], "une banque locale est toujours éditable")
 
     def test_create_and_list(self):
@@ -123,7 +124,7 @@ class TestTreeRoutes(RouteCase):
 
     def test_depth_limit_is_409(self):
         parent = None
-        for i in range(4):
+        for i in range(tx.MAX_DEPTH):
             parent = self.mkcat(f"N{i}", parent)
         code, _ = self.post("/api/bank/categories",
                             {"name": "trop", "parent_id": parent})

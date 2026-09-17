@@ -2964,7 +2964,7 @@ renommer casserait le lien sur toutes les questions à la fois.
   I/O**, partagée par les deux backends : liste plate `{id, parent_id, name,
   position}` (même forme que la table Postgres), `validate_nodes`,
   `descendants`, `would_create_cycle`, `subtree_height`, `annotate`,
-  `sanitize_assignment`. `MAX_DEPTH = 4`.
+  `sanitize_assignment`. `MAX_DEPTH = 6`.
 - L'arbre local vit dans **`<bank>/categories.json`, à la racine** — surtout
   pas dans `questions/` : `_read_or_rebuild_index()` compare le nombre de
   fichiers `questions/*.json` au nombre d'entrées de l'index, donc un intrus
@@ -3033,7 +3033,7 @@ dépendance ajoutée) :
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v     # 596 tests
-./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
+./tests/sql/run.sh                                    # + 24 contrôles SQL (docker)
 ```
 
 [tests/fake_postgrest.py](tests/fake_postgrest.py) simule le sous-ensemble de
@@ -3058,7 +3058,10 @@ tag, lui, *est* sa chaîne : le renommer casserait le lien sur toutes les
 questions à la fois — c'est précisément ce que l'arbre corrige.
 
 - [bank_taxonomy.py](auto_grading/bank_taxonomy.py) — **logique pure, zéro I/O**,
-  partagée par les deux backends : validation, cycles, profondeur (`MAX_DEPTH=4`),
+  partagée par les deux backends : validation, cycles, profondeur
+  (**`MAX_DEPTH = 6`**, portée de 4 pour qu'une banque puisse rassembler
+  plusieurs cours — `cours › chapitre › sous-chapitre` fait déjà 3 niveaux
+  pour un seul, et la banque de régression en occupe 3 sur 37 nœuds),
   `descendants`, `annotate` (aplatit en ordre préfixe avec `depth`/`path`/
   `n_direct`/`n_total`). L'UI ne refait aucun calcul d'arbre.
 - L'arbre local vit dans **`<bank>/categories.json`, à la racine** — surtout pas
@@ -3122,9 +3125,9 @@ jonction). `bank_online.py` expose exactement la même API que `bank.py` — les
 routes ignorent sur quel backend elles tournent.
 
 - **Le trigger `bank_categories_check_tree` est la garantie**, pas le client :
-  il refuse cycle, auto-parent et profondeur > 4 même si quelqu'un tape la base
+  il refuse cycle, auto-parent et profondeur > 6 même si quelqu'un tape la base
   directement. Le client refait les mêmes contrôles uniquement pour rendre un
-  message lisible au lieu d'une erreur SQL. ⚠ La constante 4 y double
+  message lisible au lieu d'une erreur SQL. ⚠ La constante 6 y double
   `bank_taxonomy.MAX_DEPTH` : les deux doivent bouger ensemble.
 - **Unicité entre frères, racine incluse** : `NULL` n'entrant dans aucune
   contrainte d'unicité, l'index passe par `coalesce(parent_id, '000…0'::uuid)`

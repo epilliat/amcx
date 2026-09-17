@@ -160,17 +160,26 @@ class TestRenameMove(BankCase):
             bank.update_category(inf["id"], parent_id=inf["id"])
 
     def test_move_refused_when_subtree_would_exceed_depth(self):
-        # a[b[c]] et une chaîne x[y] : déplacer `a` sous `y` ferait 4+1 niveaux.
+        """Le sous-arbre DÉPLACÉ compte, pas seulement le nœud déplacé.
+
+        ⚠ Construit depuis `tx.MAX_DEPTH` et jamais depuis le nombre 4 : ce
+        test vérifie la règle, pas la valeur du jour (portée à 6 depuis).
+        """
+        # a[b[c]] : hauteur 3. Une chaîne de parents juste assez longue pour
+        # que l'accueillir au dernier cran dépasse d'un niveau.
         a = bank.create_category("a")
         b = bank.create_category("b", a["id"])
         bank.create_category("c", b["id"])
-        x = bank.create_category("x")
-        y = bank.create_category("y", x["id"])
+        chain, parent = [], None
+        for i in range(tx.MAX_DEPTH - 2):        # profondeurs 1 … MAX-2
+            parent = bank.create_category(f"x{i}", parent)["id"]
+            chain.append(parent)
         with self.assertRaises(tx.TaxonomyConflict):
-            bank.update_category(a["id"], parent_id=y["id"])
-        # sous `x` (1 niveau de moins) : passe tout juste
-        bank.update_category(a["id"], parent_id=x["id"])
-        self.assertEqual(tx.depth(bank.load_categories(), a["id"]), 2)
+            bank.update_category(a["id"], parent_id=chain[-1])
+        # un cran plus haut : passe tout juste
+        bank.update_category(a["id"], parent_id=chain[-2])
+        self.assertEqual(tx.depth(bank.load_categories(), a["id"]),
+                         tx.MAX_DEPTH - 2)
 
     def test_move_into_name_conflict_refused(self):
         inf, tests, _ic, val = self.chapter()
