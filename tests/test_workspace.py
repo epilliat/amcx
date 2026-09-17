@@ -204,7 +204,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ProjetsEtEvaluationsCase(WorkspaceCase):
+# ⚠ On emprunte le `setUp` sans hériter de la classe : sous-classer
+# `WorkspaceCase` ferait **re-tourner tous ses tests** dans chaque sous-classe,
+# gonflant le total sans rien vérifier de plus.
+class ProjetsEtEvaluationsCase(unittest.TestCase):
+    setUp = WorkspaceCase.setUp
     """Les deux niveaux : une **évaluation** est un examen (`sujet/exam.tex`),
     un **projet** rassemble des évaluations (`cohorte.json`).
 
@@ -257,3 +261,60 @@ class ProjetsEtEvaluationsCase(WorkspaceCase):
         (d / "exam.tex").write_text("x")
         noms = sorted(e["name"] for e in ws.evaluations())
         self.assertEqual(noms, ["QCM1", "Rattrapage"])
+
+
+class ConversionCase(unittest.TestCase):
+    setUp = WorkspaceCase.setUp
+
+    """Changer ce qu'un dossier EST, dans les deux sens."""
+
+    def test_un_dossier_ordinaire_devient_un_projet(self):
+        self.assertFalse(ws.is_cohort(self.root / "brouillon"))
+        ws.make_cohort("brouillon")
+        self.assertTrue((self.root / "brouillon" / "cohorte.json").is_file())
+
+    def test_la_racine_elle_meme_peut_devenir_un_projet(self):
+        ws.make_cohort("")
+        self.assertTrue(ws.is_cohort(self.root))
+
+    def test_une_evaluation_ne_peut_pas_devenir_un_projet(self):
+        """⚠ Elle porterait les deux pastilles et « Ouvrir » n'aurait plus de
+        sens unique : bascule d'examen d'un côté, ré-enracinement de l'autre."""
+        with self.assertRaises(ws.WorkspaceError):
+            ws.make_cohort("QCM1")
+        self.assertFalse((self.root / "QCM1" / "cohorte.json").exists())
+
+    def test_un_projet_ne_le_devient_pas_deux_fois(self):
+        ws.make_cohort("brouillon")
+        with self.assertRaises(ws.WorkspaceError):
+            ws.make_cohort("brouillon")
+
+    def test_retirer_met_le_fichier_a_la_corbeille_sans_rien_perdre(self):
+        """⚠ Le `cohorte.json` porte la composition et les réglages de note :
+        il part à la corbeille, d'où il revient d'un coup."""
+        ws.make_cohort("brouillon")
+        out = ws.unmake_cohort("brouillon")
+        self.assertFalse(ws.is_cohort(self.root / "brouillon"))
+        self.assertTrue((self.root / "brouillon").is_dir())
+        slot = ws.trash_dir() / out["slot"]
+        self.assertTrue((slot / "cohorte.json").is_file())
+        ws.restore(out["slot"])
+        self.assertTrue(ws.is_cohort(self.root / "brouillon"))
+
+    def test_retirer_ne_touche_aucune_evaluation(self):
+        d = self.root / "L3" / "QCM2" / "sujet"
+        d.mkdir(parents=True)
+        (d / "exam.tex").write_text("x")
+        ws.make_cohort("L3")
+        import json
+        f = self.root / "L3" / "cohorte.json"
+        cfg = json.loads(f.read_text())
+        cfg["exams"] = [{"path": "QCM2", "label": "QCM2"}]
+        f.write_text(json.dumps(cfg))
+        out = ws.unmake_cohort("L3")
+        self.assertEqual(out["n_exams"], 1)
+        self.assertTrue((d / "exam.tex").is_file())
+
+    def test_retirer_ce_qui_nest_pas_un_projet_est_refuse(self):
+        with self.assertRaises(ws.WorkspaceError):
+            ws.unmake_cohort("brouillon")

@@ -811,11 +811,34 @@ Les deux se font au clic droit dans l'arbre (ou par les boutons de la barre) :
 |---|---|---|
 | **🎓 Nouvelle évaluation ici** | `sujet/exam.tex` (modale partagée, import `.tex` compris) | `/api/projects/open` → **le serveur redémarre** |
 | **📚 Nouveau projet ici** | un dossier + son `cohorte.json` (`workspace.new_cohort`) | `/api/workspace/root` → **l'arbre se ré-enracine**, pas de redémarrage |
+| **📚 En faire un projet** / **… n'est plus un projet** | pose ou retire le `cohorte.json` d'un dossier qui existe déjà | idem |
 
 ⚠ **Créer un projet ne bascule PAS dessus.** L'ouvrir re-enracine l'arbre :
 le faire d'office planterait l'utilisateur dans un dossier vide, alors qu'il
 vient le plus souvent de créer un rangement où **déplacer** des évaluations
 existantes. Le message de création dit comment l'ouvrir ensuite.
+
+**Un dossier existant se change en projet, et inversement** — même entrée de
+menu, dans les deux sens (`workspace.make_cohort` / `unmake_cohort`, route
+`POST /api/workspace/cohorte/set {path, is_project}`). C'est le geste courant :
+on range d'abord, on déclare ensuite, et c'est ce qui permet de reprendre un
+dossier d'examens déjà sur le disque sans rien déplacer. La **racine** se
+convertit aussi (clic droit sur le vide du panneau).
+
+⚠ **Une évaluation ne peut pas devenir un projet.** Un dossier qui porte
+`sujet/exam.tex` est un examen ; lui donner en plus un `cohorte.json` le ferait
+apparaître sous les deux pastilles, et « Ouvrir » n'aurait plus de sens unique
+— bascule d'examen d'un côté, ré-enracinement de l'arbre de l'autre. L'entrée
+de menu n'apparaît donc pas sur une évaluation, et la route refuse en 400.
+
+⚠ **Retirer ne supprime rien : le `cohorte.json` part à la CORBEILLE**, comme
+tout le reste de cet onglet. Il porte la composition du projet et les réglages
+de note (plafond, seuil, poids) : les détruire sur un clic de trop se paierait
+en réglages à refaire, alors que restaurer le fichier remet tout d'un coup. Et
+**aucune évaluation n'est touchée** — les dossiers restent où ils sont, ce qui
+est le sens de « ce dossier n'est plus un projet ». La confirmation nomme le
+nombre d'évaluations que le projet comptait (`info()` rend `n_exams`) : c'est
+ça qu'on perd de vue, pas les dossiers.
 
 ⚠ **Un dossier peut n'être ni l'un ni l'autre**, et la racine se comporte en
 projet **même sans `cohorte.json`** (`cohort.load` traite un fichier absent
@@ -920,6 +943,7 @@ droits de l'interface. **Tout le reste passe par `/download`, en
 | `GET /api/workspace/list?path=&hidden=` | entrées d'un dossier |
 | `GET /api/workspace/info?path=` | détail, enrichi d'un `project_root` (évaluation) ou d'un `cohort_root` (projet) |
 | `POST /api/workspace/cohorte` | `{parent, name}` → crée un **projet** ; ne bascule pas dessus |
+| `POST /api/workspace/cohorte/set` | `{path, is_project}` → change un dossier existant en projet, ou l'inverse (`cohorte.json` → corbeille) |
 | `POST /api/workspace/mkdir` · `rename` · `move` | remaniement |
 | `POST /api/workspace/delete` | `{path}` ou `{paths}` → **corbeille** ; un échec sur l'un n'arrête pas les autres et est **rendu** |
 | `GET /api/workspace/trash` · `POST .../restore` · `.../empty` | corbeille |
@@ -3008,7 +3032,7 @@ Premier `tests/` du dépôt — **`unittest` de la stdlib**, pas de pytest (aucu
 dépendance ajoutée) :
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 620 tests
+.venv/bin/python -m unittest discover -s tests -v     # 596 tests
 ./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
 ```
 

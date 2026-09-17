@@ -5982,6 +5982,9 @@ def _ws_state() -> dict:
         "n_trash":      len(workspace.list_trash()) if r else 0,
         "active":       str(config.project_root()),
         "cohort":       bool(r and workspace.is_cohort(r)),
+        # ⚠ La racine peut être posée sur un dossier d'examen : le menu du vide
+        # ne doit alors pas proposer d'en faire un projet (cf. `make_cohort`).
+        "project":      bool(r and workspace.is_project(r)),
     }
 
 
@@ -6050,6 +6053,29 @@ def api_workspace_new_cohorte():
         return jsonify({"ok": True,
                         "path": workspace.new_cohort(b.get("parent", ""),
                                                      b.get("name", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/cohorte/set", methods=["POST"])
+def api_workspace_set_cohorte():
+    """Change un dossier existant en **projet**, ou l'inverse.
+
+    `{path, is_project: true|false}`. Une seule route pour les deux sens : le
+    garde-fou (ce qui peut devenir un projet, ce qui peut cesser de l'être) est
+    alors écrit à un seul endroit.
+
+    ⚠ Retirer ne supprime rien : le `cohorte.json` part à la corbeille, et
+    aucune évaluation n'est touchée.
+    """
+    b = _json_body()
+    rel = b.get("path", "")
+    try:
+        if b.get("is_project"):
+            return jsonify({"ok": True, "path": workspace.make_cohort(rel),
+                            "n_trash": len(workspace.list_trash())})
+        return jsonify({"ok": True, **workspace.unmake_cohort(rel),
+                        "n_trash": len(workspace.list_trash())})
     except Exception as e:
         return _ws_error(e)
 

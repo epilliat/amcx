@@ -199,9 +199,60 @@ def new_cohort(parent_rel: str, name: str) -> str:
     des évaluations existantes. « Ouvrir ce projet » est une action à part.
     """
     rel = mkdir(parent_rel, name)
-    d = resolve(rel)
-    cohort.save(d, dict(cohort.DEFAULTS, name=d.name))
+    make_cohort(rel)
     return rel
+
+
+def make_cohort(rel: str) -> str:
+    """Fait d'un dossier **existant** un projet : y pose son `cohorte.json`.
+
+    C'est le geste courant — on range d'abord, on déclare ensuite —, et c'est
+    aussi ce qui permet de reprendre un dossier d'examens déjà sur le disque
+    sans rien déplacer.
+
+    ⚠ **Une évaluation ne peut pas devenir un projet.** Un dossier qui porte
+    `sujet/exam.tex` est un examen ; lui donner en plus un `cohorte.json` le
+    ferait apparaître sous les deux pastilles à la fois, et « Ouvrir » n'aurait
+    plus de sens unique — bascule d'examen d'un côté, ré-enracinement de
+    l'arbre de l'autre.
+    """
+    d = resolve(rel)
+    if not d.is_dir():
+        raise WorkspaceError(f"{rel or '.'} n'est pas un dossier.")
+    if is_project(d):
+        raise WorkspaceError(
+            f"« {d.name} » est une évaluation (elle porte sujet/exam.tex) : "
+            "une évaluation ne peut pas devenir un projet. Range-la dans un "
+            "projet plutôt que d'en faire un.")
+    if is_cohort(d):
+        raise WorkspaceError(f"« {d.name} » est déjà un projet.")
+    cohort.save(d, dict(cohort.DEFAULTS, name=d.name))
+    return rel_of(d)
+
+
+def unmake_cohort(rel: str) -> dict:
+    """Rend un projet à l'état de dossier ordinaire.
+
+    ⚠ **Le `cohorte.json` part à la corbeille, il n'est pas supprimé** — même
+    règle que tout le reste de cet onglet. Il porte la composition du projet
+    (quelles évaluations comptent) et les réglages de note (plafond, seuil,
+    poids) : les détruire sur un clic de trop se paierait en réglages à
+    refaire, alors que restaurer le fichier remet tout d'un coup.
+
+    ⚠ **Aucune évaluation n'est touchée.** Les dossiers restent où ils sont —
+    c'est le sens de « ce dossier n'est plus un projet », pas « supprime ce
+    qu'il contient ». Rend de quoi le dire : `n_exams` est ce que le projet
+    listait.
+    """
+    d = resolve(rel)
+    if not is_cohort(d):
+        raise WorkspaceError(f"« {d.name} » n'est pas un projet.")
+    try:
+        n_exams = len(cohort.load(d).get("exams", []))
+    except Exception:                      # un fichier illisible se retire aussi
+        n_exams = 0
+    info = trash(rel_of(cohort.cohort_file(d)))
+    return {"path": rel_of(d), "n_exams": n_exams, "slot": info["slot"]}
 
 
 def evaluations() -> list[dict]:
@@ -311,6 +362,11 @@ def info(rel: str = "") -> dict:
             d["project_root"] = str(pr)
         if d["cohort"]:
             d["cohort_root"] = str(p)
+            # Ce que la confirmation de retrait doit pouvoir nommer.
+            try:
+                d["n_exams"] = len(cohort.load(p).get("exams", []))
+            except Exception:                        # fichier illisible
+                d["n_exams"] = 0
     return d
 
 

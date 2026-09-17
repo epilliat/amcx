@@ -520,6 +520,49 @@ async function openCohorte(rel, name) {
   } catch (e) { fail(e); }
 }
 
+/* Changer ce qu'un dossier EST — dans les deux sens.
+ *
+ * ⚠ Retirer ne supprime rien : le `cohorte.json` part à la corbeille (il porte
+ * la composition du projet et les réglages de note, qu'un clic de trop ne doit
+ * pas coûter), et **aucune évaluation n'est touchée**. La confirmation le dit,
+ * et nomme le nombre d'évaluations que le projet listait — c'est ce qu'on
+ * perd de vue, pas les dossiers, qui restent où ils sont.
+ */
+async function setCohorte(rel, name, on) {
+  const label = name || WS.name || 'ce dossier';
+  if (on) {
+    if (!confirm('Faire de « ' + label + ' » un projet ?\n\n'
+                 + 'Un fichier cohorte.json y sera créé : il pourra dès lors '
+                 + 'rassembler des évaluations et agréger leurs notes. Aucun '
+                 + 'autre fichier n’est touché.')) return;
+  } else {
+    let n = 0;
+    try {
+      n = (await api('/api/workspace/info?path=' +
+                     encodeURIComponent(rel))).entry.n_exams || 0;
+    } catch (e) { fail(e); return; }
+    if (!confirm('« ' + label + ' » ne sera plus un projet.\n\n'
+                 + 'Son cohorte.json part à la corbeille'
+                 + (n ? ' : les ' + n + ' évaluation(s) qu’il comptait, et les'
+                      : ', avec les')
+                 + ' réglages de note (plafond, seuil, poids). '
+                 + 'Aucune évaluation n’est supprimée — les dossiers restent '
+                 + 'où ils sont, et restaurer le fichier remet tout.')) return;
+  }
+  try {
+    const j = await post('/api/workspace/cohorte/set',
+                         {path: rel, is_project: !!on});
+    setTrashCount(j.n_trash);
+    // La racine porte sa pastille dans la barre du haut, rendue côté serveur.
+    if (!rel) { window.location.reload(); return; }
+    WS.cache.clear();
+    await refresh();
+    selectRel(rel);
+    toast(on ? '✓ « ' + label + ' » est un projet'
+             : '✓ « ' + label + ' » n’est plus un projet');
+  } catch (e) { fail(e); }
+}
+
 async function openProject(absPath, name) {
   if (!confirm('Ouvrir l’évaluation « ' + name + ' » ?\n\n'
                + 'Le serveur redémarre et tous les onglets basculent sur cet examen.')) return;
@@ -614,6 +657,20 @@ function openMenu(x, y, e) {
     item('🎓 Nouvelle évaluation ici', () => askEvaluation(rel));
     item('📚 Nouveau projet ici', () => askCohorte(rel));
     item('⤒ Déposer des fichiers…', () => pickUpload(rel));
+
+    // Changer ce que le dossier EST — le geste courant est de ranger d'abord
+    // et de déclarer ensuite, ou de reprendre un dossier déjà sur le disque.
+    // ⚠ Une évaluation ne peut pas devenir un projet : elle porterait les deux
+    // pastilles et « Ouvrir » n'aurait plus de sens unique.
+    const isEval = e ? !!e.project : !!WS.rootIsEval;
+    const isCoh  = e ? !!e.cohort  : !!WS.cohort;
+    if (!isEval) {
+      sep();
+      if (isCoh) item('📚 Ce dossier n’est plus un projet',
+                      () => setCohorte(rel, e ? e.name : '', false));
+      else item('📚 En faire un projet',
+                () => setCohorte(rel, e ? e.name : '', true));
+    }
   } else {
     item('⤓ Télécharger', () => {
       window.location = '/api/workspace/download?path=' + encodeURIComponent(rel);
@@ -752,6 +809,8 @@ function boot(state) {
   WS.root = state.root || '';
   WS.name = state.name || '';
   WS.active = state.active || '';
+  WS.cohort = !!state.cohort;        // la racine est-elle un projet ?
+  WS.rootIsEval = !!state.project;   // … ou une évaluation ?
   if (!WS.root) return;                       // l'écran d'amorçage prend la main
   loadOpen();
   setTrashCount(state.n_trash || 0);

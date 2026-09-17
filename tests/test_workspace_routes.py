@@ -162,7 +162,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ProjetsEtEvaluationsRouteTest(WsRouteTest):
+# ⚠ `setUp`/`post` empruntés, pas hérités : sous-classer `WsRouteTest` ferait
+# re-tourner tous ses tests ici aussi.
+class ProjetsEtEvaluationsRouteTest(unittest.TestCase):
+    setUp = WsRouteTest.setUp
+    post = WsRouteTest.post
     """Créer un **projet** depuis l'onglet Fichiers, et le menu de la topbar."""
 
     def test_creer_un_projet(self):
@@ -215,3 +219,50 @@ class ProjetsEtEvaluationsRouteTest(WsRouteTest):
         with server.app.test_request_context("/"):
             ctx = server._inject_project_context()
         self.assertEqual(ctx["project_evaluations"], [])
+
+
+class ConversionRouteTest(unittest.TestCase):
+    setUp = WsRouteTest.setUp
+    post = WsRouteTest.post
+
+    """`POST /api/workspace/cohorte/set` — les deux sens, un seul garde-fou."""
+
+    def test_changer_un_dossier_en_projet(self):
+        (self.root / "L3").mkdir()
+        code, j = self.post("/api/workspace/cohorte/set",
+                            {"path": "L3", "is_project": True})
+        self.assertEqual(code, 200)
+        self.assertTrue((self.root / "L3" / "cohorte.json").is_file())
+
+    def test_changer_une_evaluation_en_projet_400(self):
+        code, j = self.post("/api/workspace/cohorte/set",
+                            {"path": "QCM1", "is_project": True})
+        self.assertEqual(code, 400)
+        self.assertIn("évaluation", j["error"])
+
+    def test_retirer_renvoie_ce_que_le_projet_comptait(self):
+        (self.root / "L3").mkdir()
+        self.post("/api/workspace/cohorte/set", {"path": "L3", "is_project": True})
+        code, j = self.post("/api/workspace/cohorte/set",
+                            {"path": "L3", "is_project": False})
+        self.assertEqual(code, 200)
+        self.assertEqual(j["n_exams"], 0)
+        self.assertEqual(j["n_trash"], 1)
+        self.assertTrue((self.root / "L3").is_dir())
+
+    def test_la_racine_bascule_et_letat_le_dit(self):
+        self.assertFalse(self.c.get("/api/workspace").get_json()["cohort"])
+        self.post("/api/workspace/cohorte/set", {"path": "", "is_project": True})
+        self.assertTrue(self.c.get("/api/workspace").get_json()["cohort"])
+        self.post("/api/workspace/cohorte/set", {"path": "", "is_project": False})
+        self.assertFalse(self.c.get("/api/workspace").get_json()["cohort"])
+
+    def test_convertir_hors_de_la_racine_400(self):
+        self.assertEqual(self.post("/api/workspace/cohorte/set",
+                                   {"path": "../..", "is_project": True})[0], 400)
+
+    def test_letat_dit_si_la_racine_est_une_evaluation(self):
+        self.assertFalse(self.c.get("/api/workspace").get_json()["project"])
+        (self.root / "sujet").mkdir()
+        (self.root / "sujet" / "exam.tex").write_text("x")
+        self.assertTrue(self.c.get("/api/workspace").get_json()["project"])
