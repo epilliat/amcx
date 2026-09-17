@@ -256,6 +256,44 @@ class TestListQuestions(OnlineCase):
                          ["Dans Tests"])
 
 
+class TestPagination(OnlineCase):
+    """⚠ `limit=500` en dur tronquait SANS LE DIRE : au-delà, les questions
+    manquantes n'existaient pas du point de vue de l'interface."""
+
+    def test_au_dela_dune_page_tout_remonte(self):
+        for i in range(bo.PAGE + 37):
+            self.db.add_question(f"Q{i:04d}")
+        rep = {}
+        got = bo.list_questions({}, report=rep)
+        self.assertEqual(len(got), bo.PAGE + 37)
+        self.assertFalse(rep["truncated"])
+
+    def test_le_plafond_dur_est_annonce(self):
+        orig = bo.MAX_ROWS
+        bo.MAX_ROWS = 20
+        self.addCleanup(lambda: setattr(bo, "MAX_ROWS", orig))
+        orig_page = bo.PAGE
+        bo.PAGE = 5
+        self.addCleanup(lambda: setattr(bo, "PAGE", orig_page))
+        for i in range(40):
+            self.db.add_question(f"Q{i:04d}")
+        rep = {}
+        got = bo.list_questions({}, report=rep)
+        self.assertEqual(len(got), 20)
+        self.assertTrue(rep["truncated"], "une liste tronquée doit le dire")
+
+    def test_une_page_pleine_pile_ne_boucle_pas(self):
+        """Le cas limite : exactement PAGE lignes, la page suivante est vide."""
+        orig_page = bo.PAGE
+        bo.PAGE = 5
+        self.addCleanup(lambda: setattr(bo, "PAGE", orig_page))
+        for i in range(5):
+            self.db.add_question(f"Q{i}")
+        rep = {}
+        self.assertEqual(len(bo.list_questions({}, report=rep)), 5)
+        self.assertFalse(rep["truncated"])
+
+
 class TestRechercheTexte(OnlineCase):
     """⚠ `or=(…)` est la seule façon de faire un OU en PostgREST : deux
     paramètres se combineraient en ET, et rien ne sortirait jamais."""

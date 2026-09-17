@@ -426,6 +426,16 @@ class TestRechercheTexte(BankCase):
         self.assertLessEqual(len(entry["text"]), bank.SEARCH_TEXT_MAX)
 
 
+class TestPasDeTroncature(BankCase):
+    def test_le_local_ne_tronque_jamais_et_le_dit(self):
+        """⚠ Rendu même à False : l'appelant ne doit pas avoir à deviner selon
+        le backend qu'il a en face."""
+        self.add_question("Q")
+        rep = {}
+        bank.list_questions({}, report=rep)
+        self.assertIs(rep["truncated"], False)
+
+
 class TestCacheIndex(BankCase):
     """⚠ L'index parsé est gardé en mémoire : il porte le texte cherchable,
     donc plusieurs mégaoctets sur une banque de plusieurs cours, et la

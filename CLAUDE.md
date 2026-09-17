@@ -3414,6 +3414,30 @@ chapitres × 3 sections, 170 nœuds) : `index.json` 4,1 Mo, `rebuild_index`
 240 ms, **listing complet 15 ms, recherche 16 ms**, sous-arbre d'un cours
 17 ms, `annotate` 8,5 ms. Le stockage n'est pas ce qui limite.
 
+#### ⚠ En ligne, rien n'est tronqué en silence
+
+`limit=500` en dur **tronquait sans le dire** : au-delà, les questions
+manquantes n'existaient pas du point de vue de l'interface — introuvables, sans
+le moindre signe. C'est le plafond qui mord en premier dès qu'une banque
+rassemble plusieurs cours (le local, lui, n'a aucune limite : il lit l'index
+entier). Les quatre `limit` en dur (`bank_questions` 500, `bank_categories`
+2 000, `question_categories` 10 000 ×2) ont disparu au profit de
+`_fetch_paged(path, params)` : pages de `PAGE = 500`, plafond dur
+`MAX_ROWS = 20000`, et un `truncated` **rendu**.
+
+- `list_questions(filters, report=…)` remplit `report["truncated"]` — et
+  `bank.py` le pose à `False` pour la même raison : l'appelant ne doit pas
+  avoir à deviner selon le backend qu'il a en face.
+- `GET /api/bank` rend `truncated` **même à False**, et `/banque` affiche
+  « ⚠ liste tronquée » à côté du compte. Une liste incomplète qui se présente
+  comme complète est pire qu'une erreur.
+- ⚠ Le plafond est lu **à l'appel**, pas figé en valeur par défaut d'argument
+  (évaluée à la définition) : changer `MAX_ROWS` n'aurait rien changé, le genre
+  de dépendance qui ne se voit qu'au moment où l'on croit l'avoir réglée.
+- `tests/fake_postgrest.py` **applique** `limit`/`offset` au lieu de les
+  ignorer : un faux backend qui rend tout d'un coup ferait passer un code qui
+  tronque.
+
 #### L'arbre à l'échelle : repli par défaut, filtre, et portée persistée
 
 Trois changements dans [bank_tree.js](auto_grading/front/static/bank_tree.js),

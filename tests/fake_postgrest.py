@@ -44,7 +44,14 @@ class FakePostgrest:
         rows = self.tables.setdefault(table, [])
 
         if method == "GET":
-            return [self._project(table, r) for r in self._match(rows, q)]
+            out = [self._project(table, r) for r in self._match(rows, q)]
+            # ⚠ `limit`/`offset` sont APPLIQUÉS, pas ignorés : c'est la
+            # pagination qu'ils servent à tester, et un faux backend qui rend
+            # tout d'un coup ferait passer un code qui tronque.
+            off = int(q.get("offset", 0) or 0)
+            lim = q.get("limit")
+            out = out[off:]
+            return out[:int(lim)] if lim else out
         if method == "POST":
             items = body if isinstance(body, list) else [body]
             out = []

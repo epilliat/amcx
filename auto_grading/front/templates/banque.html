@@ -570,16 +570,26 @@ async function reloadList() {
   if (!r.ok || !j.ok) { renderList([], j.error || 'Erreur'); return; }
   let items = j.items || [];
   if (mine && bankUserId) items = items.filter(it => it.author_id === bankUserId);
-  renderList(items, null);
+  renderList(items, null, j.truncated);
 }
 
 /* Le compte, et la PORTÉE si une catégorie filtre la liste.
  * ⚠ L'arbre peut être défilé loin de la ligne surlignée : sans ce rappel, on
  * se demande pourquoi la banque ne montre que 12 questions sur 3 000.
  * ⚠ `textContent` : un nom de catégorie vient d'une banque partagée. */
-function renderCount(cnt, n) {
+function renderCount(cnt, n, truncated) {
   cnt.textContent = '';
   cnt.appendChild(document.createTextNode(n + ' question(s)'));
+  // ⚠ Une liste incomplète qui se présente comme complète est pire qu'une
+  // erreur : les questions manquantes n'existent pas, sans le moindre signe.
+  if (truncated) {
+    const w = document.createElement('span');
+    w.className = 'bq-truncated';
+    w.textContent = '⚠ liste tronquée';
+    w.title = 'La banque dépasse le plafond de lecture. Affine la recherche '
+            + 'ou choisis une catégorie pour tout voir.';
+    cnt.appendChild(w);
+  }
   const sc = catTree && catTree.scope();
   if (!sc) return;
   cnt.appendChild(document.createTextNode(' dans '));
@@ -597,11 +607,11 @@ function renderCount(cnt, n) {
   cnt.appendChild(clr);
 }
 
-function renderList(items, err) {
+function renderList(items, err, truncated) {
   const host = document.getElementById('bq-list');
   const cnt = document.getElementById('bq-count');
   if (err) { showErr(host, err); cnt.textContent = ''; return; }
-  renderCount(cnt, items.length);
+  renderCount(cnt, items.length, truncated);
   if (!items.length) {
     host.innerHTML = '<p class="banque-empty">Aucune question.</p>';
     return;

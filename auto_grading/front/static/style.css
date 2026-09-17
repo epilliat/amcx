@@ -3524,6 +3524,8 @@ body.bq-resizing-v, body.bq-resizing-h { user-select: none; }
   font-size: 11px; line-height: 1; padding: 0 2px;
 }
 .bq-scope-clear:hover { color: #c33; }
+.bq-truncated { color: #a4600f; background: #fdf3e3; border-radius: 7px;
+                padding: 0 6px; font-weight: 600; }
 .banque-empty { color: #888; font-style: italic; padding: 16px; text-align: center; font-size: 13px; }
 .banque-err { color: #c33; }
 

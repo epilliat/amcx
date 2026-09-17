@@ -3324,13 +3324,18 @@ def api_bank_list():
         "variants":    (args.get("variants") or "heads").strip(),
     }
     try:
-        items = _bank().list_questions(filters)
+        report: dict = {}
+        items = _bank().list_questions(filters, report=report)
         # ⚠ Cette route ne renvoie PLUS `all_tags`. Le calculer exigeait un
         # second parcours complet de la banque à CHAQUE frappe dans la
         # recherche — deux requêtes HTTP complètes en banque en ligne. Les
         # facettes (tags + arbre) sont servies une fois par `/api/bank/facets`,
         # à l'ouverture de la modale.
-        return jsonify({"ok": True, "items": items})
+        #
+        # ⚠ `truncated` est rendu même quand il vaut False : une liste
+        # incomplète qui se présente comme complète est pire qu'une erreur.
+        return jsonify({"ok": True, "items": items,
+                        "truncated": bool(report.get("truncated"))})
     except tx.TaxonomyError as e:
         return jsonify({"error": str(e)}), 400
     except bank_online.BankAuthError as e:

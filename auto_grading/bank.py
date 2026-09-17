@@ -330,7 +330,8 @@ def _read_or_rebuild_index() -> dict:
         return rebuild_index()
 
 
-def list_questions(filters: dict | None = None) -> list[dict]:
+def list_questions(filters: dict | None = None,
+                   report: dict | None = None) -> list[dict]:
     """Liste les questions. Filtres optionnels :
     - `kind`   : str (exact match)
     - `tags`   : list[str] (any-match : au moins 1 tag commun)
@@ -351,6 +352,10 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     introuvable alors qu'elle correspond exactement à ce qu'on cherche.
     """
     filters = filters or {}
+    # ⚠ Le local ne tronque jamais (il lit l'index entier) : on le DIT, plutôt
+    # que de laisser l'appelant deviner selon le backend qu'il a en face.
+    if report is not None:
+        report["truncated"] = False
     idx = _read_or_rebuild_index()
     items = list(idx.get("questions", []))
 

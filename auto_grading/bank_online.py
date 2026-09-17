@@ -221,6 +221,42 @@ def delete(bank_id: str) -> None:
              + urlencode({"id": f"eq.{bank_id}"}))
 
 
+# Pagination PostgREST.
+#
+# ⚠ `limit=500` en dur **tronquait sans le dire** : au-delà, les questions
+# manquantes n'existaient pas du point de vue de l'interface — introuvables,
+# sans le moindre signe. C'est le plafond qui mord en premier quand une banque
+# rassemble plusieurs cours (le local, lui, n'a aucune limite : il lit l'index
+# entier). On pagine donc jusqu'à épuisement, avec un plafond dur qui, lui,
+# est **annoncé**.
+PAGE = 500
+MAX_ROWS = 20000
+
+
+def _fetch_paged(path: str, params: dict, cap: int | None = None):
+    """Toutes les lignes, par pages. Rend `(rows, truncated)`.
+
+    ⚠ `truncated` n'est pas décoratif : c'est la seule façon pour l'appelant de
+    dire « cette liste est incomplète » plutôt que de laisser croire qu'elle
+    est exhaustive.
+
+    ⚠ Le plafond est lu **à l'appel**, pas figé en valeur par défaut
+    d'argument : une valeur par défaut est évaluée à la définition, donc
+    changer `MAX_ROWS` (test, réglage) n'aurait rien changé — le genre de
+    dépendance qui ne se voit qu'au moment où l'on croit l'avoir réglée.
+    """
+    cap = MAX_ROWS if cap is None else cap
+    rows, off = [], 0
+    while len(rows) <= cap:
+        got = _request("GET", path, params=dict(params, limit=str(PAGE),
+                                                offset=str(off))) or []
+        rows.extend(got)
+        if len(got) < PAGE:
+            return rows, False
+        off += PAGE
+    return rows[:cap], True
+
+
 def _ilike_value(q: str) -> str:
     """Valeur `ilike` utilisable **dans** un `or=(…)` de PostgREST.
 
@@ -232,7 +268,8 @@ def _ilike_value(q: str) -> str:
     return f'"*{v}*"'
 
 
-def list_questions(filters: dict | None = None) -> list[dict]:
+def list_questions(filters: dict | None = None,
+                   report: dict | None = None) -> list[dict]:
     """Liste les questions visibles (status='public' + les miennes).
 
     Filtres :
@@ -251,7 +288,6 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     params = {
         "select": _SELECT_WITH_AUTHOR,
         "order":  "modified_at.desc",
-        "limit":  "500",
     }
     if filters.get("kind"):
         params["kind"] = f"eq.{filters['kind']}"
@@ -304,7 +340,10 @@ def list_questions(filters: dict | None = None) -> list[dict]:
         ids_quoted = ",".join(f'"{i}"' for i in restrict_ids)
         params["id"] = f"in.({ids_quoted})"
 
-    rows = _request("GET", "/rest/v1/bank_questions", params=params) or []
+    rows, truncated = _fetch_paged("/rest/v1/bank_questions", params)
+    if report is not None:
+        report["truncated"] = truncated
+        report["n_fetched"] = len(rows)
 
     # Charge les évals du user courant pour TOUTES les questions en une req.
     if rows:
@@ -670,9 +709,9 @@ _CAT_SELECT = "id,parent_id,name,position,created_by,created_at,modified_at"
 
 def _raw_categories() -> list[dict]:
     """Nœuds bruts de l'arbre (validés côté client)."""
-    rows = _request("GET", "/rest/v1/bank_categories",
-                    params={"select": _CAT_SELECT, "order": "position.asc,name.asc",
-                            "limit": "2000"}) or []
+    rows, _ = _fetch_paged("/rest/v1/bank_categories",
+                           {"select": _CAT_SELECT,
+                            "order": "position.asc,name.asc"})
     return tx.validate_nodes(rows)
 
 
@@ -687,18 +726,16 @@ def _questions_in_categories(cat_ids) -> set:
     celles que l'utilisateur peut voir)."""
     if not cat_ids:
         return set()
-    rows = _request("GET", "/rest/v1/question_categories",
-                    params={"select": "question_id",
-                            "category_id": _in_list(cat_ids),
-                            "limit": "10000"}) or []
+    rows, _ = _fetch_paged("/rest/v1/question_categories",
+                           {"select": "question_id",
+                            "category_id": _in_list(cat_ids)})
     return {r["question_id"] for r in rows}
 
 
 def _category_members() -> dict:
     """`{cat_id: {question_id, …}}` pour les compteurs de l'arbre."""
-    rows = _request("GET", "/rest/v1/question_categories",
-                    params={"select": "category_id,question_id",
-                            "limit": "10000"}) or []
+    rows, _ = _fetch_paged("/rest/v1/question_categories",
+                           {"select": "category_id,question_id"})
     out: dict = {}
     for r in rows:
         out.setdefault(r["category_id"], set()).add(r["question_id"])
