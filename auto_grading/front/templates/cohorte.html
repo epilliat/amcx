@@ -1,0 +1,566 @@
+{% extends "base.html" %}
+{% block title %}Ensemble{% if view %} — {{ view.name }}{% endif %}{% endblock %}
+
+{#- Curseur de réglage : glissière + saisie numérique, une seule valeur.
+
+    `rng` vient de `grades_view.slider_ranges()` — les bornes sont calées sur
+    l'échelle des notes de l'ensemble, jamais codées en dur.
+
+    ⚠ C'est la classe `is-off` qui porte l'état « auto », pas le champ vide :
+    le curseur AFFICHE le barème qu'il applique, sinon il montrerait une valeur
+    que le champ dément, et `numOrNull()` renvoie quand même `null`. Renvoyer
+    le nombre affiché figerait l'échelle au barème du jour. -#}
+{% macro slider(label, value, rng, cls='', id='', title='', off_label='', off_value=none) -%}
+  {% set off = (value is none) %}
+  {%- set offv = ("%g"|format(off_value)) if off_value is not none else '' -%}
+  <div class="sl{{ ' is-off' if off else '' }}"
+       {% if off_label %}data-off-value="{{ offv }}"{% endif %}
+       {% if title %}title="{{ title }}"{% endif %}>
+    <span class="sl-label">{{ label }}{% if offv %}<span class="sl-tag">{{ off_label }}</span>{% endif %}</span>
+    <div class="sl-ctl">
+      <input type="range" class="sl-range" aria-label="{{ label }}"
+             min="{{ "%g"|format(rng.min) }}" max="{{ "%g"|format(rng.max) }}"
+             step="{{ "%g"|format(rng.step) }}"
+             value="{{ "%g"|format(value if not off else rng.fallback) }}">
+      <input type="number" class="sl-num{{ ' ' ~ cls if cls else '' }}"
+             {% if id %}id="{{ id }}"{% endif %} step="{{ "%g"|format(rng.step) }}"
+             {% if off_label and not offv %}placeholder="{{ off_label }}"{% endif %}
+             value="{{ offv if off else "%g"|format(value) }}">
+      {% if off_label %}
+        <button type="button" class="sl-reset" tabindex="-1"
+                title="revenir à « {{ off_label }} »">↺</button>
+      {% endif %}
+    </div>
+  </div>
+{%- endmacro %}
+
+{% block content %}
+<div class="coh">
+
+{% if error %}
+  <div class="pf-warn-line">⚠ {{ error }}</div>
+{% endif %}
+
+{% if not view %}
+  {# ===== Aucun ensemble actif ============================================ #}
+  <section class="global-stats coh-intro">
+    <h2 class="gs-title">Vue d'ensemble</h2>
+    <p class="modal-hint">
+      Un <b>ensemble</b> est un dossier qui contient plusieurs projets AMCx —
+      les examens d'une même promotion — et un fichier <code>cohorte.json</code>
+      qui dit lesquels compter, sur quelle échelle et avec quel poids.
+      C'est ici que « seuiller à 30 » et « ramener sur 20 » ont un sens : un
+      examen seul se lit sur son propre barème.
+    </p>
+    <label class="modal-field">Dossier
+      <input type="text" id="coh-path" value="{{ default_root }}"
+             placeholder="~/Documents/AMCx/L3-2026">
+    </label>
+    <div class="eval-actions">
+      <button class="btn btn-primary btn-small" id="coh-open">Ouvrir</button>
+      <span id="coh-status" class="settings-hint"></span>
+      <div class="coh-mailcmd" id="coh-mailcmd" hidden>
+        Envoi des notes de l'ensemble (sans <code>--send</code>, rien ne part) :
+        <pre><code></code></pre>
+      </div>
+    </div>
+  </section>
+
+{% else %}
+  {# ===== En-tête ========================================================= #}
+  <section class="global-stats">
+    <h2 class="gs-title">{{ view.name }}
+      <span class="settings-hint">{{ view.path }}</span>
+      <a class="btn btn-tiny" href="/cohorte/export.csv">⤓ Export CSV</a>
+      <button class="btn btn-tiny" id="coh-report"
+              title="Écrit compte_rendu/notes.csv dans le dossier de l'ensemble — c'est ce fichier qu'envoient les courriels">💾 Compte rendu</button>
+      <button class="btn btn-tiny" id="coh-change">changer de dossier</button>
+    </h2>
+
+    {% for w in view.warnings %}
+      <div class="eval-legacy"><b>⚠</b> {{ w }}</div>
+    {% endfor %}
+
+    {% set s = view.summary %}
+    <div class="gs-stats">
+      <span class="gs-stats-of">Note finale</span>
+      <span><b>{{ "%.2f"|format(view.stats.mean) }}</b> moyenne μ</span>
+      <span><b>{{ "%.2f"|format(view.stats.std) }}</b> écart-type σ</span>
+      <span><b>{{ "%.1f"|format(view.stats.median) }}</b> médiane</span>
+      <span><b>{{ s.n_students }}</b> étudiants</span>
+      <span><b>{{ s.n_complete }}</b> complet{{ "s" if s.n_complete > 1 }} ·
+        <b>{{ s.n_partial }}</b> partiel{{ "s" if s.n_partial > 1 }}</span>
+      {% if s.n_unlinked %}<span><b>{{ s.n_unlinked }}</b> copies non reliées</span>{% endif %}
+    </div>
+
+    {# ===== Les examens ==================================================== #}
+    <div class="param-block">
+      <div class="param-block-title">Examens — note de colonne =
+        min(brut ∕ normalisation, 1) × échelle</div>
+      {% for col in view.columns %}
+        <div class="param-row" data-col-path="{{ col.path }}">
+          <span class="param-label">
+            <span class="lg-swatch" style="background:{{ col.color }}"></span>
+            {{ col.label }}
+            {% if col.kind == 'exam' %}
+              <span class="small">barème {{ "%g"|format(col.bareme) }}</span>
+              <button class="btn btn-tiny coh-remove" data-path="{{ col.path }}"
+                      title="retirer de l'ensemble (aucun fichier n'est supprimé)">✕</button>
+            {% endif %}
+            {% if not col.ok %}<span class="pf-warn">⚠ {{ col.error }}</span>{% endif %}
+          </span>
+          <div class="sl-grid">
+            {{ slider("Normalisation", none if col.auto_seuil else col.seuil,
+                      view.ranges.cols[col.key].seuil, cls="p-seuil",
+                      off_label="barème" if col.kind == 'exam' else "",
+                      off_value=col.bareme if col.kind == 'exam' else none,
+                      title="Le score qui vaut TOUT. Au-delà, on ne gagne plus rien.") }}
+            {{ slider("Ramenée sur", none if col.auto_max else col.max,
+                      view.ranges.cols[col.key].max, cls="p-max",
+                      off_label="barème" if col.kind == 'exam' else "",
+                      off_value=col.bareme if col.kind == 'exam' else none,
+                      title="Échelle de cette colonne une fois seuillée.") }}
+            {{ slider("Poids", col.agg_weight, view.ranges.weight, cls="p-weight") }}
+          </div>
+        </div>
+      {% endfor %}
+      {% if not view.columns %}
+        <div class="pf-empty">Aucun examen dans cet ensemble.</div>
+      {% endif %}
+
+      {% if view.candidates %}
+      {# ⚠ Un projet trouvé dans le dossier n'entre pas tout seul dans la
+         moyenne : un dossier d'essai deviendrait une note. #}
+      <div class="coh-candidates">
+        <span class="small">Projets trouvés dans le dossier, non comptés :</span>
+        {% for c in view.candidates %}
+          <button class="btn btn-tiny coh-add" data-path="{{ c.path }}"
+                  data-label="{{ c.label }}">+ {{ c.label }}</button>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    {# ===== Réglages globaux ============================================== #}
+    <div class="param-block">
+      <div class="param-block-title">Note finale — moyenne pondérée, puis plafond</div>
+      <div class="sl-grid">
+        {{ slider("Plafond de la note finale", view.config.final_threshold,
+                  view.ranges.final_threshold, id="coh-threshold") }}
+        {{ slider("Seuil de réussite", view.config.pass_mark,
+                  view.ranges.pass_mark, id="coh-passmark") }}
+        {{ slider("Granularité (largeur de barre)", view.config.hist_granularity,
+                  view.ranges.granularity, id="coh-granularity") }}
+      </div>
+      <span id="coh-status" class="settings-hint"></span>
+    </div>
+
+    {# ===== Graphiques ==================================================== #}
+    <div class="histogram">
+      <div class="hist-title">Calibration — une distribution par colonne, après
+        seuillage et mise à l'échelle</div>
+      <svg viewBox="0 0 {{ view.hist_top.width }} {{ view.hist_top.height }}" class="hist-svg"
+           preserveAspectRatio="xMidYMid meet">
+        {% for ser in view.hist_top.series %}
+          {% for b in ser.bars %}{% if b.count %}
+            <rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}"
+                  rx="1.5" fill="{{ ser.color }}" fill-opacity="{{ ser.opacity }}">
+              <title>{{ ser.name }} — [{{ b.lo }}, {{ b.hi }}] : {{ b.count }} étudiant(s)</title>
+            </rect>
+          {% endif %}{% endfor %}
+        {% endfor %}
+        <line x1="0" y1="{{ view.hist_top.base_y }}" x2="{{ view.hist_top.width }}"
+              y2="{{ view.hist_top.base_y }}" stroke="#ccc"/>
+        {% for t in view.hist_top.xticks %}
+          <text x="{{ t.x }}" y="{{ view.hist_top.base_y + 16 }}" class="hist-tick">{{ t.label }}</text>
+        {% endfor %}
+      </svg>
+      <div class="hist-legend">
+        {% for l in view.hist_top.legend %}
+          <span><span class="lg-swatch" style="background:{{ l.color }}"></span>{{ l.name }}</span>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="histogram">
+      <div class="hist-title">Note finale —
+        <b>{{ view.stats.n_below }}</b> étudiant(s) sous le seuil de
+        {{ "%g"|format(view.stats.pass_mark) }}</div>
+      <svg viewBox="0 0 {{ view.hist_bottom.width }} {{ view.hist_bottom.height }}"
+           class="hist-svg" preserveAspectRatio="xMidYMid meet">
+        {% if view.hist_bottom.band_w and view.hist_bottom.band_w > 0 %}
+          <rect x="{{ view.hist_bottom.band_x }}" y="{{ view.hist_bottom.pad_t }}"
+                width="{{ view.hist_bottom.band_w }}"
+                height="{{ view.hist_bottom.base_y - view.hist_bottom.pad_t }}"
+                fill="#f80" opacity="0.10"/>
+        {% endif %}
+        {% for ser in view.hist_bottom.series %}
+          {% for b in ser.bars %}
+            <rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}"
+                  rx="2" fill="{{ ser.color }}">
+              <title>[{{ b.lo }}, {{ b.hi }}] : {{ b.count }} étudiant(s)</title>
+            </rect>
+            {% if b.count %}
+              <text x="{{ b.cx }}" y="{{ b.y - 3 }}" class="hist-barlabel">{{ b.count }}</text>
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        <line x1="0" y1="{{ view.hist_bottom.base_y }}" x2="{{ view.hist_bottom.width }}"
+              y2="{{ view.hist_bottom.base_y }}" stroke="#ccc"/>
+        {% for t in view.hist_bottom.xticks %}
+          <text x="{{ t.x }}" y="{{ view.hist_bottom.base_y + 16 }}" class="hist-tick">{{ t.label }}</text>
+        {% endfor %}
+        <line x1="{{ view.hist_bottom.mean_x }}" y1="{{ view.hist_bottom.pad_t }}"
+              x2="{{ view.hist_bottom.mean_x }}" y2="{{ view.hist_bottom.base_y }}"
+              stroke="#f80" stroke-width="2" stroke-dasharray="4 3"/>
+        {% if view.hist_bottom.vline_x %}
+          <line x1="{{ view.hist_bottom.vline_x }}" y1="{{ view.hist_bottom.pad_t }}"
+                x2="{{ view.hist_bottom.vline_x }}" y2="{{ view.hist_bottom.base_y }}"
+                stroke="#d6485a" stroke-width="2"/>
+        {% endif %}
+      </svg>
+    </div>
+
+    <div class="formula-box">
+      <div class="formula-title">📐 Formule de la note finale (à donner aux étudiants)</div>
+      <div class="formula-main">
+        Note finale = min(
+        {%- if view.formula.terms|length == 1 %} {{ view.formula.terms[0].label }}*
+        {%- else %} ( {% for t in view.formula.terms %}{% if not loop.first %} + {% endif %}{{ "%g"|format(t.weight) }}·{{ t.label }}*{% endfor %} ) ∕ {{ "%g"|format(view.formula.denom) }}
+        {%- endif %} ,  {{ "%g"|format(view.formula.threshold) }} )
+      </div>
+      <div class="formula-defs">
+        {% for t in view.formula.terms %}
+          <div><b>{{ t.label }}*</b> = min({{ t.label }} ∕ {{ "%g"|format(t.seuil) }}, 1) × {{ "%g"|format(t.max) }}
+            <span class="small">({{ "%g"|format(t.seuil) }} points suffisent pour {{ "%g"|format(t.max) }}/{{ "%g"|format(t.max) }})</span></div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="scatter-box">
+      <div class="hist-title">Nuage de points — corrélation entre deux notes</div>
+      <div class="scatter-controls">
+        <label>X <select id="sc-x"></select></label>
+        <label>Y <select id="sc-y"></select></label>
+        <span id="sc-corr" class="sc-corr">—</span>
+      </div>
+      <svg id="sc-svg" viewBox="0 0 470 340" class="hist-svg"
+           preserveAspectRatio="xMidYMid meet"></svg>
+      <div id="sc-tooltip" class="sc-tooltip"></div>
+    </div>
+    <script id="scatter-data" type="application/json">{{ view.scatter|tojson }}</script>
+
+    {# ===== Les étudiants ================================================= #}
+    <div class="eval-questions">
+      <div class="eq-head">
+        <h3>Notes par étudiant</h3>
+        <input type="text" id="coh-search" placeholder="Rechercher nom / ID…">
+      </div>
+      <table class="eq-table coh-table">
+        <thead>
+          <tr><th>Étudiant</th><th>Identifiant</th>
+            {% for col in view.columns %}<th class="eq-num">{{ col.label }}</th>{% endfor %}
+            <th class="eq-num">Note finale</th></tr>
+        </thead>
+        <tbody>
+        {% for r in view.students %}
+          <tr data-search="{{ r.nom_prenom|lower }} {{ r.id }}"
+              {% if not r.id %}class="coh-unlinked"{% endif %}>
+            <td>{{ r.nom_prenom }}</td>
+            <td class="small">{{ r.id }}{% if r.also_id %}
+              <span class="settings-hint" title="identifiants rapprochés (même étudiant)">= {{ r.also_id|join(', ') }}</span>{% endif %}</td>
+            {% for col in view.columns %}
+              <td class="eq-num">
+                {%- if r.notes.get(col.key) is not none -%}
+                  {{ "%.2f"|format(r.notes[col.key]) }}
+                {%- elif col.label in r.absent_in -%}
+                  <span class="coh-abs">ABS</span>
+                {%- else -%}—{%- endif -%}
+              </td>
+            {% endfor %}
+            <td class="eq-num"><b>{% if r.final is not none %}{{ "%.2f"|format(r.final) }}{% else %}—{% endif %}</b></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// --- ouverture d'un dossier d'ensemble ---
+// ⚠ Changer d'ensemble ne redémarre PAS le serveur : un ensemble lit ses
+// examens par sous-processus, il ne fige aucun chemin dans ce process.
+async function openCohort(path, create) {
+  const st = document.getElementById('coh-status');
+  if (st) st.textContent = 'Ouverture…';
+  const r = await fetch('/api/cohorte/open', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: path, create: !!create})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { location.reload(); return; }
+  if (j.can_create && confirm(
+        `${path}\n\nCe dossier ne contient pas encore de cohorte.json.\n`
+        + `Le créer ici ?`)) {
+    return openCohort(path, true);
+  }
+  if (st) st.textContent = '✘ ' + (j.error || 'erreur');
+}
+const openBtn = document.getElementById('coh-open');
+if (openBtn) openBtn.addEventListener('click', () =>
+  openCohort(document.getElementById('coh-path').value.trim(), false));
+const changeBtn = document.getElementById('coh-change');
+if (changeBtn) changeBtn.addEventListener('click', () => {
+  const p = prompt('Dossier de l’ensemble :', {{ cohort_dir|tojson }});
+  if (p) openCohort(p.trim(), false);
+});
+
+{% if view %}
+// --- curseurs (glissière + saisie), une seule implémentation --------------
+(function initSliders() {
+  const fmt = v => String(Math.round(v * 1e6) / 1e6);
+  function paint(sl) {
+    const r = sl.querySelector('.sl-range');
+    const lo = parseFloat(r.min), hi = parseFloat(r.max);
+    const p = hi > lo ? (parseFloat(r.value) - lo) / (hi - lo) * 100 : 0;
+    r.style.setProperty('--p', Math.max(0, Math.min(100, p)) + '%');
+  }
+  // ⚠ Les bornes sont un confort, pas une contrainte : une valeur tapée hors
+  // bornes élargit la glissière au lieu d'être ramenée dedans en silence.
+  function grow(r, v) {
+    if (v > parseFloat(r.max)) r.max = fmt(v);
+    if (v < parseFloat(r.min)) r.min = fmt(v);
+  }
+  document.querySelectorAll('.sl').forEach(sl => {
+    const r = sl.querySelector('.sl-range');
+    const n = sl.querySelector('.sl-num');
+    const reset = sl.querySelector('.sl-reset');
+    if (!r || !n) return;
+    const v0 = parseFloat(n.value);
+    if (Number.isFinite(v0)) { grow(r, v0); r.value = v0; }
+    paint(sl);
+    r.addEventListener('input', () => {
+      n.value = fmt(parseFloat(r.value));
+      sl.classList.remove('is-off'); paint(sl);
+    });
+    r.addEventListener('change', scheduleApply);
+    n.addEventListener('input', () => {
+      const v = parseFloat(n.value);
+      if (Number.isFinite(v)) { grow(r, v); r.value = v; sl.classList.remove('is-off'); }
+      else if (n.value.trim() === '') { sl.classList.add('is-off'); }
+      paint(sl);
+    });
+    n.addEventListener('change', scheduleApply);
+    if (reset) reset.addEventListener('click', () => {
+      n.value = sl.dataset.offValue || '';
+      const v = parseFloat(n.value);
+      if (Number.isFinite(v)) { grow(r, v); r.value = v; }
+      sl.classList.add('is-off'); paint(sl); scheduleApply();
+    });
+    n.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); applyConfig(); }
+    });
+  });
+})();
+
+// ⚠ `is-off` fait foi, pas le champ vide : « auto » AFFICHE le barème qu'il
+// applique, et ce nombre ne doit surtout pas repartir comme un choix explicite
+// — il figerait l'échelle au barème du jour.
+function numOrNull(el) {
+  if (!el) return undefined;
+  const sl = el.closest('.sl');
+  if (sl && sl.classList.contains('is-off')) return null;
+  const v = el.value.trim();
+  if (v === '') return null;
+  const f = parseFloat(v);
+  return Number.isFinite(f) ? f : null;
+}
+
+let applyTimer = null, applying = false;
+function scheduleApply() {
+  clearTimeout(applyTimer);
+  const st = document.getElementById('coh-status');
+  if (st) st.textContent = '↻ mise à jour…';
+  applyTimer = setTimeout(applyConfig, 500);
+}
+
+async function applyConfig() {
+  if (applying) return;
+  clearTimeout(applyTimer);
+  applying = true;
+  const body = {columns: []};
+  for (const [key, id] of Object.entries({
+        final_threshold: 'coh-threshold', pass_mark: 'coh-passmark',
+        hist_granularity: 'coh-granularity'})) {
+    const v = numOrNull(document.getElementById(id));
+    if (v !== null && v !== undefined) body[key] = v;
+  }
+  document.querySelectorAll('.param-row[data-col-path]').forEach(row => {
+    body.columns.push({
+      path: row.dataset.colPath,
+      seuil: numOrNull(row.querySelector('.p-seuil')),
+      max: numOrNull(row.querySelector('.p-max')),
+      agg_weight: numOrNull(row.querySelector('.p-weight')),
+    });
+  });
+  const r = await fetch('/api/cohorte/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (r.ok) { location.reload(); return; }
+  applying = false;
+  const j = await r.json().catch(() => ({}));
+  const st = document.getElementById('coh-status');
+  if (st) st.textContent = '✘ ' + (j.error || 'erreur');
+}
+
+// --- ajouter / retirer un examen -----------------------------------------
+async function patchExam(path, label, remove) {
+  const r = await fetch('/api/cohorte/exams', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: path, label: label, remove: !!remove})
+  });
+  if (r.ok) { location.reload(); return; }
+  const j = await r.json().catch(() => ({}));
+  alert(j.error || 'erreur');
+}
+document.querySelectorAll('.coh-add').forEach(b => b.addEventListener('click',
+  () => patchExam(b.dataset.path, b.dataset.label, false)));
+document.querySelectorAll('.coh-remove').forEach(b => b.addEventListener('click',
+  () => { if (confirm(`Retirer « ${b.dataset.path} » de l'ensemble ?\n\n`
+                      + `Aucun fichier n'est supprimé : l'examen reste sur le disque.`))
+            patchExam(b.dataset.path, '', true); }));
+
+// --- compte rendu de l'ensemble ------------------------------------------
+// ⚠ L'envoi passe par la ligne de commande, avec `--log` sur le journal de
+// l'ensemble : celui du projet ferait sauter les étudiants déjà servis pour
+// l'examen — même adresse, autre note. La commande est affichée, pas devinée.
+const cohReport = document.getElementById('coh-report');
+if (cohReport) cohReport.addEventListener('click', async () => {
+  const st = document.getElementById('coh-status');
+  if (st) st.textContent = 'Écriture…';
+  const r = await fetch('/api/cohorte/report', {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { if (st) st.textContent = '✘ ' + (j.error || 'erreur'); return; }
+  if (st) st.textContent = `✓ ${j.n_rows} notes dans ${j.path}`;
+  const box = document.getElementById('coh-mailcmd');
+  if (box) {
+    box.hidden = false;
+    box.querySelector('code').textContent = j.command + ' --send';
+  }
+});
+
+// --- recherche dans la table ---------------------------------------------
+const cohSearch = document.getElementById('coh-search');
+if (cohSearch) cohSearch.addEventListener('input', () => {
+  const q = cohSearch.value.toLowerCase().trim();
+  document.querySelectorAll('.coh-table tbody tr').forEach(tr => {
+    tr.style.display = (!q || (tr.dataset.search || '').includes(q)) ? '' : 'none';
+  });
+});
+
+// --- nuage de points (scatter + corrélation de Pearson) ---
+const SCATTER = JSON.parse(document.getElementById('scatter-data').textContent);
+const scX = document.getElementById('sc-x');
+const scY = document.getElementById('sc-y');
+const scCorr = document.getElementById('sc-corr');
+const scSvg = document.getElementById('sc-svg');
+
+function scEsc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  return (sxx === 0 || syy === 0) ? null : sxy / Math.sqrt(sxx * syy);
+}
+function scLabel(id) {
+  const v = SCATTER.variables.find(v => v.id === id);
+  return v ? v.label : id;
+}
+let scXLabel = '', scYLabel = '';
+function drawScatter() {
+  const xid = scX.value, yid = scY.value;
+  scXLabel = scLabel(xid);
+  scYLabel = scLabel(yid);
+  const pts = SCATTER.points.filter(p => p.v[xid] != null && p.v[yid] != null);
+  const xs = pts.map(p => p.v[xid]), ys = pts.map(p => p.v[yid]);
+  const r = pearson(xs, ys);
+  scCorr.textContent = (r == null)
+    ? 'corrélation : —'
+    : `corrélation r = ${r.toFixed(3)}  (n = ${pts.length})`;
+  const W = 470, H = 340, padL = 44, padB = 36, padT = 12, padR = 14;
+  if (!pts.length) { scSvg.innerHTML = '<text x="235" y="170" text-anchor="middle" fill="#999">aucune donnée</text>'; return; }
+  const xlo = Math.min(...xs), xhi = Math.max(...xs);
+  const ylo = Math.min(...ys), yhi = Math.max(...ys);
+  const xspan = (xhi - xlo) || 1, yspan = (yhi - ylo) || 1;
+  const sx = v => padL + (v - xlo) / xspan * (W - padL - padR);
+  const sy = v => (H - padB) - (v - ylo) / yspan * (H - padT - padB);
+  let s = '';
+  // axes
+  s += `<line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#bbb"/>`;
+  s += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H-padB}" stroke="#bbb"/>`;
+  // graduations
+  for (let k = 0; k <= 4; k++) {
+    const xv = xlo + xspan * k / 4, yv = ylo + yspan * k / 4;
+    s += `<text x="${sx(xv).toFixed(1)}" y="${H-padB+15}" font-size="10" fill="#999" text-anchor="middle">${(+xv.toFixed(1))}</text>`;
+    s += `<text x="${padL-6}" y="${(sy(yv)+3).toFixed(1)}" font-size="10" fill="#999" text-anchor="end">${(+yv.toFixed(1))}</text>`;
+  }
+  // points (class + data-* pour le tooltip interactif ; <title> pour le SVG exporté)
+  for (const p of pts) {
+    s += `<circle class="sc-dot" cx="${sx(p.v[xid]).toFixed(1)}" cy="${sy(p.v[yid]).toFixed(1)}" r="4" `
+       + `fill="#0a6ed1" fill-opacity="0.55" stroke="#0a6ed1" `
+       + `data-name="${scEsc(p.name)}" data-xv="${p.v[xid]}" data-yv="${p.v[yid]}">`
+       + `<title>${scEsc(p.name)}  (${p.v[xid]} ; ${p.v[yid]})</title></circle>`;
+  }
+  // libellés d'axes
+  s += `<text x="${(padL+(W-padR))/2}" y="${H-4}" font-size="11" fill="#555" text-anchor="middle">${scEsc(scLabel(xid))}</text>`;
+  s += `<text x="12" y="${(padT+(H-padB))/2}" font-size="11" fill="#555" text-anchor="middle" transform="rotate(-90 12 ${(padT+(H-padB))/2})">${scEsc(scLabel(yid))}</text>`;
+  scSvg.innerHTML = s;
+}
+// tooltip interactif : survol d'un point → nom + valeurs (délégation sur le svg,
+// survit aux redraws de innerHTML)
+const scTip = document.getElementById('sc-tooltip');
+scSvg.addEventListener('mouseover', e => {
+  const c = e.target.closest('.sc-dot');
+  if (!c) return;
+  scTip.innerHTML = '<b>' + scEsc(c.dataset.name) + '</b><br>'
+    + scEsc(scXLabel) + ' : ' + c.dataset.xv + '<br>'
+    + scEsc(scYLabel) + ' : ' + c.dataset.yv;
+  scTip.style.display = 'block';
+});
+scSvg.addEventListener('mousemove', e => {
+  if (scTip.style.display !== 'block') return;
+  scTip.style.left = (e.clientX + 14) + 'px';
+  scTip.style.top = (e.clientY + 14) + 'px';
+});
+scSvg.addEventListener('mouseout', e => {
+  if (e.target.closest('.sc-dot')) scTip.style.display = 'none';
+});
+
+(function initScatter() {
+  const opts = SCATTER.variables.map(v => `<option value="${scEsc(v.id)}">${scEsc(v.label)}</option>`).join('');
+  scX.innerHTML = opts;
+  scY.innerHTML = opts;
+  const n = SCATTER.variables.length;
+  scX.selectedIndex = 0;
+  scY.selectedIndex = n > 1 ? 1 : 0;
+  scX.addEventListener('change', drawScatter);
+  scY.addEventListener('change', drawScatter);
+  drawScatter();
+})();
+
+{% endif %}
+</script>
+{% endblock %}

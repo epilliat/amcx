@@ -176,7 +176,7 @@ def run_benchmark(shrink: float,
                 feats = extract_features(
                     warped, b, ratios_by_q[q], copy_baseline,
                     offset=offsets.get(q, (0, 0)),
-                    ref=ref, ref_corners=ref_frames.get((q, a)),
+                    ref=ref, ref_corners=ref_frames.get((q, char)),
                 )
                 x = np.array([[feats[k] for k in clf_bundle["feature_cols"]]],
                              dtype=np.float64)

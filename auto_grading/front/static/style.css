@@ -56,6 +56,17 @@
   --sel:         #c026a8;
 }
 
+/* ⚠ `[hidden]` doit gagner contre les règles de classe.
+   La règle du navigateur (`[hidden] { display: none }`) est de spécificité 0,
+   donc n'importe quel sélecteur de classe qui pose un `display` la bat : un
+   élément marqué `hidden` en JS restait affiché. Constaté sur
+   `#createProjectAmcRow`, un `.pm-modal-field { display: flex }` — le champ
+   « Fichier AMC » s'affichait aussi pour le template fourni. Trois règles
+   ponctuelles (`.pm-modal[hidden]`, `.block-ctx-menu[hidden]`…) rattrapaient
+   déjà le coup au cas par cas ; celle-ci vaut pour tout le reste. */
+[hidden] { display: none !important; }
+
+
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -176,12 +187,14 @@ h1 .small { font-weight: 400; color: #888; font-size: 14px; }
 .cell-mark.sel:hover { stroke: #b02890; }
 .cell-mark.busy      { stroke: rgba(208, 64, 176, 0.25); }
 
-/* ⚠ Le rond PLEIN veut dire « lu comme coché ». Une case signalée mais non
-   cochée n'avait donc aucune marque sur l'image — 78 % des signalements
-   d'EXAM_2026. Le halo pointillé dit « à relire », et disparaît une fois la
-   case traitée. */
+/* ⚠ Le rond PLEIN magenta veut dire « lu comme coché » — une DÉCISION. Une case
+   signalée mais non cochée n'avait donc aucune marque sur l'image (78 % des
+   signalements d'EXAM_2026) : le halo pointillé dit « à relire », et disparaît
+   une fois la case traitée. Il est ORANGE, pas magenta : le doute de
+   l'algorithme n'est pas une décision, et deux marques magenta sur la même
+   image se lisaient comme deux façons de dire « cochée ». */
 .cell-halo {
-  fill: none; stroke: #d040b0;
+  fill: none; stroke: #e8820c;
   /* ⚠ Le viewBox est la page canonique (~2480 px) ramenée à ~600 px à
      l'écran : une épaisseur en unités utilisateur y devient sous-pixel et le
      halo disparaît. `non-scaling-stroke` la fixe en pixels écran. Le tireté,
@@ -212,7 +225,7 @@ h1 .small { font-weight: 400; color: #888; font-size: 14px; }
 
 /* Zoom page */
 .legend { font-size: 12px; color: #666; margin: 4px 0 0; }
-.legend-filled { color: #2a8; font-weight: bold; }
+.legend-filled { color: #a01f86; font-weight: bold; }
 .legend-empty { color: #888; }
 .legend-correct { color: #c80; font-weight: bold; }
 .status {
@@ -256,15 +269,22 @@ img.case {
   transition: border-color 0.1s, transform 0.05s;
 }
 img.case:hover { transform: scale(1.05); }
-img.case.selected { border-color: #5a8; border-width: 3px; }
-img.case.diff { box-shadow: 0 0 0 3px #f80; }
-img.case.selected.diff { box-shadow: 0 0 0 3px #f80; }
-img.case.doubtful { box-shadow: 0 0 0 3px #d040b0; }
-img.case.selected.doubtful { box-shadow: 0 0 0 3px #d040b0; }
-/* Signalée PUIS traitée : vert. Sans ça, deux passes de relecture sont
-   indistinguables et on rouvre indéfiniment les mêmes cases. */
-img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8; }
-.seen-mark { color: #2a8; font-weight: bold; }
+/* ⚠ Une couleur, un sens, dans TOUTES les vues de correction :
+   magenta = la décision courante (case comptée comme cochée, chiffre retenu),
+   qu'elle vienne du modèle ou d'un clic ; orange = un doute de l'algorithme,
+   dit par un glyphe sous la case et jamais par un liseré ; gris = déjà traité.
+   Avant, le vert disait à la fois « cochée » et « relue », et le magenta à la
+   fois « cochée » (vue copie) et « douteuse » (zoom) — un liseré ne se lisait
+   qu'en se rappelant sur quelle page on était. */
+img.case.selected { border-color: #d040b0; border-width: 3px; }
+img.case.diff, img.case.selected.diff { box-shadow: none; }
+img.case.doubtful, img.case.selected.doubtful { box-shadow: none; }
+/* Signalée PUIS traitée : le glyphe orange (? ou ⚠) devient un ✓ gris. Sans
+   marque, deux passes de relecture sont indistinguables et on rouvre
+   indéfiniment les mêmes cases — mais « traité » n'est pas un état de la case,
+   c'est un état de la relecture : il reste en gris, hors du code couleur. */
+img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: none; }
+.seen-mark { color: #6b7280; font-weight: bold; }
 
 /* Deux zones côte à côte (positifs / négatifs) — remplace l'encadré vert */
 .cases-row {
@@ -279,7 +299,10 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
   border-radius: 5px;
   padding: 6px 8px;
 }
-.cases-positifs { background: #f0f9f0; border: 1px dashed #4a8; }
+/* La zone « Positifs » EST la décision « cochée » : elle prend donc la teinte
+   magenta des cases qu'elle contient. En vert, elle donnait une troisième
+   couleur au même sens. */
+.cases-positifs { background: #fdf5fa; border: 1px dashed #dda6cd; }
 .cases-negatifs { background: #fafafa;  border: 1px dashed #ccc; }
 .cases-zone-label {
   font-size: 11px;
@@ -289,7 +312,7 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
   margin-bottom: 4px;
   letter-spacing: 0.02em;
 }
-.cases-positifs .cases-zone-label { color: #2a6c41; }
+.cases-positifs .cases-zone-label { color: #a01f86; }
 .cases-zone-grid {
   display: flex;
   flex-wrap: wrap;
@@ -342,10 +365,6 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
 
 /* ===================== Réglages (pondération) ===================== */
 .settings-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
   padding: 10px 12px;
   background: #f7f8fa;
   border: 1px solid #ececf0;
@@ -353,15 +372,122 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
   margin-bottom: 14px;
   font-size: 13px;
 }
-.settings-title { font-weight: 600; color: #444; }
-.settings-bar label { display: flex; align-items: center; gap: 4px; }
-.settings-bar input[type=number] {
-  width: 66px;
-  padding: 4px 6px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+.settings-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 10px;
 }
-.settings-hint { color: #999; font-size: 11px; }
+.settings-grow { flex: 1 1 auto; }
+.settings-title { font-weight: 600; color: var(--tx-soft); }
+.settings-check { display: flex; align-items: center; gap: 5px; margin-top: 10px;
+                  color: var(--tx-soft); }
+.settings-hint { color: var(--tx-muted); font-size: 11px; }
+
+/* --- curseur : glissière + saisie numérique -------------------------------
+   ⚠ Une seule apparence pour TOUS les réglages chiffrés du tableau de bord.
+   Les bornes viennent du serveur (`slider_ranges`), calées sur le barème du
+   projet — la glissière s'élargit si on tape hors bornes (cf. `grow()`). */
+.sl-grid {
+  display: grid;
+  /* Plafond de 320 px : un curseur seul sur sa ligne (le poids d'agrégation)
+     s'étirait sur toute la largeur, d'où deux gabarits pour un même réglage. */
+  grid-template-columns: repeat(auto-fit, minmax(210px, 320px));
+  justify-content: start;
+  gap: 8px 18px;
+}
+.sl { min-width: 0; }
+/* Étiquette de l'état « éteint » (auto), affichée à côté du libellé — le champ
+   montre alors la valeur appliquée, il faut dire d'où elle vient. */
+.sl-tag {
+  display: none;
+  margin-left: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: var(--tx-muted);
+  background: var(--sf-tag);
+  border-radius: 8px;
+}
+.sl.is-off .sl-tag { display: inline; }
+.sl-label {
+  display: block;
+  font-size: 11px;
+  color: var(--tx-muted);
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sl-ctl { display: flex; align-items: center; gap: 8px; }
+.sl-num {
+  width: 62px;
+  flex: 0 0 auto;
+  padding: 3px 5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--sf);
+}
+.sl-num:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.sl.is-off .sl-num { color: var(--tx-muted); }
+.sl-reset {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  padding: 0;
+  font-size: 12px; line-height: 1;
+  color: var(--tx-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.sl-reset:hover { background: var(--ac-bg); border-color: var(--ac-bd); color: var(--tx); }
+/* Déjà à « aucun » / « auto » : le bouton n'a plus rien à faire, mais il garde
+   sa place — sans quoi la ligne se décale au premier clic. */
+.sl.is-off .sl-reset { visibility: hidden; }
+
+.sl-range {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 60px;
+  height: 4px;
+  margin: 0;
+  border-radius: 3px;
+  cursor: pointer;
+  background: linear-gradient(to right,
+              var(--ac) var(--p, 0%), #dfe3ea var(--p, 0%));
+}
+.sl.is-off .sl-range {
+  background: linear-gradient(to right,
+              #c3c7cf var(--p, 0%), #e7e9ee var(--p, 0%));
+}
+.sl-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--sf);
+  border: 2px solid var(--ac);
+  box-shadow: 0 1px 3px rgba(0,0,0,.22);
+  cursor: pointer;
+}
+.sl-range::-moz-range-thumb {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--sf);
+  border: 2px solid var(--ac);
+  box-shadow: 0 1px 3px rgba(0,0,0,.22);
+  cursor: pointer;
+}
+.sl.is-off .sl-range::-webkit-slider-thumb { border-color: #b3b8c2; }
+.sl.is-off .sl-range::-moz-range-thumb { border-color: #b3b8c2; }
+.sl-range:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 
 /* ===================== Modale ===================== */
 .modal-overlay {
@@ -836,9 +962,10 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
 .label-diff { color: #c40; }
 .diff-mark { color: #f80; font-weight: bold; }
 .legend-diff { color: #f80; font-weight: bold; }
-.label-doubt { color: #903080; }
-.doubt-mark { color: #d040b0; font-weight: bold; }
+.label-doubt { color: #c4600c; }
+.doubt-mark { color: #e8820c; font-weight: bold; }
 .legend-doubtful { color: #d040b0; font-weight: bold; }
+.legend-doubt { color: #e8820c; font-weight: bold; }
 .legend-ambig { color: #cc8; font-weight: bold; }
 .row-diff { background: #fff3e0 !important; }
 .diff-cell { color: #c40; font-weight: 600; }
@@ -859,7 +986,6 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
   gap: 6px;
   border-left: 4px solid #fb0;
 }
-.flagged-row[data-validated="1"] { border-left-color: #2a8; }
 .flagged-row.clickable { cursor: pointer; transition: background 0.1s; }
 .flagged-row.clickable:hover { background: #fafaff; }
 .flagged-student {
@@ -881,37 +1007,24 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
 .student-link { color: #06c; text-decoration: none; }
 .student-link:hover { text-decoration: underline; }
 .btn-small { padding: 2px 8px; font-size: 12px; }
-.flagged-row.is-done { border-left-color: #2a8; opacity: 0.55; }
-.flagged-row.is-done:hover { opacity: 1; }
-.flagged-student .cell-count.rev-open-count { background: #fdeaf6; color: #a01f86; }
-.flagged-row.is-done .cell-count.rev-open-count { background: #e7f6ef; color: #197a52; }
-.rev-progress { font-size: 13px; }
 .flagged-list .status, header .status { min-width: 0; flex: 0 0 auto; }
 .rev-empty { padding: 24px; color: #6b7280; font-size: 14px; }
 .filters-sep { display: inline-block; width: 14px; }
-.legend-context { color: #9aa1ac; font-weight: 600; }
 .badge-validated { background: #2a8; color: white; }
-.rev-id-hint {
-  font-size: 12px; color: #6b7280;
-  background: #fff8f0; border: 1px solid #f2e0c9;
-  border-radius: 4px; padding: 5px 8px;
-}
-.rev-id-hint code { background: #fff; padding: 0 4px; border-radius: 3px; }
 
-/* Un bloc = une question. Les cases non signalées restent visibles, en
-   contexte : juger « aucune réponse lue » demande de voir la question entière. */
+/* Un bloc = une question, toutes ses cases sur une ligne : juger « aucune
+   réponse lue » demande de voir la question entière, et le liseré magenta dit
+   déjà lesquelles comptent comme cochées. */
 .rev-q {
   border: 1px solid #eceef1; border-radius: 5px;
   padding: 6px 8px; background: #fcfcfd;
 }
-.rev-q.is-done { opacity: 0.5; }
-.rev-q.is-done:hover { opacity: 1; }
 .rev-q-head {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   font-size: 12px; margin-bottom: 5px;
 }
 .rev-reason {
-  background: #fdeaf6; color: #a01f86;
+  background: #fff3e0; color: #c4600c;
   padding: 1px 7px; border-radius: 3px; font-weight: 600;
 }
 .rev-cells { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -924,23 +1037,21 @@ img.case.doubtful.reviewed, img.case.diff.reviewed { box-shadow: 0 0 0 3px #2a8;
      l'œil du relecteur au fil du défilement. */
   min-width: 34px; min-height: 34px; background: #f4f5f7;
 }
-.rev-case.is-context img.case { opacity: 0.42; }
-.rev-case.is-context:hover img.case { opacity: 1; }
-.rev-case.is-selected img.case { border-color: #444; }
-.rev-case.is-flagged img.case { box-shadow: 0 0 0 3px #d040b0; }
-.rev-case.is-flagged.is-reviewed img.case { box-shadow: 0 0 0 3px #2a8; }
+/* ⚠ Le magenta dit la DÉCISION courante — « cette case compte comme cochée » —,
+   qu'elle vienne du modèle ou d'un clic ; c'est le même sens que le rond plein
+   de la vue copie. Il ne dit PAS le doute : toutes les cases affichées ici
+   appartiennent à une question douteuse, un liseré posé là-dessus ne
+   distinguerait rien. Le doute de l'algorithme est un « ? » orange sous la
+   case. */
+.rev-case.is-selected img.case { box-shadow: 0 0 0 3px #d040b0; }
+.rev-doubt {
+  color: #e8820c; font-weight: 700; cursor: help; line-height: 1;
+}
 .rev-case .case-label {
   font-size: 10px; line-height: 1.3;
   display: flex; align-items: center; justify-content: center; gap: 3px;
 }
 .rev-case .ch { font-weight: 700; }
-.rev-seen {
-  border: 1px solid #d5d8dd; background: white; color: #6b7280;
-  border-radius: 3px; cursor: pointer;
-  font-size: 10px; line-height: 1; padding: 1px 4px;
-}
-.rev-seen:hover { border-color: #2a8; color: #2a8; }
-.rev-case.is-reviewed .rev-seen { background: #2a8; border-color: #2a8; color: white; }
 .amb-mark { color: #fb0; font-weight: bold; }
 
 /* Top nav */
@@ -1108,25 +1219,112 @@ img.case.correct + .case-label { font-weight: bold; }
   border-radius: 8px;
   padding: 14px 16px;
 }
-.gs-title { margin: 0 0 12px; font-size: 15px; }
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+.gs-title { margin: 0 0 6px; font-size: 15px; }
+/* Récapitulatif de la DISTRIBUTION, sur une ligne. Les compteurs de relecture
+   (validées, à revoir, cases douteuses) vivaient ici en dix grosses cartes :
+   ils redisaient la carte « Fichiers du projet » et l'onglet Review rapide. */
+.gs-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--tx-muted);
+}
+.gs-stats b {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--tx-strong);
+  font-variant-numeric: tabular-nums;
+  margin-right: 2px;
+}
+.gs-stats-of { font-weight: 600; color: var(--tx-soft); }
+
+/* --- Évaluation : un examen, sans réglage --------------------------------
+   ⚠ Un réglage de note conservé en config mais plus appliqué ici doit se
+   VOIR : la note change, et c'est elle qui part à la scolarité. */
+.eval-legacy {
+  border: 1px solid #f0c36d;
+  background: #fdf6e3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.eval-legacy .small { color: var(--tx-muted); margin-top: 3px; }
+.eval-actions {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
-.stat-card {
-  background: #f7f8fa;
-  border: 1px solid #ececf0;
-  border-radius: 7px;
-  padding: 10px 8px;
-  text-align: center;
+.eval-questions { border-top: 1px solid #eee; padding-top: 12px; }
+.eq-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
 }
-.stat-card .num { font-size: 20px; font-weight: 800; color: #222; }
-.stat-card .label { font-size: 11px; color: #888; margin-top: 2px; }
-.stat-card.sc-ok .num { color: #2a8; }
-.stat-card.sc-warn .num { color: #e07a00; }
-.stat-card.sc-hi .num { color: #06c; }
+.eq-head h3 { margin: 0; font-size: 13px; }
+.eq-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.eq-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--tx-soft);
+  border-bottom: 1px solid #e0e0e0;
+  padding: 4px 8px;
+}
+.eq-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #f2f2f2;
+}
+.eq-table tr:last-child td { border-bottom: none; }
+/* Les colonnes de chiffres s'alignent et se comparent d'un coup d'œil : une
+   moyenne par question ne sert qu'à repérer celle qui décroche. */
+.eq-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Vue d'ensemble : plusieurs examens d'un même dossier ------------------
+   ⚠ Les graphiques ont ici toute la largeur de la fenêtre, alors qu'ils
+   vivaient dans la colonne droite du tableau de bord : `.hist-svg { width:
+   100% }` les étirait à 1400 px de large pour 210 d'unités utilisateur, et le
+   nuage de points devenait illisible. On borne. */
+.coh { max-width: 1200px; }
+.coh .hist-svg { max-width: 760px; }
+.coh .scatter-box .hist-svg { max-width: 560px; }
+.coh-intro { max-width: 720px; }
+.coh-intro .modal-hint { margin: 8px 0 14px; }
+.coh .gs-title .settings-hint { font-weight: 400; margin: 0 8px; }
+/* Le libellé d'un examen porte son barème et son bouton de retrait : sans
+   largeur propre, le ✕ passait à la ligne sous le nom. */
+.coh .param-label { flex: 0 0 230px; display: flex; align-items: baseline; gap: 6px; }
+.coh .param-label .small { color: var(--tx-muted); font-weight: 400; }
+.coh-candidates { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.coh-candidates .small { color: var(--tx-muted); }
+.coh-table td { vertical-align: baseline; }
+/* Une copie non reliée ne porte la note de personne : elle est grisée. */
+.coh-unlinked { color: var(--tx-muted); font-style: italic; }
+.coh-abs { color: #b26a00; font-weight: 600; }
+#coh-search { font-size: 12px; padding: 3px 8px; }
+.coh-mailcmd { margin-top: 8px; font-size: 12px; color: var(--tx-muted); }
+.coh-mailcmd pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: #f5f5f7;
+  border-radius: 5px;
+  overflow-x: auto;
+  font-size: 11.5px;
+  color: var(--tx-strong);
+}
 
 /* --- histogramme SVG --- */
 .histogram { border-top: 1px solid #eee; padding-top: 12px; }
@@ -1154,17 +1352,14 @@ img.case.correct + .case-label { font-weight: bold; }
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 14px;
-  padding: 3px 0;
+  padding: 5px 0;
   font-size: 13px;
 }
-.param-label { min-width: 150px; font-weight: 600; }
+.param-row + .param-row { border-top: 1px solid #ececf0; }
+.param-label { flex: 0 0 150px; font-weight: 600; }
+/* La grille de curseurs prend la place restante de la ligne. */
+.param-row .sl-grid { flex: 1 1 280px; }
 .param-row label { display: flex; align-items: center; gap: 4px; color: #555; }
-.param-row input[type=number] {
-  width: 72px;
-  padding: 4px 6px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-}
 
 /* --- bloc formule (à donner aux étudiants) --- */
 .formula-box {
@@ -1243,22 +1438,60 @@ img.case.correct + .case-label { font-weight: bold; }
 }
 .sujet-left { flex: 1 1 auto; min-width: 0; }
 .sujet-right {
-  flex: 0 0 420px; position: sticky; top: 118px;
+  /* Largeur pilotée par la poignée (`--pv-w`), persistée par l'utilisateur. */
+  flex: 0 0 var(--pv-w, 420px); position: sticky; top: 118px;
   max-height: calc(100vh - 132px);
   display: flex; flex-direction: column;
+  min-width: 0;
 }
+
+/* Poignée entre l'éditeur et l'aperçu. Elle est fine mais sa zone de saisie
+   est élargie par un pseudo-élément : 4 px de cible sont inattrapables. */
+/* ⚠ UNE SEULE déclaration `position`. La règle en portait deux — `sticky`
+   puis `relative` — et la seconde gagnait : la poignée restait collée en haut
+   de la colonne au lieu de suivre le défilement, donc inattrapable dès qu'on
+   descendait dans le sujet. Elle est `sticky` comme les deux panneaux qu'elle
+   sépare, et couvre toute la hauteur visible. */
+.sujet-gutter {
+  flex: 0 0 6px;
+  position: sticky; top: 118px; height: calc(100vh - 132px);
+  border-radius: 3px; cursor: col-resize; background: transparent;
+}
+/* Cible élargie (4 px sont inattrapables) + repère central en pointillé, qui
+   dit que la barre se saisit — au repos le trait seul passait inaperçu. */
+.sujet-gutter::before {
+  content: ""; position: absolute; inset: 0 -6px;
+  background: repeating-linear-gradient(#9aa1ad 0 2px, transparent 2px 5px)
+              no-repeat center / 2px 28px;
+}
+.sujet-gutter::after {
+  content: ""; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px;
+  border-radius: 1px; background: #cfd3da;
+}
+.sujet-gutter:hover::before,
+.sujet-gutter:focus-visible::before {
+  background: repeating-linear-gradient(#fff 0 2px, transparent 2px 5px)
+              no-repeat center / 2px 28px;
+}
+.sujet-gutter:hover::after,
+.sujet-gutter:focus-visible::after { background: var(--accent, #2769d8); }
+.sujet-gutter:focus-visible { outline: none; }
+body.pv-resizing { cursor: col-resize; user-select: none; }
+/* Pendant le glissement, les iframes/images ne doivent pas avaler le pointeur. */
+body.pv-resizing .sujet-right, body.pv-resizing .sujet-left { pointer-events: none; }
+.sujet-split.no-preview .sujet-gutter { display: none; }
 .preview-panel {
   background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px;
   display: flex; flex-direction: column;
   flex: 1; min-height: 0;
 }
+/* Le bandeau ne porte plus qu'un avertissement (« pas dans le PDF compilé ») :
+   vide, il ne doit pas réserver de place au-dessus de l'aperçu. */
 .preview-title {
   font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
-  color: #888; margin-bottom: 4px;
+  color: #b45309; margin-bottom: 4px;
 }
-.preview-hint-small {
-  font-size: 10px; color: #aaa; margin-bottom: 6px;
-}
+.preview-title:empty { display: none; }
 /* Conteneur scrollable qui contient la page PDF en image. La hauteur est
    maximale (prend tout l'espace dispo dans .sujet-right) → on voit beaucoup
    plus de PDF qu'avec le simple crop précédent. */
@@ -1330,33 +1563,51 @@ img.case.correct + .case-label { font-weight: bold; }
 
 /* Lightbox plein écran : on embed directement le PDF (navigation native du
    navigateur, ouvert sur la page de la question via `#page=N`). */
+/* Vue agrandie = fenêtre flottante. Pas de fond opaque et pas d'`inset: 0` :
+   l'éditeur reste visible ET cliquable derrière, ce qui permet d'aller-retour
+   entre les deux sans fermer la fenêtre. Position et taille sont posées en JS
+   et persistées. */
 .preview-zoom {
-  position: fixed; inset: 0;
-  z-index: 800;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,.82);
+  position: fixed; z-index: 800;
+  left: 6vw; top: 8vh; width: 60vw; height: 78vh;
+  min-width: 320px; min-height: 120px;
 }
-.preview-zoom[hidden] { display: none; }
 .preview-zoom-card {
-  background: #fff; border-radius: 6px;
-  width: 92vw; height: 94vh;
-  display: flex; flex-direction: column;
-  box-shadow: 0 8px 40px rgba(0,0,0,.5);
+  background: #fff; border: 1px solid #c9ccd4; border-radius: 8px;
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0,0,0,.35);
 }
 .preview-zoom-head {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 14px;
-  border-bottom: 1px solid #e3e3e8;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid #e3e3e8; background: #f5f6f8;
+  cursor: move; user-select: none;
 }
 .preview-zoom-title {
-  flex: 1; font-size: 13px; color: #333;
+  flex: 1; font-size: 12px; color: #333;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.preview-zoom-close {
-  background: none; border: 1px solid #ccc;
-  padding: 4px 12px; border-radius: 4px;
-  cursor: pointer; font-size: 13px;
+.preview-zoom-btn {
+  flex: 0 0 auto; width: 24px; height: 22px;
+  background: #fff; border: 1px solid #ccc; border-radius: 4px;
+  cursor: pointer; font-size: 12px; line-height: 1; color: #444;
 }
-.preview-zoom-close:hover { background: #f3f4f7; }
+.preview-zoom-btn:hover { background: #eceff4; }
+.preview-zoom-close:hover { background: #f6dede; border-color: #e0b4b4; }
+/* Réduite : seul le bandeau reste, la fenêtre ne gêne plus l'édition. */
+.preview-zoom.is-min { height: auto !important; min-height: 0; }
+.preview-zoom.is-min .preview-zoom-body,
+.preview-zoom.is-min .preview-zoom-grip { display: none; }
+.preview-zoom-grip {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 0 45%, #b9bec8 45% 55%, transparent 55% 70%,
+                    #b9bec8 70% 80%, transparent 80%);
+}
+body.pv-winmove { user-select: none; }
+body.pv-winmove .preview-zoom-body { pointer-events: none; }
 /* Vue agrandie : mêmes pages + mêmes cadres que le panneau, en plus grand.
    Le PDF natif reste accessible par « 📄 Voir le PDF » de la toolbar. */
 .preview-zoom-body {
@@ -1385,6 +1636,46 @@ img.case.correct + .case-label { font-weight: bold; }
 .sujet-total strong { color: #06c; font-size: 17px; }
 .sujet-hint { color: #888; font-size: 12px; }
 .sujet-toolbar-right { display: flex; gap: 8px; }
+
+/* Menu « 📤 Publier » de la toolbar Sujet : sujet vierge et corrigé.
+   ⚠ Le panneau est 3 fois plus large que son bouton, et la barre d'outils
+   se replie sur elle-même en fenêtre étroite : le bouton se retrouve tantôt
+   contre le bord droit, tantôt contre le bord gauche. Aucun ancrage fixe ne
+   tient les deux cas — `openPubMenu()` mesure et décale (mesuré : ancré à
+   droite, le panneau sortait de 61 px à gauche de l'écran). */
+.pub-menu { position: relative; }
+.pub-dropdown {
+  position: absolute; top: calc(100% + 6px); left: 0;
+  background: #fff;
+  border: 1px solid #d0d0d8;
+  border-radius: 7px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.18);
+  width: 330px;
+  padding: 4px 0;
+  z-index: 500;
+  text-align: left;
+}
+.pub-head {
+  padding: 8px 14px 4px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: #888;
+}
+.pub-item {
+  display: block; width: 100%;
+  text-align: left;
+  background: none; border: none;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.pub-item:hover { background: #f0f3f7; }
+.pub-item-t { display: block; font-size: 13px; font-weight: 600; color: #222; }
+.pub-item-d { display: block; font-size: 12px; color: #6b7280; margin-top: 2px; }
+.pub-note {
+  padding: 8px 14px 6px;
+  margin-top: 4px;
+  border-top: 1px solid #eef0f4;
+  font-size: 11.5px; color: #6b7280;
+}
 .sujet-empty { color: #c66; padding: 20px; }
 
 .sujet-q {
@@ -3116,7 +3407,10 @@ img.case.correct + .case-label { font-weight: bold; }
   align-items: flex-start;
 }
 .banque-list-panel {
-  flex: 0 0 280px;
+  /* 280 px suffisaient tant que la banque était vide. Avec de vrais titres et
+     une vraie catégorie sur chaque ligne, le titre y tombait à « Conclure… » ;
+     le panneau de détail, lui, avait 1 100 px dont la moitié inoccupée. */
+  flex: 0 0 340px;
   position: sticky; top: 16px;
   background: #fff; border: 1px solid #e3e4e8; border-radius: 6px;
   padding: 12px;
@@ -3158,7 +3452,7 @@ img.case.correct + .case-label { font-weight: bold; }
 .banque-q-row:hover { background: #f0f3f7; }
 .banque-q-row.active { background: #d6e3fb; color: #1f4f9e; }
 .banque-q-icon { color: #666; flex-shrink: 0; }
-.banque-q-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.banque-q-title { flex: 1 1 55%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .banque-q-mine { color: #aa4f00; font-size: 11px; }
 .banque-q-status {
   font-size: 10px; padding: 1px 5px; border-radius: 8px; font-weight: 500;
@@ -4002,7 +4296,7 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 /* `.banque-q-row` est un flex : le chemin se pose en colonne de droite, pas
    sur une 2e ligne. Il est borné pour ne jamais écraser le titre. */
 .banque-q-row .bq-cat-path {
-  flex: 0 1 auto; max-width: 45%;
+  flex: 0 1 auto; max-width: 38%;
   font-size: 10.5px; color: var(--tx-muted); text-align: right;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -4054,13 +4348,6 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 }
 .rev-inline.is-open { color: #a01f86; background: #fdeaf6; }
 .rev-inline a { color: inherit; }
-.rev-done-fold > summary {
-  cursor: pointer; font-size: 12px; color: #6b7280;
-  padding: 3px 2px; list-style-position: inside;
-}
-.rev-done-fold > summary:hover { color: #374151; }
-.rev-done-fold[open] > summary { margin-bottom: 5px; }
-.rev-done-fold .rev-q { margin-bottom: 5px; }
 
 /* ---- Import de la liste étudiants : aperçu + colonnes par index ---- */
 .modal.modal-wide { width: min(860px, 94vw); }
@@ -4084,6 +4371,45 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .rl-preview .rl-col-id { background: #eaf3ff; font-weight: 600; }
 .rl-preview .rl-col-nom { background: #eafaf0; }
 .rl-preview .rl-col-prenom { background: #f4f1fd; }
+.rl-preview .rl-col-mail { background: #fdf6e9; }
+/* ---- Choix de l'onglet (classeur à plusieurs feuilles) ----
+   Affiché seulement s'il y en a plusieurs, et RIEN n'est présélectionné : lire
+   d'office l'onglet actif du classeur — celui qui était sélectionné au dernier
+   enregistrement — donnait une liste plausible et fausse. */
+.rl-sheets {
+  margin: 10px 0 4px;
+  padding: 9px 11px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-bd);
+  border-radius: 6px;
+}
+.rl-sheets-title { font-size: 13px; font-weight: 600; color: #8a5a00; margin-bottom: 7px; }
+.rl-sheet-list { display: flex; flex-wrap: wrap; gap: 7px; }
+.rl-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  max-width: 260px;
+  padding: 6px 10px;
+  text-align: left;
+  background: var(--sf);
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+  cursor: pointer;
+  font: inherit;
+}
+.rl-sheet:hover { border-color: var(--ac-bd); background: var(--ac-bg); }
+.rl-sheet.is-active { border-color: var(--ac); box-shadow: inset 0 0 0 1px var(--ac); }
+.rl-sheet-name {
+  font-size: 13px; font-weight: 600; color: var(--tx-strong);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rl-sheet-meta { font-size: 11px; color: var(--tx-muted); }
+/* Onglet sans aucun étudiant lisible : proposé quand même (les colonnes se
+   choisissent à la main), mais il ne doit pas se confondre avec les autres. */
+.rl-sheet.is-empty .rl-sheet-name { color: var(--tx-muted); font-weight: 500; }
+
 .rl-fields { display: flex; flex-wrap: wrap; gap: 10px; }
 .rl-fields .modal-field { flex: 1 1 170px; margin: 0; }
 .rl-fields select, .rl-fields input { max-width: 100%; }
@@ -4097,6 +4423,12 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .rl-report-head { font-weight: 600; }
 .rl-report .rl-problem { margin-top: 4px; color: #8a5a00; }
 .rl-report.is-bad .rl-problem { color: #a12; }
+/* Quel onglet d'un classeur porte la liste : deux onglets = deux promos. */
+.pf-sheet {
+  font-size: 11px; color: var(--tx-muted);
+  background: var(--sf-tag); border-radius: 8px; padding: 1px 7px;
+  margin-left: 4px; white-space: nowrap;
+}
 .pf-warn-line {
   font-size: 12px; color: #8a5a00; background: #fff8e8;
   border: 1px solid #f0dfb5; border-radius: 4px;
@@ -4115,3 +4447,375 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
    se coupe en trois lignes et casse l'alignement de la rangée. */
 .rl-fields .rl-field-start { flex: 0 0 150px; }
 .rl-fields .rl-field-start input { width: 100%; }
+
+/* Bandeau d'avertissement au démarrage (import AMC non converti, …). Déposé
+   dans sessionStorage avant le redémarrage du serveur, affiché une fois. */
+.startup-notice {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin: 10px 14px 0; padding: 10px 12px;
+  border: 1px solid #e2b23c; border-left-width: 4px; border-radius: 6px;
+  background: #fdf6e3; color: #6b4e00; font-size: 13px; line-height: 1.45;
+}
+.startup-notice > span { flex: 1; }
+.startup-notice button {
+  flex: 0 0 auto; border: 0; background: transparent; cursor: pointer;
+  color: #6b4e00; font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.startup-notice button:hover { color: #000; }
+
+/* --- Sujet à plusieurs versions (groupes AMC) --------------------------- */
+/* Pastille de version sur chaque bloc : deux questions voisines dans la liste
+   peuvent partir sur deux sujets différents, il faut le voir. */
+.block-group-tag {
+  flex: 0 0 auto; padding: 1px 7px; border-radius: 9px;
+  font-size: 10px; font-weight: 600; letter-spacing: .02em;
+  background: #e7f0fd; color: #1c4fa1; border: 1px solid #b9d2f5;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.block-group-tag.is-common {
+  background: #f1f1f3; color: #5a5a63; border-color: #d8d8de;
+}
+/* Le tableau des versions a 6 colonnes : dans une piste de 280 px du bandeau
+   il est tronqué. Il prend donc toute la largeur. */
+.bd-group-versions { grid-column: 1 / -1; }
+.ver-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ver-table th {
+  text-align: left; font-weight: 600; color: #6b7280;
+  padding: 3px 6px; border-bottom: 1px solid #e3e3e8;
+}
+.ver-table td { padding: 3px 6px; border-bottom: 1px solid #f0f0f3; }
+.ver-table input[type=text] { width: 100%; min-width: 90px; }
+.ver-table input[type=number] { width: 62px; }
+.ver-table .ver-range, .ver-table .ver-n, .ver-table .ver-max {
+  font-variant-numeric: tabular-nums; color: #444;
+}
+/* Bascule champs ⇄ LaTeX brut : bouton + explication sur une ligne.
+   ⚠ `flex-direction: row` est indispensable : `.bd-field` impose `column`, et
+   sans l'écraser le `flex-basis` de la note s'appliquait à sa HAUTEUR — la
+   ligne mesurait 261 px au lieu de 60. */
+.bd-mode-switch {
+  display: flex; flex-direction: row; flex-wrap: wrap;
+  align-items: center; gap: 6px 8px;
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e3e3e8;
+}
+.bd-mode-switch button { flex: 0 0 auto; }
+.bd-mode-switch .field-note { flex: 1 1 200px; min-width: 0; }
+
+/* --- Proposition de décomposition d'un en-tête brut --------------------- */
+.hdr-detect-card { width: min(720px, 92vw); }
+.hdr-detect-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.hdr-detect-table th {
+  text-align: left; font-weight: 600; color: #6b7280; vertical-align: top;
+  padding: 5px 10px 5px 0; white-space: nowrap; width: 1%;
+}
+.hdr-detect-table td {
+  padding: 5px 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word;
+}
+.hdr-detect-table tr + tr th, .hdr-detect-table tr + tr td {
+  border-top: 1px solid #f0f0f3;
+}
+/* Ce qui n'a pas été reconnu doit se voir AVANT le bouton « Appliquer » :
+   c'est ce qui disparaîtra de l'en-tête imprimé. */
+.hdr-detect-left {
+  background: #fff7ed; border: 1px solid #fdba74; border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 10px; font-size: 12px;
+}
+.hdr-detect-left-title { color: #9a3412; margin-bottom: 4px; }
+.hdr-detect-left ul, #hdr-detect-left-list { margin: 0; padding-left: 18px; }
+#hdr-detect-left-list li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
+.ver-status { min-height: 16px; font-size: 11px; color: #6b7280; margin-top: 4px; }
+.ver-status.err { color: #b42318; }
+.ver-table .ver-del-cell { width: 26px; text-align: right; }
+.ver-actions { margin-top: 8px; }
+.ver-none { margin: 6px 0 0; }
+/* Le sort des questions d'une version supprimée est une décision : les deux
+   options tiennent sur deux lignes lisibles, pas sur une ligne de radios. */
+.ver-del-mode {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 6px 0; font-size: 13px; line-height: 1.4; cursor: pointer;
+}
+.ver-del-mode input { margin-top: 3px; flex: 0 0 auto; }
+
+/* Sélecteur de version d'un bloc : même gabarit que la pastille qu'il
+   remplace, pour ne pas gonfler la barre d'outils du bloc. */
+.block-group-sel {
+  flex: 0 0 auto; max-width: 140px;
+  padding: 1px 4px; border-radius: 9px;
+  font-size: 10px; font-weight: 600; letter-spacing: .02em;
+  background: #e7f0fd; color: #1c4fa1; border: 1px solid #b9d2f5;
+}
+.block-group-sel.is-common {
+  background: #f1f1f3; color: #5a5a63; border-color: #d8d8de;
+}
+.sujet-total-note { font-size: 11px; color: #6b7280; font-weight: 400; }
+
+/* --- Sélecteur de dossier (modale « Nouveau projet ») ------------------- */
+.pm-path-row { display: flex; gap: 6px; align-items: stretch; }
+.pm-path-row input[type=text] { flex: 1; min-width: 0; }
+.pm-path-row button { flex: 0 0 auto; white-space: nowrap; }
+
+.pm-browser {
+  margin-top: 6px; border: 1px solid #d8d8de; border-radius: 5px;
+  background: #fbfbfc; overflow: hidden;
+}
+.pm-browser-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 7px; border-bottom: 1px solid #e6e6ea; background: #f3f3f5;
+}
+.pm-browser-head code {
+  flex: 1; min-width: 0; font-size: 11px; color: #444;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pm-browser-up {
+  flex: 0 0 auto; width: 24px; height: 22px; border: 1px solid #ccc;
+  border-radius: 3px; background: #fff; cursor: pointer; line-height: 1;
+}
+.pm-browser-up:disabled { opacity: .4; cursor: default; }
+/* Hauteur fixe : la liste ne doit pas faire sauter la taille de la modale
+   d'un dossier à l'autre. */
+.pm-browser-list {
+  list-style: none; margin: 0; padding: 4px; max-height: 190px; min-height: 90px;
+  overflow-y: auto;
+}
+.pm-browser-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 4px 7px; border: 0; border-radius: 3px; background: transparent;
+  font: inherit; font-size: 12px; color: #222; text-align: left; cursor: pointer;
+}
+.pm-browser-item::before { content: "📁"; flex: 0 0 auto; font-size: 11px; }
+.pm-browser-item:hover { background: #e9eff9; }
+.pm-browser-tag {
+  margin-left: auto; padding: 0 6px; border-radius: 8px;
+  background: #e7f0fd; color: #1c4fa1; font-size: 10px; font-weight: 600;
+}
+.pm-browser-empty { padding: 8px; font-size: 12px; color: #777; }
+.pm-browser-actions {
+  display: flex; justify-content: flex-end; gap: 6px;
+  padding: 6px 7px; border-top: 1px solid #e6e6ea; background: #f3f3f5;
+}
+.pm-browser-spacer { flex: 1; }
+.pm-browser-new {
+  display: flex; gap: 6px; align-items: center;
+  padding: 6px 7px; border-top: 1px solid #e6e6ea; background: #fff;
+}
+.pm-browser-new input { flex: 1; min-width: 0; }
+.pm-browser-err {
+  padding: 5px 8px; border-top: 1px solid #f0d7d7;
+  background: #fdf1f1; color: #a12525; font-size: 11px;
+}
+/* Version d'un bloc dans la Structure : sans ce repère, un sujet à deux
+   versions affiche deux fois « Q1 … Q5 » sans dire laquelle est laquelle. */
+.outline-version {
+  flex: 0 0 auto; margin-left: auto; padding: 0 5px;
+  border-radius: 8px; font-size: 9px; font-weight: 600;
+  background: #e7f0fd; color: #1c4fa1; border: 1px solid #cfe0f8;
+  max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ===================== Onglet « Courriels » ===================== */
+.mailpage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+  gap: 16px;
+  padding: 14px 16px;
+  align-items: start;
+}
+@media (max-width: 1100px) { .mailpage { grid-template-columns: 1fr; } }
+.ml-col { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.ml-title { margin: 0; font-size: 16px; color: var(--tx-strong); }
+.ml-card {
+  background: var(--sf);
+  border: 1px solid var(--bd-faint);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.ml-card-head {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--tx-soft);
+  margin-bottom: 10px;
+}
+.ml-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 14px;
+}
+.ml-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px;
+            color: var(--tx-muted); min-width: 0; }
+.ml-field-narrow { max-width: 130px; }
+.ml-field-wide { margin-top: 12px; }
+.ml-field input, .ml-field select, .ml-field textarea {
+  padding: 5px 7px;
+  font-size: 13px;
+  color: var(--tx);
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+  background: var(--sf);
+  min-width: 0;
+}
+.ml-field textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.ml-field input:focus, .ml-field textarea:focus, .ml-field select:focus {
+  outline: 2px solid var(--focus); outline-offset: -1px;
+}
+/* Champs insérables : le gabarit se remplit au clic plutôt qu'en recopiant
+   une liste depuis la documentation. */
+.ml-fields-help { margin-top: 7px; font-size: 11px; color: var(--tx-muted); }
+.ml-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 7px;
+  margin: 2px 3px 0 0;
+  color: var(--ac);
+  background: var(--ac-bg);
+  border: 1px solid var(--ac-bd);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.ml-chip:hover { background: var(--sf); }
+.ml-note { margin-left: 6px; }
+.ml-path { margin-top: 8px; font-size: 11px; color: var(--tx-muted);
+           overflow-wrap: anywhere; }
+.ml-error {
+  padding: 9px 11px; border-radius: 6px; font-size: 13px;
+  color: #8a5a00; background: var(--warn-bg); border: 1px solid var(--warn-bd);
+}
+
+/* --- le secret : état, jamais valeur --- */
+.ml-secret { margin-top: 12px; border-top: 1px solid var(--bd-faint); padding-top: 10px; }
+.ml-secret-state { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.ml-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+.ml-badge-ok { color: #1e6b3a; background: #e7f6ec; border: 1px solid #a8d8b9; }
+.ml-badge-warn { color: #8a5a00; background: var(--warn-bg); border: 1px solid var(--warn-bd); }
+.ml-secret-help { margin-top: 8px; font-size: 12px; color: var(--tx-muted); }
+.ml-secret-help summary { cursor: pointer; color: var(--ac); }
+.ml-secret-help p { margin: 6px 0; line-height: 1.45; }
+
+/* --- aperçu --- */
+.ml-preview-who { margin-left: auto; max-width: 220px; font-size: 12px;
+                  padding: 3px 5px; border: 1px solid var(--bd); border-radius: 5px; }
+.ml-preview { border: 1px solid var(--bd-faint); border-radius: 6px; overflow: hidden; }
+.ml-preview-head {
+  padding: 7px 10px; font-size: 12px; color: var(--tx-soft);
+  background: var(--sf-bar); border-bottom: 1px solid var(--bd-faint);
+}
+.ml-preview-body {
+  margin: 0; padding: 11px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.55; color: var(--tx);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 340px; overflow: auto;
+}
+.ml-preview-body.is-bad { color: var(--danger); }
+
+/* --- envoi --- */
+.ml-send-counts { font-size: 13px; color: var(--tx-soft); margin-bottom: 8px; }
+.ml-warn { color: #8a5a00; }
+.ml-skipped { font-size: 12px; color: var(--tx-muted); margin-bottom: 8px; }
+.ml-skipped ul { margin: 5px 0 0; padding-left: 18px; }
+.ml-send-test { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 10px; }
+.ml-send-test .ml-field { flex: 1 1 auto; }
+.ml-send-all { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ml-force { font-size: 11px; color: var(--tx-muted); display: flex;
+            align-items: center; gap: 4px; }
+/* Bouton d'une action irréversible et sortante : il ne doit pas ressembler
+   aux boutons d'enregistrement voisins. */
+.btn.btn-danger {
+  color: #fff; background: var(--danger); border-color: var(--danger);
+}
+.btn.btn-danger:hover { background: #a02216; }
+.btn.btn-danger:disabled { opacity: .5; }
+.ml-progress { margin-top: 10px; }
+.ml-progress-step { font-size: 12px; color: var(--tx-soft); margin-bottom: 5px; }
+
+/* --- table des destinataires --- */
+.ml-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ml-table td { padding: 3px 6px; border-bottom: 1px solid #f2f4f7; }
+.ml-table tr.is-sent { color: var(--tx-muted); }
+.ml-t-mail { color: var(--tx-muted); overflow-wrap: anywhere; }
+.ml-t-score { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.ml-t-flag { width: 16px; color: #2a7d2a; }
+
+/* ==========================================================================
+   Variantes d'une question de banque
+   ========================================================================== */
+
+/* Dans la liste, un chef de groupe annonce combien de variantes il replie —
+   sinon rien ne distingue « une question » de « six formulations de la même »,
+   et l'on recrée un doublon qui existait déjà. */
+.bq-var-badge {
+  flex-shrink: 0; font-size: 10px; font-weight: 500;
+  padding: 1px 6px; border-radius: 8px;
+  background: #ece4f6; color: #5b3c8c;
+}
+
+.bq-variants {
+  margin: 10px 0 4px; padding: 8px 10px;
+  border: 1px solid var(--bd-faint); border-radius: 6px;
+  background: var(--sf-sunken);
+}
+.bq-var-head { font-size: 11.5px; color: var(--tx-muted); margin-bottom: 2px; }
+.bq-var-loading { font-size: 11.5px; color: var(--tx-muted); }
+.bq-var-list { display: flex; flex-direction: column; gap: 1px; margin: 6px 0; }
+.bq-var-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 6px; border-radius: 4px; font-size: 12px;
+}
+.bq-var-item:hover { background: var(--ac-bg); }
+.bq-var-item.is-current { background: #d6e3fb; }
+.bq-var-name {
+  flex: 1; min-width: 0; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit; color: inherit;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bq-var-name:hover { text-decoration: underline; }
+.bq-var-main { flex-shrink: 0; font-size: 10px; color: var(--tx-muted); }
+.bq-var-detach {
+  flex-shrink: 0; background: none; border: 0; cursor: pointer;
+  color: var(--tx-muted); font-size: 12px; line-height: 1; padding: 2px 4px;
+}
+.bq-var-detach:hover { color: var(--danger); }
+.bq-var-actions { margin-top: 6px; }
+
+/* Pendant un rattachement, un clic dans la liste ne veut plus dire
+   « affiche-la » mais « c'est de celle-ci qu'elle est une variante ». Le
+   bandeau et le curseur le disent : une liste qui change de sens en silence
+   se paye au premier clic. */
+.bq-link-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-bottom: 6px; padding: 6px 8px; border-radius: 4px;
+  background: var(--warn-bg); border: 1px solid var(--warn-bd);
+  font-size: 11.5px;
+}
+.banque-list-rows.is-linking .banque-q-row { cursor: crosshair; }
+.banque-list-rows.is-linking .banque-q-row:hover {
+  background: var(--warn-bg);
+  outline: 1px solid var(--warn-bd); outline-offset: -1px;
+}
+
+/* Choix de la variante à insérer, dans la modale « 📚 Banque » de /sujet.
+   La banque ne liste qu'un représentant par groupe : sans ce sélecteur, les
+   autres formulations seraient stockées et jamais imprimables. */
+.bank-card-variants {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  margin: 4px 0 0 22px;
+}
+.bank-card-vlabel { font-size: 10.5px; color: var(--tx-muted); }
+.bank-var-chip {
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10.5px; padding: 1px 7px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--bd-faint); background: var(--sf); color: var(--tx-soft);
+}
+.bank-var-chip:hover { border-color: var(--ac-bd); background: var(--ac-bg); }
+.bank-var-chip.is-picked {
+  background: #ece4f6; border-color: #b9a4d6; color: #5b3c8c; font-weight: 500;
+}

@@ -216,6 +216,28 @@ class Layout:
     def _question_name(self, q: int) -> str:
         return (self.question_names.get(q) or "").strip()
 
+    def pdf_page(self, page: int) -> int:
+        """Page du **PDF compilé** correspondant à la page `page` de cette copie.
+
+        ⚠ Le calage numérote les pages **par copie** : `\\page{2/1/58}` est la
+        1re page de la copie 2, soit la 3e page du PDF quand la copie 1 en fait
+        deux. Confondre les deux plaçait toutes les régions d'aperçu de la
+        seconde version sur les pages de la première.
+
+        `page_ids` est trié par (copie, page), ce qui est l'ordre d'impression :
+        l'index dans cette liste donne donc la page du PDF. Sans triplets
+        (calage sans code imprimé), on rend `page` inchangé — c'est exact pour
+        un sujet à une seule copie.
+        """
+        for i, (c, pg, _cs) in enumerate(self.page_ids):
+            if c == self.copy and pg == page:
+                return i + 1
+        return page
+
+    def pdf_page_map(self) -> dict:
+        """`{page de la copie → page du PDF}` pour toutes les pages du calage."""
+        return {pg: self.pdf_page(pg) for pg in self.pages}
+
     def copy_id_columns(self) -> list[int]:
         """Numéros des colonnes (au sens `question` AMC) formant la grille
         `\\AMCcode{copie}{N}` — vide si le sujet est `\\exemplaire{1}`."""

@@ -38,15 +38,33 @@ CONFIG_TEMPLATE = {
     "xlsx_id_idx": -1,
     "xlsx_nom_idx": -1,
     "xlsx_prenom_idx": -1,
+    "xlsx_mail_idx": -1,      # colonne courriel (-1 = aucune) — export seul
     "xlsx_data_start": 1,
+    # Onglet du classeur (xlsx) — "" = onglet actif du fichier. ⚠ L'onglet
+    # actif est celui qui était sélectionné au dernier enregistrement : sur
+    # un classeur à plusieurs onglets, il faut le demander (cf. la modale
+    # « Liste étudiants ») et l'écrire ici.
+    "xlsx_sheet": "",
     "export_template_xlsx": "",
     "grade_files": [],
     "hist_granularity": 1.0,
-    "qcm_seuil": 10.0,
+    "qcm_seuil": None,        # auto = barème maximal du sujet (cf. config.DEFAULTS)
     "qcm_max": 20.0,
     "qcm_agg_weight": 1.0,
     "final_threshold": 20.0,
     "pass_mark": 10.0,
+    # --- envoi des notes par courriel (onglet Courriels) -------------------
+    # ⚠ Aucun secret ici : `config.json` suit le projet quand on le partage.
+    # Le mot de passe vit dans `~/.config/amcx/smtp_password` (cf. mail_results).
+    "mail_subject":     "",          # "" = « MCQ results — <date> »
+    "mail_date":        "",          # date de l'épreuve, telle qu'affichée
+    "mail_sender":      "",          # adresse d'expédition
+    "mail_sender_name": "",          # nom affiché
+    "mail_smtp_host":   "smtp.gmail.com",
+    "mail_smtp_port":   465,
+    "mail_smtp_user":   "",          # "" = identique à mail_sender
+    "mail_score_col":   "note_finale",
+    "mail_max_score":   0,           # 0 = échelle déduite des réglages
     "question_floor": None,
     "question_ceiling": None,
     "total_floor": None,
@@ -95,6 +113,7 @@ def create_project(
     template: str = "examen_minimal",
     source_tex: Path | None = None,
     try_migrate: bool = True,
+    report: dict | None = None,
 ) -> Path:
     """Crée un projet AMCx à l'emplacement `dest`.
 
@@ -111,6 +130,11 @@ def create_project(
     Si une étape échoue après la création de `dest/`, on rollback en supprimant
     `dest/` — pour ne pas laisser de coquille incomplète qui rend la modale
     « Ouvrir » incohérente.
+
+    `report` : dict rempli en place avec `{migrated: bool, log: str}` pour un
+    import AMC. Une migration refusée n'est PAS une erreur — le projet reste
+    utilisable en legacy — mais elle doit remonter à l'utilisateur, sinon un
+    sujet non compris passe pour un import réussi.
     """
     dest = Path(dest).expanduser().resolve()
     if dest.exists() and any(dest.iterdir()):
@@ -149,7 +173,13 @@ def create_project(
         if template == "from_amc":
             shutil.copy(source_tex, sujet_dir / "exam.tex")
             if try_migrate:
-                _try_migrate_to_canonical(ag)
+                ok, log = _try_migrate_to_canonical(ag)
+                # Le projet est conservé même si la migration refuse : le sujet
+                # reste en legacy (lecture seule), il compile et se corrige.
+                # Mais l'appelant DOIT pouvoir le dire à l'utilisateur.
+                if report is not None:
+                    report["migrated"] = ok
+                    report["log"] = log
         else:
             (sujet_dir / "exam.tex").write_text(template_tex, encoding="utf-8")
     except Exception:
@@ -172,21 +202,33 @@ def _try_migrate_to_canonical(ag: Path) -> tuple[bool, str]:
 
     Retourne `(ok, message)`. Best-effort : un échec laisse le sujet en legacy.
     """
+    import json as _json
     import subprocess
     cmd = [
         sys.executable, "-c",
-        "import sys, os; sys.path.insert(0, os.environ['AG_DIR']); "
+        "import sys, os, json; sys.path.insert(0, os.environ['AG_DIR']); "
         "from sujet_store import migrate_to_canonical; "
-        "migrate_to_canonical()"
+        "print('AMCX-RESULT ' + json.dumps(migrate_to_canonical()))"
     ]
     env = {**__import__('os').environ, "AMCX_PROJECT_DIR": str(ag), "AG_DIR": str(ROOT)}
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            return True, "Migration vers canonique réussie."
-        return False, f"Migration échouée (code {r.returncode}) : {r.stderr.strip()[:300]}"
     except Exception as e:
         return False, f"Migration impossible : {e}"
+    if r.returncode != 0:
+        return False, f"Migration échouée (code {r.returncode}) : {r.stderr.strip()[:300]}"
+    # ⚠ Le code de retour ne suffit pas : `migrate_to_canonical` **rend**
+    # `{ok: False}` sans lever quand elle n'a pas su lire le sujet. L'ignorer
+    # faisait annoncer un import réussi sur un projet dont l'éditeur était vide
+    # et le barème nul (mesuré sur un sujet AMC à groupes : 0 bloc, total 0).
+    for line in reversed(r.stdout.splitlines()):
+        if line.startswith("AMCX-RESULT "):
+            try:
+                res = _json.loads(line[len("AMCX-RESULT "):])
+            except ValueError:
+                break
+            return bool(res.get("ok")), str(res.get("log") or "")
+    return False, "Migration : résultat illisible."
 
 
 # --- CLI -------------------------------------------------------------------

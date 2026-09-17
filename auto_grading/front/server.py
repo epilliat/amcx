@@ -35,7 +35,8 @@ from threading import Lock
 import cv2
 import fitz  # PyMuPDF — rendu des aperçus PDF
 import numpy as np
-from flask import Flask, Response, abort, jsonify, render_template, request, send_file, url_for
+from flask import (Flask, Response, abort, jsonify, redirect, render_template,
+                   request, send_file, url_for)
 from werkzeug.utils import secure_filename
 
 # Bootstrap : ajout du dossier d'installation sur sys.path pour importer
@@ -54,11 +55,27 @@ from cv_grade import (detect_mires, warp_to_canonical, load_layout,
 from student_list import StudentMatcher
 from score import score_copy, score_question
 from sujet_store import (parse_tex, save_questions, compile_pdf, SUJET_DIR,
+                         compile_publication, PUBLICATION_KINDS,
+                         PUBLICATION_PDF, PUBLICATION_LABEL,
                          amc_question_map, check_layout_consistency,
                          pop_store_warnings,
                          effective_spec, pdf_regions, render_bareme_examples,
-                         charmap_for_copy, letters_stale,
+                         charmap_for_copy, letters_stale, tex_to_amc,
+                         version_copy_ranges,
+                         region_copies as sujet_region_copies,
+                         update_version as sujet_update_version,
+                         header_to_raw as sujet_header_to_raw,
+                         answer_sheet_to_raw as sujet_answer_sheet_to_raw,
+                         HeaderBlock, AnswerSheetConfig,
+                         version_total_max as sujet_version_total_max,
+                         analyze_header_tex as sujet_analyze_header,
+                         add_version as sujet_add_version,
+                         delete_version as sujet_delete_version,
+                         restore_version as sujet_restore_version,
+                         set_block_group as sujet_set_block_group,
+                         COMMON_GROUP as sujet_common_group,
                          max_score as sujet_max_score, total_max as sujet_total_max,
+                         subject_total_max as sujet_subject_total_max,
                          parse_subject, subject_to_dict,
                          add_block as sujet_add_block,
                          delete_block as sujet_delete_block,
@@ -89,6 +106,17 @@ def _bank():
 from grade_imports import (read_table, analyze_table, match_report, set_name_override,
                            jsonable_cell, build_all_series, add_grade_file,
                            remove_grade_file, ensure_imports_dir, IMPORTS_DIR)
+# Colonnes de note, rescaling, agrégation : logique pure, sans notion de projet
+# actif — le barème lui est passé en paramètre. Un examen en est le cas N = 1
+# (cf. `exam_columns`) ; histogrammes, nuage, formule et bornes de curseurs
+# décrivent un ENSEMBLE d'examens et ne servent qu'à `/cohorte`.
+from grades_view import (SERIES_COLORS, series_stats, compute_aggregate,
+                         build_formula, slider_ranges,
+                         compute_multi_series_stats, multi_histogram_geometry)
+# La table des résultats — une ligne par étudiant, absents compris. Pure, sans
+# Flask : c'est elle que lira une vue d'ensemble, par sous-processus.
+import exam_results
+import cohort
 
 # Paths du projet actif (figés au démarrage du process). Switcher de projet
 # = `project_state.restart_server_with_project()` qui exec ce process à neuf.
@@ -196,14 +224,25 @@ def invalidate_layout_caches() -> None:
     _offsets_cache.clear()
 
 
-def get_layout():
+def get_layout(copy: int | None = None):
+    """Cases de la feuille de réponses **de cette copie**, + index (q, char).
+
+    ⚠ `copy` n'est pas décoratif. Avec des versions du sujet (groupes AMC), la
+    copie 1 porte les questions AMC 1-5 et la copie 36 les 10-14 : le calage de
+    la copie 1 ne contient aucune des questions de la seconde. Appelé sans
+    copie, l'index rendait donc `404` sur toutes les cases des copies de la
+    deuxième version — les vignettes de la review rapide et du zoom
+    n'apparaissaient pas du tout sur ces copies.
+    """
     global _layout_cache, _layout_by_qchar
+    key = int(copy) if copy else 1
     if _layout_cache is None:
-        _layout_cache = load_layout()
-        _layout_by_qchar = {}
-        for b in _layout_cache:
-            _layout_by_qchar[(b.question, b.char)] = b
-    return _layout_cache, _layout_by_qchar
+        _layout_cache, _layout_by_qchar = {}, {}
+    if key not in _layout_cache:
+        boxes = layout_store.get_layout(copy=key).sheet_boxes()
+        _layout_cache[key] = boxes
+        _layout_by_qchar[key] = {(b.question, b.char): b for b in boxes}
+    return _layout_cache[key], _layout_by_qchar[key]
 
 
 def copy_sheets(d: dict, batch: str, page: int) -> list:
@@ -229,7 +268,9 @@ def sheet_of_question(d: dict, batch: str, page: int) -> dict:
     """
     sheets = copy_sheets(d, batch, page)
     if len(sheets) == 1:
-        lay = layout_store.get_layout()
+        # ⚠ Le calage DE LA COPIE : une copie de la seconde version d'un sujet
+        # ne porte pas les mêmes numéros de question que la copie 1.
+        lay = layout_store.get_layout(copy=copy_id_of(d))
         return {q: sheets[0] for q in {b.question for b in lay.sheet_boxes()}}
     lay = layout_store.get_layout(copy=copy_id_of(d))
     out = {}
@@ -242,18 +283,39 @@ def sheet_of_question(d: dict, batch: str, page: int) -> dict:
     return out
 
 
-def question_numbers() -> tuple[list, list]:
+def question_numbers(copy: int = 1) -> tuple[list, list]:
     """(questions QCM notées, colonnes du code étudiant) dérivées du calage.
 
     S'appuie sur `sujet_store.amc_question_map()` : les cases à lettres d'un
     bloc à cases de notation (`\\AMCOpen`, answerbox) portent aussi des lettres
     et étaient comptées comme un QCM fantôme, noté avec une spec vide.
+
+    ⚠ **Toujours passer la copie** quand on en a une. Sur un sujet à plusieurs
+    versions (matin/après-midi), la copie 1 porte les questions AMC 1-5 et la
+    copie 2 les 10-14 : itérer celles de la copie 1 sur une feuille de
+    l'après-midi n'affiche aucune de ses questions et en invente cinq vides.
     """
-    m = amc_question_map()
+    m = amc_question_map(copy)
     return sorted(m["qcm"]), list(m["id"])
 
 
-def id_columns() -> list:
+def spec_of(q: int, copy: int = 1) -> dict:
+    """Spec d'une question désignée par son **numéro AMC** (la clé d'`answers`).
+
+    ⚠ `sujet_store.effective_spec` prend, lui, l'indice d'ordre du document (la
+    clé de `parse_tex`). Les deux coïncident sur un sujet simple, plus du tout
+    dès qu'il y a des groupes — d'où ce passage obligé par la carte du calage,
+    exactement comme le fait `score.score_question`.
+    """
+    return effective_spec(amc_question_map(copy)["qcm"].get(q, q), copy=copy)
+
+
+def max_of(q: int, copy: int = 1) -> float:
+    """Score maximal d'une question désignée par son numéro AMC (cf. `spec_of`)."""
+    return sujet_max_score(amc_question_map(copy)["qcm"].get(q, q), copy=copy)
+
+
+def id_columns(copy: int = 1) -> list:
     """Numéros AMC des colonnes du code étudiant, dérivés du calage.
 
     ⚠ Ne JAMAIS coder ces numéros en dur : ils dépendent du sujet (31 QCM →
@@ -261,7 +323,7 @@ def id_columns() -> list:
     un sujet à 32 QCM), et `id_grid_digits` est configurable — le nombre de
     colonnes n'est pas figé à 4. Cf. piège #8 du CLAUDE.md.
     """
-    return question_numbers()[1]
+    return question_numbers(copy)[1]
 
 
 def get_matcher():
@@ -279,8 +341,14 @@ def get_series():
     return _series_cache
 
 
-def get_warped(batch: str, page: int) -> tuple[np.ndarray, dict]:
-    """Retourne (warped_image, offsets_par_question)."""
+def get_warped(batch: str, page: int, copy: int | None = None) -> tuple[np.ndarray, dict]:
+    """Retourne (warped_image, offsets_par_question).
+
+    ⚠ `copy` sélectionne le calage des offsets : sur un sujet à versions, une
+    copie de la seconde version ne porte aucune des questions de la première,
+    et les offsets étaient alors calculés pour des questions absentes de la
+    page — donc vides, donc jamais appliqués aux crops.
+    """
     key = (batch, page)
     if key in _warp_cache:
         return _warp_cache[key], _offsets_cache[key]
@@ -303,7 +371,7 @@ def get_warped(batch: str, page: int) -> tuple[np.ndarray, dict]:
             warped = cv2.resize(gray, (canon_w, canon_h))
         else:
             warped = warp_to_canonical(gray, mires, canon_mires, canon_w, canon_h)
-        layout, _ = get_layout()
+        layout, _ = get_layout(copy)
         offsets = compute_per_question_offsets(warped, layout)
         if len(_warp_cache) > 20:
             old = next(iter(_warp_cache))
@@ -440,6 +508,9 @@ def list_all_copies():
                 "student_name": name,
                 "canonical_name": f"{canon.nom} {canon.prenom}" if canon else "?",
                 "canonical_id": canon.id if canon else "",
+                # "" tant que la copie n'est reliée à personne, ou que la liste
+                # ne porte pas de colonne courriel : jamais deviné.
+                "canonical_email": canon.email if canon else "",
                 "match_method": match["method"],
                 "score": scores["total"],
                 "source": d.get("_source", "?"),
@@ -498,7 +569,21 @@ def copy_review(d: dict) -> dict:
     """
     copy = copy_id_of(d)
     return review_state.copy_review(
-        d, lambda q: effective_spec(q, copy=copy), question_numbers()[0])
+        d, lambda q: spec_of(q, copy), question_numbers(copy)[0])
+
+
+def copy_open_count(d: dict, matcher=None) -> int:
+    """Ce qu'il reste à traiter sur une copie, identité comprise.
+
+    ⚠ `copy_review()["n_open"]` ne compte QUE les réponses. La file `/flagged`,
+    elle, ajoute l'identité douteuse — d'où deux nombres différents pour la même
+    copie : la page affichait « 9 à traiter » et le premier clic la faisait
+    tomber à 7, l'identité disparaissant du compte en même temps que la case
+    traitée. Une seule implémentation, servie à la page comme aux routes.
+    """
+    matcher = matcher or get_matcher()
+    n = copy_review(d)["n_open"]
+    return n + (1 if id_state(d, resolve_student(d, matcher)) else 0)
 
 
 def review_open_cells(d: dict) -> set:
@@ -511,9 +596,6 @@ def review_open_cells(d: dict) -> set:
     return out
 
 
-# Palette des séries (QCM = index 0, puis colonnes importées)
-SERIES_COLORS = ["#0a6ed1", "#e8820c", "#1f9d57", "#9b59b6",
-                 "#d6485a", "#0a9bb5", "#c0392b", "#7f8c8d"]
 
 
 def id_state(d: dict, match: dict) -> str | None:
@@ -541,218 +623,74 @@ def id_state(d: dict, match: dict) -> str | None:
     return "weak" if "?" in (d.get("student_id") or "") else None
 
 
-def _is_to_review(c: dict) -> bool:
-    """Copie où il RESTE quelque chose à regarder.
+def absent_students(copies: list) -> list:
+    """Étudiants de la liste qu'aucune copie ne réclame.
 
-    ⚠ La version précédente comptait les drapeaux posés par la correction
-    automatique et ignorait la relecture : le tableau de bord affichait « 107 à
-    revoir » sur EXAM_2026 alors que 106 de ces copies étaient déjà validées, et
-    le nombre ne décroissait jamais. Il mesurait la sortie du CV, pas le travail
-    restant. (Il portait aussi une comparaison morte — `f.startswith(
-    "cv_differs_amc")` testait la chaîne littérale de la boucle, jamais les
-    drapeaux de la copie.)
+    ⚠ Ils ne comptent **ni dans les histogrammes ni dans les statistiques** :
+    ceux-ci décrivent les copies corrigées. Ils n'apparaissent que dans les
+    exports, où l'absence d'une ligne serait prise pour un oubli.
     """
-    return bool(c.get("n_open")) or bool(c.get("id_issue"))
+    seen = {c["canonical_id"] for c in copies if c.get("canonical_id")}
+    return [st for st in get_matcher().students if st.id not in seen]
 
 
-def series_stats(values: list) -> dict:
-    """Statistiques d'une série de valeurs : n, moyenne, variance, σ, médiane, min, max."""
-    vals = sorted(values)
-    n = len(vals)
-    if n == 0:
-        return {"n": 0, "mean": 0.0, "variance": 0.0, "std": 0.0,
-                "median": 0.0, "min": 0.0, "max": 0.0}
-    mean = sum(vals) / n
-    variance = sum((v - mean) ** 2 for v in vals) / n   # variance population (÷n)
-    std = variance ** 0.5
-    median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
-    return {"n": n, "mean": mean, "variance": variance, "std": std,
-            "median": median, "min": vals[0], "max": vals[-1]}
+def subject_total_max() -> float:
+    """Barème maximal du sujet (cf. `sujet_store.subject_total_max`)."""
+    return sujet_subject_total_max()
 
 
-def rescale(raw: float, seuil: float, max_: float) -> float:
-    """Note rescalée : raw × max / seuil (linéaire, sans plancher ni plafond)."""
-    return raw * max_ / seuil if seuil else 0.0
+def exam_columns() -> list:
+    """L'unique colonne de note d'un examen : le QCM, sur son propre barème.
 
+    ⚠ L'évaluation d'UN examen n'a plus aucun réglage : la note affichée,
+    exportée et envoyée est le **score brut sur le barème du sujet**. Seuiller
+    et ramener sur une autre échelle ne sert qu'à comparer ou agréger cet
+    examen avec autre chose — ça appartient au niveau au-dessus, pas ici.
 
-def grade_columns(cfg: dict, imported: list) -> list:
-    """Descripteurs unifiés des colonnes de note : QCM puis colonnes importées.
-
-    Chacun : {key, label, color, seuil, max, agg_weight, path?, idx?}.
-    QCM lit qcm_* ; les colonnes importées lisent grade_files[*].grade_cols[*].
+    On garde pour autant la forme « liste de colonnes » que consomme
+    `compute_aggregate` : un examen en est le cas N = 1, et le rescaling s'y
+    réduit à l'identité. Une seule implémentation de la note, deux appelants.
     """
-    cols = [{
-        "key": "qcm", "label": "QCM", "color": SERIES_COLORS[0],
-        "seuil": float(cfg.get("qcm_seuil", 32.0)),
-        "max": float(cfg.get("qcm_max", 20.0)),
-        "agg_weight": float(cfg.get("qcm_agg_weight", 1.0)),
-    }]
-    params = {}
-    for fc in cfg.get("grade_files", []):
-        for gc in fc.get("grade_cols", []):
-            params[(fc["path"], gc.get("idx"))] = gc
-    for i, s in enumerate(imported):
-        gc = params.get((s["file"], s["idx"]), {})
-        cols.append({
-            "key": f'{s["file"]}::{s["idx"]}',
-            "path": s["file"], "idx": s["idx"], "label": s["name"],
-            "color": SERIES_COLORS[(i + 1) % len(SERIES_COLORS)],
-            "seuil": float(gc.get("seuil", 20.0)),
-            "max": float(gc.get("max", 20.0)),
-            "agg_weight": float(gc.get("agg_weight", 1.0)),
-        })
-    return cols
+    b = subject_total_max() or 20.0
+    return [{"key": "qcm", "label": "QCM", "color": SERIES_COLORS[0],
+             "seuil": b, "auto_seuil": True, "max": b, "agg_weight": 1.0}]
 
 
-def build_calibration_series(copies: list, columns: list, imported: list) -> list:
-    """Séries RESCALÉES pour le graphe de calibration : une par colonne de note."""
-    by_key = {f'{s["file"]}::{s["idx"]}': s for s in imported}
+def exam_threshold() -> float:
+    """Plafond de la note d'un examen : son barème — `min(brut, barème) = brut`."""
+    return subject_total_max() or 20.0
+
+
+def legacy_grade_settings(cfg: dict) -> list[str]:
+    """Réglages de note que l'échelle d'un examen n'applique plus.
+
+    ⚠ Rien n'est effacé : ces clés restent dans `config.json` et remonteront au
+    niveau qui les rend utiles. Mais les taire serait un changement de note
+    sans un mot — un projet réglé « ramené sur 20 » exporte désormais un score
+    brut sur le barème, et ce fichier part à la scolarité.
+
+    ⚠ Le critère est **la note, pas la présence d'une clé**. L'ancienne note
+    valait `min(brut × max ∕ normalisation, plafond)` : elle est identique à la
+    nouvelle tant que `max = normalisation` et que le plafond ne mord pas sur
+    le barème. Un projet réglé « 5 sur 5, plafond 20 » sur un sujet qui vaut 5
+    n'a donc rien à signaler — et c'est le cas courant. Signaler quand même
+    aurait fait de ce bandeau une alarme qu'on apprend à ignorer.
+    """
+    b = subject_total_max()
     out = []
-    for col in columns:
-        if col["key"] == "qcm":
-            vals = [rescale(c["score"], col["seuil"], col["max"]) for c in copies]
-        else:
-            vmap = (by_key.get(col["key"]) or {}).get("values", {})
-            vals = [rescale(vmap[c["canonical_id"]], col["seuil"], col["max"])
-                    for c in copies
-                    if c["canonical_id"] and c["canonical_id"] in vmap]
-        out.append({"name": col["label"], "color": col["color"], "values": vals,
-                    "opacity": 0.5 if col["key"] == "qcm" else 0.45})
+    if b:
+        seuil = float(cfg.get("qcm_seuil") or b)
+        mx = float(cfg.get("qcm_max", 20.0))
+        thr = float(cfg.get("final_threshold", 20.0))
+        if abs(mx - seuil) > 1e-9:
+            out.append(f"note ramenée sur {mx:g} à partir de {seuil:g}")
+        if thr < b - 1e-9:
+            out.append(f"plafond à {thr:g}")
+    n_cols = sum(len(fc.get("grade_cols") or [])
+                 for fc in (cfg.get("grade_files") or []))
+    if n_cols:
+        out.append(f"{n_cols} colonne(s) de notes importées, plus agrégées ici")
     return out
-
-
-def copy_rescaled(copy: dict, columns: list, imported: list) -> list:
-    """Notes rescalées d'une copie, par colonne présente : [(col, N*), …]."""
-    by_key = {f'{s["file"]}::{s["idx"]}': s for s in imported}
-    cid = copy.get("canonical_id")
-    out = []
-    for col in columns:
-        if col["key"] == "qcm":
-            out.append((col, rescale(copy["score"], col["seuil"], col["max"])))
-        else:
-            vmap = (by_key.get(col["key"]) or {}).get("values", {})
-            if cid and cid in vmap:
-                out.append((col, rescale(vmap[cid], col["seuil"], col["max"])))
-    return out
-
-
-def compute_aggregate(copy: dict, columns: list, imported: list,
-                      final_threshold: float) -> float:
-    """Note finale : moyenne pondérée des notes rescalées, plafonnée au seuil final.
-
-    Les notes rescalées entrent NON plafonnées dans la moyenne ; seul le résultat
-    final reçoit le plafond dur `final_threshold`."""
-    num = den = 0.0
-    for col, val in copy_rescaled(copy, columns, imported):
-        num += col["agg_weight"] * val
-        den += col["agg_weight"]
-    agg = num / den if den else 0.0
-    return min(agg, final_threshold)
-
-
-def build_formula(columns: list, final_threshold: float) -> dict:
-    """Structure de la formule de la note finale (affichée pour les étudiants)."""
-    terms = [{"label": c["label"], "weight": c["agg_weight"],
-              "seuil": c["seuil"], "max": c["max"]} for c in columns]
-    return {"terms": terms, "denom": sum(c["agg_weight"] for c in columns),
-            "threshold": final_threshold}
-
-
-def build_scatter(copies: list, columns: list, imported: list,
-                  finals: list) -> dict:
-    """Données du nuage de points : variables sélectionnables + 1 point par copie.
-
-    Valeurs = notes rescalées (note*) par colonne + note finale. `None` si la
-    copie n'a pas cette note."""
-    variables = [{"id": c["key"], "label": c["label"]} for c in columns]
-    variables.append({"id": "__final__", "label": "Note finale"})
-    points = []
-    for c, fin in zip(copies, finals):
-        resc = {col["key"]: val for col, val in copy_rescaled(c, columns, imported)}
-        v = {col["key"]: (round(resc[col["key"]], 3) if col["key"] in resc else None)
-             for col in columns}
-        v["__final__"] = round(fin, 3)
-        points.append({"name": c["canonical_name"], "v": v})
-    return {"variables": variables, "points": points}
-
-
-def compute_multi_series_stats(series: list, granularity: float) -> dict:
-    """Bins de largeur fixe `granularity` (alignés sur des multiples), partagés."""
-    g = granularity if (granularity and granularity > 0) else 1.0
-    all_vals = [v for s in series for v in s["values"]]
-    if all_vals:
-        lo = math.floor(min(0.0, min(all_vals)) / g) * g
-        hi = math.ceil(max(all_vals) / g) * g
-    else:
-        lo, hi = 0.0, g
-    if hi <= lo:
-        hi = lo + g
-    nbins = max(1, min(400, round((hi - lo) / g)))
-    hi = lo + nbins * g
-    w = (hi - lo) / nbins
-    out_series, max_count = [], 0
-    for s in series:
-        counts = [0] * nbins
-        for v in s["values"]:
-            idx = min(nbins - 1, max(0, int((v - lo) / w)))
-            counts[idx] += 1
-        max_count = max(max_count, max(counts, default=0))
-        out_series.append({"name": s["name"], "color": s["color"],
-                           "opacity": s.get("opacity", 0.45), "counts": counts,
-                           "stats": series_stats(s["values"])})
-    return {"lo": lo, "hi": hi, "nbins": nbins, "series": out_series,
-            "max_count": max_count}
-
-
-def multi_histogram_geometry(mstats: dict, width: int = 560, height: int = 210,
-                             mean_line: bool = False, vline: float | None = None) -> dict:
-    """Géométrie SVG : barres superposées (une couleur/alpha par série) + ticks.
-
-    `vline` : si fourni, ajoute une ligne verticale (x clampé au cadre)."""
-    pad_l, pad_r, pad_t, pad_b = 8, 8, 10, 26
-    plot_w = width - pad_l - pad_r
-    plot_h = height - pad_t - pad_b
-    base_y = pad_t + plot_h
-    nbins = mstats["nbins"]
-    lo, hi = mstats["lo"], mstats["hi"]
-    span = (hi - lo) or 1.0
-    max_c = mstats["max_count"] or 1
-    slot = plot_w / nbins
-
-    def sx(value):
-        return pad_l + (value - lo) / span * plot_w
-
-    series_geo = []
-    for s in mstats["series"]:
-        bars = []
-        for i, c in enumerate(s["counts"]):
-            bh = (c / max_c) * plot_h
-            bars.append({
-                "x": pad_l + i * slot + slot * 0.06, "w": slot * 0.88,
-                "y": base_y - bh, "h": bh, "count": c,
-                "cx": pad_l + i * slot + slot / 2,
-                "lo": round(lo + i * span / nbins, 2),
-                "hi": round(lo + (i + 1) * span / nbins, 2),
-            })
-        series_geo.append({"name": s["name"], "color": s["color"],
-                           "opacity": s["opacity"], "bars": bars, "stats": s["stats"]})
-    tick_vals = [round(lo + (hi - lo) * f, 1) for f in (0, 0.25, 0.5, 0.75, 1.0)]
-    xticks = [{"x": sx(v), "label": f"{v:g}"} for v in tick_vals]
-    geo = {"width": width, "height": height, "base_y": base_y, "pad_t": pad_t,
-           "series": series_geo, "xticks": xticks,
-           "legend": [{"name": s["name"], "color": s["color"]} for s in series_geo]}
-    if mean_line and series_geo:
-        st = series_geo[0]["stats"]
-        band_lo = max(lo, st["mean"] - st["std"])
-        band_hi = min(hi, st["mean"] + st["std"])
-        geo["mean_x"] = sx(st["mean"])
-        geo["band_x"] = sx(band_lo)
-        geo["band_w"] = sx(band_hi) - sx(band_lo)
-        geo["mean"] = st["mean"]
-    if vline is not None:
-        geo["vline_x"] = min(max(sx(vline), pad_l), pad_l + plot_w)
-        geo["vline_val"] = vline
-    return geo
 
 
 def build_grade_files_info(cfg: dict, imported: list) -> list:
@@ -769,6 +707,7 @@ def build_grade_files_info(cfg: dict, imported: list) -> list:
         out.append({
             "path": fc["path"], "filename": Path(fc["path"]).name,
             "join_mode": fc.get("join_mode", "name"),
+            "sheet": fc.get("sheet", ""),
             "join_col": fc.get("join_col", 0),
             "data_start": fc.get("data_start", 0),
             "grade_cols": cols,
@@ -790,15 +729,15 @@ def build_student_card(batch: str, page: int) -> dict | None:
     scores = score_copy(answers_int, copy=copy)
     diff_questions = {q for (q, _) in diff_set(d)}
     per_question = []
-    for q in question_numbers()[0]:
-        spec = effective_spec(q, copy=copy)
+    for q in question_numbers(copy)[0]:
+        spec = spec_of(q, copy)
         sel = sorted(answers_int.get(q, []))
         per_question.append({
             "q": q, "tag": spec["tag"], "type": spec["type"],
             "correct": "".join(sorted(spec["correct"])),
             "selected": "".join(sel) or "—",
             "score": scores["per_question"][q],
-            "max": sujet_max_score(q, copy=copy),
+            "max": max_of(q, copy),
             "has_diff": q in diff_questions,
         })
     return {
@@ -832,6 +771,7 @@ def _project_files_info() -> dict:
         "student_xlsx": (cfg.get("student_xlsx") or "").strip(),
         "student_xlsx_name": "",
         "student_xlsx_exists": False,
+        "student_sheet": "",
         "n_students":   0,
         "student_warnings": [],
     }
@@ -903,6 +843,9 @@ def _project_files_info() -> dict:
             xpath = (proj_root / xpath).resolve()
         info["student_xlsx_name"] = xpath.name
         info["student_xlsx_exists"] = xpath.exists()
+        # L'onglet fait partie de l'identité de la liste : deux onglets d'un
+        # même classeur sont deux promos différentes.
+        info["student_sheet"] = (cfg.get("xlsx_sheet") or "").strip()
         if xpath.exists():
             try:
                 m = get_matcher()
@@ -918,6 +861,15 @@ def _project_files_info() -> dict:
 
 @app.route("/")
 def index():
+    """Onglet **Évaluation** : un examen, ses copies, ses moyennes par question.
+
+    ⚠ Aucun réglage de note ici, volontairement. La note d'un examen est son
+    score brut sur le barème du sujet ; seuiller et ramener sur une autre
+    échelle ne sert qu'à le comparer ou l'agréger avec autre chose, ce qui est
+    le travail du niveau au-dessus. Les histogrammes, le nuage de points, la
+    formule et les fichiers de notes importés ont suivi le même raisonnement :
+    ils décrivent un ensemble d'examens, pas celui-ci.
+    """
     # Pas de projet actif valide → page d'accueil (onboarding).
     p = config.project_root()
     if not project_state.is_valid_project(p):
@@ -928,41 +880,22 @@ def index():
 
     copies = list_all_copies()
     cfg = load_config()
-    g = float(cfg.get("hist_granularity", 1.0))
-    imported = get_series()
-    columns = grade_columns(cfg, imported)
+    # Statistiques de la note BRUTE — les absents n'y entrent pas : elles
+    # décrivent les copies corrigées (cf. `absent_students`).
+    stats = series_stats([c["score"] for c in copies])
+    try:
+        questions = question_stats()["questions"]
+    except Exception as e:                              # noqa: BLE001
+        questions, q_error = [], str(e)
+    else:
+        q_error = ""
 
-    # haut : calibration — séries rescalées superposées
-    top_series = build_calibration_series(copies, columns, imported)
-    hist_top = multi_histogram_geometry(
-        compute_multi_series_stats(top_series, g), mean_line=False)
-
-    # bas : note finale agrégée (moyenne pondérée des notes rescalées, plafonnée)
-    threshold = float(cfg.get("final_threshold", 20.0))
-    pass_mark = float(cfg.get("pass_mark", 10.0))
-    finals = [compute_aggregate(c, columns, imported, threshold) for c in copies]
-    bottom = compute_multi_series_stats(
-        [{"name": "Note finale", "color": SERIES_COLORS[0],
-          "values": finals, "opacity": 1.0}], g)
-    hist_bottom = multi_histogram_geometry(bottom, mean_line=True, vline=pass_mark)
-
-    stats = dict(bottom["series"][0]["stats"])
-    stats["n_validated"] = sum(1 for c in copies if c["validated"])
-    stats["n_to_review"] = sum(1 for c in copies if _is_to_review(c))
-    # Progression réelle de la relecture : signalements traités / total.
-    stats["n_flagged_cells"] = sum(c.get("n_flagged", 0) for c in copies)
-    stats["n_open_cells"] = sum(c.get("n_open", 0) for c in copies)
-    stats["pass_mark"] = pass_mark
-    stats["n_below"] = sum(1 for v in finals if v < pass_mark)
-
-    return render_template("dashboard.html", copies=copies, total=len(copies),
-                           stats=stats, cfg=cfg, columns=columns,
-                           formula=build_formula(columns, threshold),
-                           hist_top=hist_top, hist_bottom=hist_bottom,
-                           scatter=build_scatter(copies, columns, imported, finals),
-                           grade_files_info=build_grade_files_info(cfg, imported),
+    return render_template("evaluation.html", copies=copies, total=len(copies),
+                           stats=stats, bareme=subject_total_max(),
+                           questions=questions, q_error=q_error,
+                           legacy=legacy_grade_settings(cfg),
                            project_files=_project_files_info(),
-                           active="dashboard")
+                           active="evaluation")
 
 
 @app.route("/api/student-card/<batch>/<int:page>")
@@ -973,29 +906,31 @@ def api_student_card(batch, page):
     return render_template("_student_card.html", c=card)
 
 
+def exam_rows() -> list[dict]:
+    """La table des résultats de l'examen : une ligne par étudiant, absents
+    compris, triée par nom.
+
+    ⚠ **Unique construction**, servie à `/export.csv`, au
+    `compte_rendu/notes.csv` que lisent les courriels, et à la ligne de
+    commande `exam_results.py`. Les deux premiers la bâtissaient chacun de leur
+    côté : deux fichiers censés dire la même chose, écrits par deux codes.
+    """
+    copies = list_all_copies()
+    cols, thr = exam_columns(), exam_threshold()
+    return exam_results.student_rows(
+        copies, absent_students(copies),
+        note_of=lambda c: compute_aggregate(c, cols, [], thr))
+
+
 @app.route("/export.csv")
 def export_csv():
     """CSV récap des notes (1 ligne / étudiant), régénéré à la volée."""
-    copies = list_all_copies()
-    cfg = load_config()
-    imported = get_series()
-    columns = grade_columns(cfg, imported)
-    threshold = float(cfg.get("final_threshold", 20.0))
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["batch", "page", "id_canonique", "nom_prenom", "id_lu",
-                "note_sur_32", "note_finale", "validee", "flags"])
-    for c in sorted(copies, key=lambda x: x["canonical_name"]):
-        w.writerow([
-            c["batch"], c["page"], c["canonical_id"], c["canonical_name"],
-            c["student_id"], round(c["score"], 2),
-            round(compute_aggregate(c, columns, imported, threshold), 2),
-            "oui" if c["validated"] else "non",
-            ";".join(c["flags"]),
-        ])
-    out = buf.getvalue()
+    w.writerow(exam_results.EXPORT_HEADER)
+    w.writerows(exam_results.export_csv_rows(exam_rows()))
     return app.response_class(
-        out, mimetype="text/csv",
+        buf.getvalue(), mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=qcm_notes.csv"},
     )
 
@@ -1018,7 +953,7 @@ def _opt_signed_float(body, key):
 
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
-    """GET → config courante ; POST → granularité + paramètres seuil/max/poids."""
+    """GET → config courante ; POST → granularité + normalisation/max/poids."""
     if request.method == "POST":
         body = request.get_json(force=True)
         updates = {}
@@ -1029,7 +964,10 @@ def api_config():
                     return jsonify({"error": "granularité hors bornes (0,1–50)"}), 400
                 updates["hist_granularity"] = g
             if "qcm_seuil" in body:
-                updates["qcm_seuil"] = _pos_float(body, "qcm_seuil")
+                # null / "" = auto → le barème du sujet (cf. qcm_normalisation).
+                v = body["qcm_seuil"]
+                updates["qcm_seuil"] = (None if v in (None, "")
+                                        else _pos_float(body, "qcm_seuil"))
             if "qcm_max" in body:
                 updates["qcm_max"] = _pos_float(body, "qcm_max")
             if "qcm_agg_weight" in body:
@@ -1092,33 +1030,17 @@ def api_save_report():
     body = request.get_json(force=True)
     report_dir = ROOT / "compte_rendu"
     report_dir.mkdir(exist_ok=True)
-    copies = list_all_copies()
-    cfg = load_config()
-    imported = get_series()
-    columns = grade_columns(cfg, imported)
-    threshold = float(cfg.get("final_threshold", 20.0))
-    by_key = {f'{s["file"]}::{s["idx"]}': s for s in imported}
-    imp_cols = [c for c in columns if c["key"] != "qcm"]
 
-    # notes.csv : notes brutes (QCM + colonnes importées) + note finale agrégée
-    header = (["batch", "page", "id_canonique", "nom_prenom", "QCM_brut_sur_32"]
-              + [f'{c["label"]}_brut' for c in imp_cols]
-              + ["note_finale", "validee"])
+    # notes.csv : la note de l'examen, deux fois (`QCM_brut_sur_32` et
+    # `note_finale` portent la même valeur depuis qu'elle est le score brut).
+    # Les colonnes de notes importées n'y sont plus : elles décrivent un
+    # ensemble d'examens, et la page le signale (`legacy_grade_settings`).
+    rows = exam_results.report_csv_rows(exam_rows())
     with open(report_dir / "notes.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(header)
-        n_rows = 0
-        for c in sorted(copies, key=lambda x: x["canonical_name"]):
-            row = [c["batch"], c["page"], c["canonical_id"], c["canonical_name"],
-                   round(c["score"], 2)]
-            for col in imp_cols:
-                s = by_key.get(col["key"])
-                val = s["values"].get(c["canonical_id"]) if s else None
-                row.append("" if val is None else round(val, 2))
-            row.append(round(compute_aggregate(c, columns, imported, threshold), 2))
-            row.append("oui" if c["validated"] else "non")
-            w.writerow(row)
-            n_rows += 1
+        w.writerow(exam_results.REPORT_HEADER)
+        w.writerows(rows)
+    n_rows = len(rows)
 
     # graphiques : SVG fournis par le client (histogrammes + nuage de points)
     n_svg = 0
@@ -1171,12 +1093,46 @@ def api_upload_xlsx():
     pending = ROOT / "imports" / f"roster_pending{ext}"
     f.save(pending)
     try:
-        from student_list import analyze_roster
-        analysis = analyze_roster(pending)
+        from student_list import analyze_roster, sheet_summaries
+        sheets = sheet_summaries(pending)
+        # ⚠ Plusieurs onglets ⇒ on n'en analyse AUCUN : c'est à l'utilisateur de
+        # dire lequel est sa promo. Analyser d'office l'onglet actif (celui
+        # sélectionné au dernier enregistrement du classeur) présentait une
+        # liste plausible et fausse — sur le classeur d'origine, les 165
+        # étudiants du groupe FR au lieu des 39 du groupe EN, sans un mot.
+        if len(sheets) > 1:
+            return jsonify({"ok": True, "filename": f.filename,
+                            "sheets": sheets, "needs_sheet": True})
+        # ⚠ Un classeur à UN onglet n'est pas épinglé (`sheet=None`, donc
+        # `xlsx_sheet=""`) : il n'y a rien à désambiguïser, et retenir le nom
+        # rendrait fatal un simple renommage de l'onglet. On ne contraint que
+        # là où l'ambiguïté existe.
+        analysis = analyze_roster(pending, None)
     except Exception as e:          # noqa: BLE001
         _drop_roster_pending()
         return jsonify({"error": f"lecture impossible : {e}"}), 400
-    return jsonify({"ok": True, "filename": f.filename, **analysis})
+    return jsonify({"ok": True, "filename": f.filename, "sheets": sheets,
+                    "needs_sheet": False, **analysis})
+
+
+@app.route("/api/student-list/analyze", methods=["POST"])
+def api_student_list_analyze():
+    """Analyse le fichier en attente sur l'onglet demandé, sans rien enregistrer.
+
+    Permet de changer d'onglet sans re-téléverser : la détection des colonnes
+    et l'aperçu portent sur l'onglet choisi.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    pending = _roster_pending()
+    if pending is None:
+        return jsonify({"error": "aucun fichier envoyé"}), 400
+    from student_list import analyze_roster, sheet_summaries
+    try:
+        analysis = analyze_roster(pending, body.get("sheet") or None)
+    except Exception as e:          # noqa: BLE001
+        return jsonify({"error": f"lecture impossible : {e}"}), 400
+    return jsonify({"ok": True, "sheets": sheet_summaries(pending),
+                    "needs_sheet": False, **analysis})
 
 
 @app.route("/api/student-list/preview", methods=["POST"])
@@ -1240,7 +1196,11 @@ def api_student_list():
         "xlsx_id_idx": int(body.get("id_idx", -1)),
         "xlsx_nom_idx": int(body.get("nom_idx", -1)),
         "xlsx_prenom_idx": int(body.get("prenom_idx", -1)),
+        "xlsx_mail_idx": int(body.get("mail_idx", -1)),
         "xlsx_data_start": int(body.get("data_start", 1)),
+        # L'onglet fait partie du mapping : sans lui, la relecture repartirait
+        # sur l'onglet actif du classeur, donc potentiellement une autre promo.
+        "xlsx_sheet": str(body.get("sheet") or ""),
         # Les intitulés ne servent plus qu'à relire une config antérieure :
         # on les vide pour qu'ils ne puissent pas reprendre la main.
         "xlsx_id_col": "", "xlsx_nom_col": "", "xlsx_prenom_col": "",
@@ -1269,8 +1229,18 @@ def api_upload_grade_file():
         dest = IMPORTS_DIR / f"{stem}_{k}{suffix}"
         k += 1
     f.save(dest)
+    # Même piège que pour la liste étudiants : sur un classeur à plusieurs
+    # onglets, lire l'onglet actif rend des notes plausibles et fausses.
+    sheet = (request.form.get("sheet") or "").strip() or None
     try:
-        rows = read_table(dest)
+        from grade_imports import list_sheets
+        sheets = list_sheets(dest)
+        if sheet is None and len(sheets) > 1:
+            return jsonify({"ok": True, "path": f"imports/{dest.name}",
+                            "sheets": [{"name": n} for n in sheets],
+                            "needs_sheet": True})
+        # Un seul onglet : pas d'épinglage (cf. `api_upload_xlsx`).
+        rows = read_table(dest, sheet)
         analysis = analyze_table(rows, get_matcher())
     except Exception as e:
         dest.unlink(missing_ok=True)
@@ -1279,7 +1249,32 @@ def api_upload_grade_file():
         dest.unlink(missing_ok=True)
         return jsonify({"error": "fichier vide"}), 400
     analysis["rows_preview"] = [[jsonable_cell(c) for c in r] for r in rows[:14]]
-    return jsonify({"ok": True, "path": f"imports/{dest.name}", "analysis": analysis})
+    return jsonify({"ok": True, "path": f"imports/{dest.name}", "sheet": sheet,
+                    "sheets": [{"name": n} for n in sheets],
+                    "needs_sheet": False, "analysis": analysis})
+
+
+@app.route("/api/grade-file/analyze", methods=["POST"])
+def api_grade_file_analyze():
+    """Ré-analyse un fichier de notes déjà déposé, sur l'onglet demandé."""
+    body = request.get_json(force=True, silent=True) or {}
+    path = str(body.get("path", ""))
+    if not path.startswith("imports/") or ".." in path:
+        return jsonify({"error": "chemin invalide"}), 400
+    full = ROOT / path
+    if not full.exists():
+        return jsonify({"error": "fichier introuvable"}), 404
+    sheet = (body.get("sheet") or "").strip() or None
+    try:
+        from grade_imports import list_sheets
+        rows = read_table(full, sheet)
+        analysis = analyze_table(rows, get_matcher())
+    except Exception as e:                              # noqa: BLE001
+        return jsonify({"error": f"lecture impossible : {e}"}), 400
+    analysis["rows_preview"] = [[jsonable_cell(c) for c in r] for r in rows[:14]]
+    return jsonify({"ok": True, "path": path, "sheet": sheet,
+                    "sheets": [{"name": n} for n in list_sheets(full)],
+                    "needs_sheet": False, "analysis": analysis})
 
 
 @app.route("/api/grade-file", methods=["POST"])
@@ -1293,8 +1288,9 @@ def api_grade_file():
     full = ROOT / path
     if not full.exists():
         return jsonify({"error": "fichier introuvable"}), 404
+    sheet = (body.get("sheet") or "").strip() or None
     try:
-        rows = read_table(full)
+        rows = read_table(full, sheet)
     except Exception as e:
         return jsonify({"error": f"lecture impossible : {e}"}), 400
     ncol = max((len(r) for r in rows), default=0)
@@ -1327,6 +1323,7 @@ def api_grade_file():
     if not grade_cols:
         return jsonify({"error": "choisis au moins une colonne de notes"}), 400
     entry = add_grade_file({"path": path, "join_mode": join_mode,
+                            "sheet": sheet or "",
                             "join_col": join_col, "data_start": data_start,
                             "grade_cols": grade_cols})
     _series_cache = None
@@ -1462,13 +1459,15 @@ def api_set_id_digit():
     except (TypeError, ValueError):
         return jsonify({"error": "paramètres invalides"}), 400
     char = str(body["char"])
-    cols = id_columns()
-    # "?" = effacer le chiffre (colonne marquée comme non-lue)
-    if q not in cols or (char not in "0123456789" and char != "?"):
-        return jsonify({"error": "paramètres invalides"}), 400
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "copie introuvable"}), 404
+    # Colonnes du calage de CETTE copie : rien ne garantit que deux versions
+    # d'un sujet posent la grille aux mêmes numéros de question.
+    cols = id_columns(copy_id_of(d))
+    # "?" = effacer le chiffre (colonne marquée comme non-lue)
+    if q not in cols or (char not in "0123456789" and char != "?"):
+        return jsonify({"error": "paramètres invalides"}), 400
     n = len(cols)
     cur = d.get("student_id", "") or ""
     if "_cv_student_id" not in d:        # garder la lecture CV originale (immuable)
@@ -1968,8 +1967,8 @@ def student(batch, page):
     # questions diff: {q: True si au moins 1 case en diff}
     diff_questions = {q for (q, _) in diff_pairs}
     questions = []
-    for q in question_numbers()[0]:
-        spec = effective_spec(q, copy=copy)
+    for q in question_numbers(copy)[0]:
+        spec = spec_of(q, copy)
         sel = sorted(answers_int.get(q, []))
         amc_sel = sorted(amc_answers.get(q, [])) if amc_answers else None
         correct = sorted(spec["correct"])
@@ -1994,7 +1993,7 @@ def student(batch, page):
     # Layout de la copie de cette feuille (mapping case↔lettre per-copy).
     lay = layout_store.get_layout(copy=copy)
     canon_w, canon_h = int(round(lay.page_w)), int(round(lay.page_h))
-    qcm_qs, id_qs = question_numbers()
+    qcm_qs, id_qs = question_numbers(copy)
     qcm_set, id_set = set(qcm_qs), set(id_qs)
     # Une image = UNE feuille : n'y poser que les ronds des cases qu'elle porte,
     # et les mesurer sur CETTE image. Avec plusieurs feuilles, les autres cases
@@ -2004,7 +2003,7 @@ def student(batch, page):
     idx = request.args.get("sheet", type=int) or 0
     shown = sheets[idx] if 0 <= idx < len(sheets) else sheets[0]
     try:
-        _warped, offsets = get_warped(shown["batch"], shown["page"])
+        _warped, offsets = get_warped(shown["batch"], shown["page"], copy)
     except Exception:
         offsets = {}
     sid = (d.get("student_id") or "?" * len(id_qs))
@@ -2057,24 +2056,30 @@ def api_order():
 
 @app.route("/flagged")
 def flagged():
-    """Review rapide : ce qu'il RESTE à regarder, groupé par question.
+    """Review rapide : les doutes, du plus ambigu au moins ambigu.
 
-    Trois choix qui viennent d'un défaut mesuré sur EXAM_2026 :
+    - **Un bloc = une question, toutes ses cases sur une ligne.** Le liseré
+      magenta dit la décision courante, le `?` orange le doute de l'algorithme
+      (cf. *Code couleur*). Un découpage cochées / non cochées en deux colonnes
+      a été essayé puis retiré : la colonne de droite était le plus souvent
+      vide, et la question à se poser se lit déjà sur la case elle-même.
+    - **Aucune notion de « traité ».** Elle a été retirée sur retour d'usage :
+      elle ajoutait un second état à suivre (traité / pas traité) par-dessus le
+      seul qui compte ici (douteux / pas douteux), et un bouton « tout traiter »
+      dont l'effet — vider la file sans rien décider — n'était pas lisible.
+      Corriger une case reste enregistré comme une décision humaine
+      (`_reviewed_cells` via `/api/toggle`), ce dont `build_dataset` a besoin.
+      ⚠ Conséquence assumée : la file ne se vide pas toute seule. Un doute
+      légitime qu'on choisit de laisser tel quel y reste.
+    - **Trié par ambiguïté décroissante** (`sort=amb`, défaut ; `scan` pour
+      l'ordre de scan) : le maximum sur les cases signalées, pas la somme —
+      cinq doutes tièdes ne doivent pas passer devant un vrai doute.
 
-    - **groupé par question, pas par zone cochée/non cochée.** Le signalement
-      structurel est une propriété de la question (« aucune réponse lue ») : le
-      juger demande de voir toutes ses cases ensemble. L'ancien découpage
-      Positifs/Négatifs éclatait la question sur deux colonnes qui mélangeaient
-      toutes les questions de la copie. Les cases non signalées restent
-      affichées, en contexte grisé.
-    - **le restant, pas le total.** Une case traitée sort de la file ; le
-      compteur décroît. Sans ça une relecture interrompue ne peut pas reprendre.
-    - **trié par risque décroissant** : si la relecture s'arrête en route, ce
-      qu'elle laisse derrière est ce qui compte le moins.
-
-    Les copies dont seule l'identité pose question entrent aussi dans la liste —
-    elles en étaient absentes des DEUX onglets, y compris de l'onglet Identité
-    qui existe pour elles (5 copies sur EXAM_2026).
+    ⚠ **Une copie dont seule l'identité pose question n'entre pas dans l'onglet
+    Réponses**, elle n'a rien à y montrer — c'est ce qui remplissait la liste de
+    copies sans une seule case à regarder. Elle est dans l'onglet Identité, qui
+    existe pour ça, et le bandeau d'identité reste affiché sur les copies qui
+    figurent dans les deux.
     """
     matcher = get_matcher()
     students = []
@@ -2090,7 +2095,7 @@ def flagged():
         if not rev["items"] and not id_bad:
             continue
         validated = "validated" in d.get("_flags", [])
-        n_open = rev["n_open"] + (1 if id_bad else 0)
+        n_open = rev["n_open"] + (1 if id_bad else 0)   # == copy_open_count(d)
         students.append({
             "batch": batch, "page": page,
             "student_id": d.get("student_id", "????"),
@@ -2099,7 +2104,13 @@ def flagged():
             # ⚠ pas la clé « items » : dans un template Jinja, `s.items` résout
             # la MÉTHODE du dict avant la clé, et la boucle explose en
             # « 'builtin_function_or_method' object is not iterable ».
-            "questions": rev["items"],
+            "questions": rev["items"],   # déjà triées par ambiguïté décroissante
+            "ambiguity": rev["ambiguity"],
+            # ⚠ Deux comptes distincts : celui des réponses seules (affiché
+            # à côté du nombre de copies à regarder — les mélanger annonçait
+            # « 42 signalements » pour 4 questions et 38 identités) et celui
+            # qui pilote la file, identité comprise.
+            "n_cell_flags": rev["n_flagged"],
             "n_flagged": rev["n_flagged"] + (1 if id_bad else 0),
             "n_open": n_open,
             "id_issue": id_bad, "id_state": id_st,
@@ -2114,26 +2125,17 @@ def flagged():
             "id_questions": build_id_questions(d),
         })
 
-    filter_mode = request.args.get("status", "open")
-    sort_mode = request.args.get("sort", "risk")
-    counts = {
-        "all": len(students),
-        "done": sum(1 for s in students if s["done"]),
-        "open": sum(1 for s in students if not s["done"]),
-    }
+    sort_mode = request.args.get("sort", "amb")
+    if sort_mode == "amb":
+        students.sort(key=lambda s: (-s["ambiguity"], -s["risk"],
+                                     s["batch"], s["page"]))
     totals = {
-        "flagged": sum(s["n_flagged"] for s in students),
-        "open": sum(s["n_open"] for s in students),
+        "flagged": sum(s["n_cell_flags"] for s in students),
+        "answers": sum(1 for s in students if s["questions"]),
+        "id": sum(1 for s in students if s["id_issue"]),
     }
-    if filter_mode == "done":
-        students = [s for s in students if s["done"]]
-    elif filter_mode == "open":
-        students = [s for s in students if not s["done"]]
-    if sort_mode == "risk":
-        students.sort(key=lambda s: (s["done"], -s["risk"], s["batch"], s["page"]))
     return render_template("flagged.html", students=students, totals=totals,
-                           filter_mode=filter_mode, sort_mode=sort_mode,
-                           counts=counts, active="flagged")
+                           sort_mode=sort_mode, active="flagged")
 
 
 def build_zoom_questions(d: dict) -> list:
@@ -2144,8 +2146,8 @@ def build_zoom_questions(d: dict) -> list:
     seen = review_state.reviewed_cells(d)
     copy = copy_id_of(d)
     questions = []
-    for q in question_numbers()[0]:
-        spec = effective_spec(q, copy=copy)
+    for q in question_numbers(copy)[0]:
+        spec = spec_of(q, copy)
         sel = answers_int.get(q, set())
         cases = []
         for ch in spec["options"]:
@@ -2172,7 +2174,7 @@ def build_id_questions(d: dict) -> list:
     par colonne, le chiffre lu surligné."""
     sid = d.get("student_id", "") or ""
     cols = []
-    for i, q in enumerate(question_numbers()[1]):
+    for i, q in enumerate(question_numbers(copy_id_of(d))[1]):
         read = sid[i] if i < len(sid) else "?"
         cases = [{"char": str(dg), "selected": str(dg) == read} for dg in range(10)]
         cols.append({"q": q, "pos": i + 1, "read": read, "cases": cases})
@@ -2205,21 +2207,23 @@ def api_toggle():
     body = request.get_json(force=True, silent=True)
     batch, page, q, char = required(body, "batch", "page", "q", "char")
     page, q = int(page), str(q)
-    # Une question hors du calage écrirait une entrée fantôme dans
-    # `answers` — c'est la source de vérité de la relecture.
-    if not q.isdigit() or int(q) not in set(question_numbers()[0]):
-        return jsonify({"error": f"question inconnue : {q}"}), 400
     d = load_copy_json(batch, page)
     if d is None:
         return jsonify({"error": "not found"}), 404
-    if char not in effective_spec(int(q), copy=copy_id_of(d))["options"]:
+    # Une question hors du calage écrirait une entrée fantôme dans
+    # `answers` — c'est la source de vérité de la relecture. Le contrôle porte
+    # sur le calage de CETTE copie : les questions valides diffèrent d'une
+    # version du sujet à l'autre.
+    if not q.isdigit() or int(q) not in set(question_numbers(copy_id_of(d))[0]):
+        return jsonify({"error": f"question inconnue : {q}"}), 400
+    if char not in spec_of(int(q), copy_id_of(d))["options"]:
         return jsonify({"error": f"lettre hors options : {char}"}), 400
     ans = d.get("answers", {}).get(q, [])
     if char in ans:
         ans = [c for c in ans if c != char]
     else:
         # respecter l'ordre des options de cette copie
-        opts = effective_spec(int(q), copy=copy_id_of(d))["options"]
+        opts = spec_of(int(q), copy_id_of(d))["options"]
         ans = [c for c in opts if c in (set(ans) | {char})]
     d.setdefault("answers", {})[q] = ans
     # marquer comme modifié manuellement
@@ -2232,7 +2236,8 @@ def api_toggle():
     _mark_reviewed_cells(d, [(int(q), char)])
     save_copy_json(batch, page, d)
     rev = copy_review(d)
-    return jsonify({"ok": True, "answers": d["answers"], "n_open": rev["n_open"]})
+    return jsonify({"ok": True, "answers": d["answers"],
+                    "n_open": copy_open_count(d)})
 
 
 def _mark_reviewed_cells(d: dict, pairs, reviewed: bool = True) -> None:
@@ -2262,11 +2267,11 @@ def _check_qcm_cell(d: dict, q, char=None):
     Une question hors calage écrirait un état de relecture fantôme, qui
     survivrait à toutes les recorrections sans jamais correspondre à rien.
     """
-    if not str(q).isdigit() or int(q) not in set(question_numbers()[0]):
+    if not str(q).isdigit() or int(q) not in set(question_numbers(copy_id_of(d))[0]):
         raise ValueError(f"question inconnue : {q}")
     q = int(q)
     if char is not None:
-        if char not in effective_spec(q, copy=copy_id_of(d))["options"]:
+        if char not in spec_of(q, copy_id_of(d))["options"]:
             raise ValueError(f"lettre hors options : {char}")
     return q
 
@@ -2290,7 +2295,7 @@ def api_review_cell():
     _mark_reviewed_cells(d, [(q, char)], reviewed)
     save_copy_json(batch, page, d)
     return jsonify({"ok": True, "reviewed": reviewed,
-                    "n_open": copy_review(d)["n_open"]})
+                    "n_open": copy_open_count(d)})
 
 
 @app.route("/api/review-question", methods=["POST"])
@@ -2313,7 +2318,7 @@ def api_review_question():
                                      if c["flagged"]], reviewed)
     save_copy_json(batch, page, d)
     return jsonify({"ok": True, "reviewed": reviewed,
-                    "n_open": copy_review(d)["n_open"]})
+                    "n_open": copy_open_count(d)})
 
 
 @app.route("/api/review-copy", methods=["POST"])
@@ -2337,7 +2342,7 @@ def api_review_copy():
     _mark_reviewed_questions(d, [it["q"] for it in rev["items"]
                                  if it["reason"] is not None])
     save_copy_json(batch, page, d)
-    return jsonify({"ok": True, "n_open": copy_review(d)["n_open"]})
+    return jsonify({"ok": True, "n_open": copy_open_count(d)})
 
 
 @app.route("/api/review-identity", methods=["POST"])
@@ -2360,7 +2365,8 @@ def api_review_identity():
     else:
         d.pop("_reviewed_id", None)
     save_copy_json(batch, page, d)
-    return jsonify({"ok": True, "reviewed": reviewed})
+    return jsonify({"ok": True, "reviewed": reviewed,
+                    "n_open": copy_open_count(d)})
 
 
 @app.route("/api/mark_validated", methods=["POST"])
@@ -2429,14 +2435,19 @@ def zoom_img(batch, page, q, char):
             and cache_path.stat().st_mtime >= src.stat().st_mtime):
         return send_file(cache_path, mimetype="image/jpeg")
 
-    layout, by_qchar = get_layout()
+    # ⚠ Le calage dépend de la COPIE : avec des versions du sujet, la case
+    # `10_A` n'existe pas dans le calage de la copie 1. Sans ça, toutes les
+    # vignettes des copies de la seconde version répondaient 404 — les cases
+    # s'affichaient vides dans la review rapide et le zoom.
+    d = load_copy_json(batch, page)
+    copy = copy_id_of(d) if d is not None else 1
+    layout, by_qchar = get_layout(copy)
     key = (int(q), char)
     if key not in by_qchar:
         abort(404)
     b = by_qchar[key]
     # Copie à plusieurs feuilles : la case peut être sur une AUTRE image que
     # celle du JSON de la copie. On résout l'image qui la porte réellement.
-    d = load_copy_json(batch, page)
     if d is not None:
         s = sheet_of_question(d, batch, page).get(int(q))
         if s is not None and (s["batch"], s["page"]) != (batch, page):
@@ -2448,7 +2459,7 @@ def zoom_img(batch, page, q, char):
             if (cache_path.exists() and src.exists()
                     and cache_path.stat().st_mtime >= src.stat().st_mtime):
                 return send_file(cache_path, mimetype="image/jpeg")
-    warped, offsets = get_warped(batch, page)
+    warped, offsets = get_warped(batch, page, copy)
     dx, dy = offsets.get(int(q), (0, 0))
     pad = 12
     x1 = max(0, int(b.xmin) + dx - pad)
@@ -2505,13 +2516,19 @@ def sujet_page():
     # `data-preview-q` et le champ `bid` des régions ne puissent pas diverger.
     preview_keys = block_preview_keys(sub["blocks"])
     q_seq = 0          # numéro de QCM (1,2,…) pour le mapping lettre/barème
+    # Rang du QCM **dans sa version** : c'est ce que l'étudiant voit sur sa
+    # copie. Le rang global (`q`) reste la clé de `parse_tex`/du barème, mais
+    # afficher « Q6 » sur la 1re question de l'après-midi n'a aucun sens — cette
+    # question est imprimée « Question 1 » sur le sujet de l'après-midi.
+    q_in_group = qcm_rank_in_version(sub["blocks"])
     enriched = []
     for b in sub["blocks"]:
-        item = {"bid": b.bid, "kind": b.kind, "data": b.data}
+        item = {"bid": b.bid, "kind": b.kind, "data": b.data, "group": b.group}
         if b.kind == "question_qcm":
             q_seq += 1
             info = qs_by_order.get(q_seq, {})
             item["q"] = q_seq
+            item["q_in_version"] = q_in_group[b.bid]
             item["answers_with_char"] = info.get("answers", [])
             item["max"] = sujet_max_score(q_seq)
         elif b.kind in ("question_open", "question_freeform"):
@@ -2526,16 +2543,36 @@ def sujet_page():
     except Exception:
         available_copies = []
     _cfg = load_config()
+    # Plancher/plafond du barème : ils changent le SCORE (`score.py` les
+    # applique), et c'est le bandeau du sujet qui les commande depuis que
+    # l'évaluation n'a plus de réglage.
     score_defaults = {
         "floor": _cfg.get("question_floor"),
         "ceiling": _cfg.get("question_ceiling"),
+        "total_floor": _cfg.get("total_floor"),
         "show_range": bool(_cfg.get("show_score_range")),
     }
+    # Versions (sujet à groupes) : chacune avec sa plage de numéros de copie et
+    # son propre total de barème. Le total du sujet entier n'aurait aucun sens
+    # ici — une copie du matin ne porte que les questions du matin.
+    # Une seule implémentation, partagée avec les routes de version : deux
+    # calculs séparés finiraient par diverger sur le sort des blocs communs.
+    versions = _versions_payload()
+
     return render_template(
         "sujet.html",
         blocks=enriched,
+        versions=versions,
+        version_names={v["group"]: (v["name"] or v["group"]) for v in versions},
+        common_group=sujet_common_group,
         config=cfg,                                  # SubjectConfig (num_copies, seed, shuffle_*)
-        header=cfg.header,                           # HeaderBlock (title, author, …)
+        # ⚠ Avec des versions, `cfg.header` n'est JAMAIS rendu : chaque
+        # `\exemplaire` imprime le sien (`_render_multi_version_subject`). Le
+        # formulaire éditait donc un en-tête qui n'apparaissait sur aucune
+        # copie. On lui donne celui de la première version, et le sélecteur
+        # ci-dessous laisse passer d'une version à l'autre.
+        header=(cfg.versions[0].header if cfg.versions else cfg.header),
+        version_headers={v.vid: v.header.__dict__.copy() for v in cfg.versions},
         answer_sheet=cfg.answer_sheet,               # AnswerSheetConfig
         answer_sheet_tex=cfg.answer_sheet_tex,       # LaTeX brut (prime sur les champs si non vide)
         mode=sub["mode"],                            # 'canonical' | 'legacy' | 'empty'
@@ -2555,6 +2592,42 @@ def sujet_pdf():
     if not p.exists():
         abort(404)
     return send_file(p, mimetype="application/pdf")
+
+
+@app.route("/sujet/publication/<kind>.pdf")
+def sujet_publication_pdf(kind):
+    """Sujet vierge / corrigé à publier. Produit par `POST /api/sujet/publication`.
+
+    Servi *inline* : on ouvre le document pour le relire avant de le diffuser.
+    """
+    if kind not in PUBLICATION_KINDS:
+        abort(404)
+    p = PUBLICATION_PDF[kind]
+    if not p.exists():
+        abort(404)
+    return send_file(p, mimetype="application/pdf",
+                     download_name=f"{kind}.pdf")
+
+
+@app.route("/api/sujet/publication", methods=["POST"])
+def api_sujet_publication():
+    """Produit le PDF de publication demandé. Renvoie {ok, log, n_pages, url}.
+
+    ⚠ On recompile à chaque demande plutôt que de servir le dernier fichier :
+    un corrigé périmé part chez les étudiants sans que rien ne le signale, et
+    quelques secondes de pdflatex coûtent moins cher que ça.
+    """
+    kind = (request.get_json(force=True) or {}).get("kind")
+    if kind not in PUBLICATION_KINDS:
+        return jsonify({"error": f"type de publication inconnu : {kind!r}"}), 400
+    result = compile_publication(kind)
+    result["kind"] = kind
+    result["label"] = PUBLICATION_LABEL[kind]
+    p = PUBLICATION_PDF[kind]
+    if result.get("ok") and p.exists():
+        result["url"] = (f"/sujet/publication/{kind}.pdf"
+                         f"?v={int(p.stat().st_mtime)}")
+    return jsonify(result)
 
 
 @app.route("/api/sujet/save", methods=["POST"])
@@ -2703,6 +2776,197 @@ def api_sujet_header():
         return _crud_error(e)
 
 
+@app.route("/api/sujet/versions/update", methods=["POST"])
+def api_sujet_version_update():
+    """Patch d'une version : `{vid, name?, num_copies?, header?}`.
+
+    Le groupe AMC n'est pas modifiable ici — cf. `sujet_store.update_version`.
+    """
+    body = _json_body()
+    vid = str(body.get("vid") or "")
+    if not vid:
+        return jsonify({"error": "vid manquant"}), 400
+    try:
+        v = sujet_update_version(vid, body)
+        rows = _versions_payload()
+        row = next((r for r in rows if r["vid"] == vid), None) or {}
+        return jsonify({"ok": True, "version": v,
+                        "first_copy": row.get("first_copy"),
+                        "last_copy": row.get("last_copy"),
+                        "total_max": row.get("total_max"),
+                        "versions": rows,
+                        "ranges": [{"vid": r["vid"],
+                                    "first_copy": r["first_copy"],
+                                    "last_copy": r["last_copy"]} for r in rows]})
+    except Exception as e:
+        return _crud_error(e)
+
+
+def _versions_payload():
+    """Plages de copies + barème par version, recalculés pour TOUTES les versions.
+
+    Changer une version décale les numéros imprimés de toutes les suivantes
+    (AMC numérote en continu) : le front ne peut pas les deviner.
+    """
+    sub = parse_subject()
+    cfg = sub["config"]
+    ranges = version_copy_ranges(cfg)
+    # ⚠ Un bloc sans groupe est **commun** : il est imprimé sur chaque version.
+    # Il compte donc dans le nombre de QCM de toutes, pas d'aucune.
+    n_by_group: dict = {}
+    for b in sub["blocks"]:
+        if b.kind == "question_qcm":
+            n_by_group[b.group] = n_by_group.get(b.group, 0) + 1
+    n_common = n_by_group.get("", 0)
+    # ⚠ Le barème d'une version se calcule depuis SES QUESTIONS, jamais depuis
+    # le numéro de sa première copie. Le lire par `total_max(first_copy)` le
+    # faisait disparaître de l'après-midi dès qu'on changeait le nombre de
+    # copies du matin : le décalage sortait sa première copie du calage
+    # compilé. Il ne dépend pas non plus d'une compilation — une version tout
+    # juste créée affiche son barème.
+    return [{"vid": v.vid, "name": v.name, "group": v.group,
+             "num_copies": v.num_copies, "first_copy": a, "last_copy": z,
+             "n_qcm": n_by_group.get(v.group, 0) + n_common,
+             "header_raw": v.header.raw_tex,
+             "total_max": sujet_version_total_max(sub, v.group)}
+            for v, (a, z) in zip(cfg.versions, ranges)]
+
+
+@app.route("/api/sujet/versions/add", methods=["POST"])
+def api_sujet_version_add():
+    """Ajoute une version. Body: `{name?, group?, num_copies?, vid?, index?, header?}`.
+
+    `vid` / `group` / `index` servent à l'annulation d'une suppression ; ils
+    remettent la version à sa place avec son identité d'origine.
+    ⚠ Sur un sujet à une seule version, l'appel en crée **deux** (cf.
+    `sujet_store.add_version`) : le front doit relire la liste rendue.
+    """
+    body = _json_body()
+    try:
+        v = sujet_add_version(name=body.get("name") or "",
+                              group=body.get("group") or None,
+                              num_copies=body.get("num_copies") or 1,
+                              vid=body.get("vid") or None,
+                              index=body.get("index"),
+                              header=body.get("header") or None)
+        return jsonify({"ok": True, "version": v, "versions": _versions_payload()})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/versions/delete", methods=["POST"])
+def api_sujet_version_delete():
+    """Supprime une version. Body: `{vid, mode?}` → `{ok, undo, versions}`.
+
+    `mode` : `reparent` (défaut — les questions deviennent communes, aucune
+    n'est supprimée) ou `delete_blocks`. `undo` est à renvoyer tel quel à
+    `/api/sujet/versions/restore`.
+    """
+    body = _json_body()
+    vid = str(body.get("vid") or "")
+    if not vid:
+        return jsonify({"error": "vid manquant"}), 400
+    try:
+        undo = sujet_delete_version(vid, mode=str(body.get("mode") or "reparent"))
+        return jsonify({"ok": True, "undo": undo, "versions": _versions_payload()})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/versions/restore", methods=["POST"])
+def api_sujet_version_restore():
+    """Annule une suppression de version : `{undo}` tel que rendu par delete."""
+    body = _json_body()
+    try:
+        v = sujet_restore_version(body.get("undo") or {})
+        return jsonify({"ok": True, "version": v, "versions": _versions_payload()})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/blocks/set-group", methods=["POST"])
+def api_sujet_block_set_group():
+    """Affecte un bloc à une version : `{bid, group}` → `{ok, previous}`.
+
+    `group` vide = bloc commun (imprimé sur toutes les versions). `previous`
+    permet au front d'empiler l'annulation.
+    """
+    body = _json_body()
+    bid = str(body.get("bid") or "")
+    if not bid:
+        return jsonify({"error": "bid manquant"}), 400
+    try:
+        prev = sujet_set_block_group(bid, body.get("group") or "")
+        return jsonify({"ok": True, "previous": prev,
+                        "versions": _versions_payload()})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/header/analyze", methods=["POST"])
+def api_sujet_header_analyze():
+    """Propose une décomposition d'un en-tête brut : `{raw_tex}` →
+    `{ok, fields, leftovers}`.
+
+    ⚠ **N'écrit rien.** Le LaTeX vient du champ de saisie, pas du store, pour
+    que l'analyse porte sur ce que l'utilisateur a sous les yeux — modifications
+    non enregistrées comprises. C'est lui qui applique, après avoir vu.
+    """
+    body = _json_body()
+    try:
+        r = sujet_analyze_header(str(body.get("raw_tex") or ""))
+        # ⚠ Le verdict de l'analyse s'appelle `complete`, pas `ok` : `ok` dit
+        # déjà que la requête a abouti, et les confondre ferait passer « je n'ai
+        # rien su décomposer » pour une panne de serveur.
+        return jsonify({"ok": True, "complete": r["ok"],
+                        "fields": r["fields"], "leftovers": r["leftovers"]})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/header/to-raw", methods=["POST"])
+def api_sujet_header_to_raw():
+    """Rend en LaTeX ce que les champs structurés produiraient : `{fields}` →
+    `{raw_tex}`. **N'écrit rien** — c'est le front qui applique, pour que
+    l'opération passe par la même écriture que le reste et soit annulable.
+
+    Les champs viennent du formulaire (éditions non enregistrées comprises),
+    pas du store : l'utilisateur fige ce qu'il a sous les yeux.
+    """
+    body = _json_body()
+    try:
+        fields = {k: v for k, v in (body.get("fields") or {}).items()
+                  if k in HeaderBlock.__dataclass_fields__}
+        fields["raw_tex"] = ""          # on veut le rendu des CHAMPS
+        return jsonify({"ok": True,
+                        "raw_tex": sujet_header_to_raw(HeaderBlock(**fields))})
+    except Exception as e:
+        return _crud_error(e)
+
+
+@app.route("/api/sujet/answer-sheet/to-raw", methods=["POST"])
+def api_sujet_answer_sheet_to_raw():
+    """Idem pour la feuille de réponses : `{fields, num_copies?}` → `{tex}`.
+
+    ⚠ `num_copies` par défaut = celui du sujet, pas 1 : le rendu en dépend
+    (grille de numéro de copie), et figer celui d'un tirage à une copie
+    donnerait une feuille qui ne correspond pas.
+    """
+    body = _json_body()
+    try:
+        cfg = parse_subject()["config"]
+        fields = {k: v for k, v in (body.get("fields") or {}).items()
+                  if k in AnswerSheetConfig.__dataclass_fields__}
+        base = {**cfg.answer_sheet.__dict__, **fields}
+        n = body.get("num_copies")
+        n = int(n) if n else max(1, int(cfg.num_copies or 1))
+        return jsonify({"ok": True,
+                        "tex": sujet_answer_sheet_to_raw(AnswerSheetConfig(**base),
+                                                         num_copies=n)})
+    except Exception as e:
+        return _crud_error(e)
+
+
 @app.route("/api/sujet/answer-sheet", methods=["POST"])
 def api_sujet_answer_sheet():
     """Patch AnswerSheetConfig — refusé en mode legacy."""
@@ -2725,17 +2989,26 @@ def api_sujet_regenerate_seed():
 
 @app.route("/api/sujet/blocks/add", methods=["POST"])
 def api_sujet_blocks_add():
-    """Ajoute un bloc. Body: {kind, after_bid?, data?, bid?} → {bid}.
+    """Ajoute un bloc. Body: {kind, after_bid?, at_start?, data?, bid?, group?, restore?} → {bid}.
 
     `bid` sert à l'annulation d'une suppression : réutiliser l'identifiant
-    d'origine garde le lien avec le calage compilé (cf. `add_block`)."""
+    d'origine garde le lien avec le calage compilé (cf. `add_block`).
+    `group` restaure la version d'appartenance — sans lui, un bloc restauré
+    serait imprimé dans TOUTES les versions."""
     body = _json_body()
     kind = body.get("kind", "")
     after_bid = body.get("after_bid")
     data = body.get("data") or None
     want_bid = body.get("bid") or None
+    group = body.get("group") or None
+    # `at_start` : réinsertion en tête (cf. `add_block`, conventions opposées de
+    # `after_bid`). `restore` : réinsertion d'un bloc supprimé, y compris d'un
+    # kind désactivé — sinon la suppression serait irréversible.
+    at_start = bool(body.get("at_start"))
+    restore = bool(body.get("restore"))
     try:
-        bid = sujet_add_block(kind, after_bid=after_bid, data=data, bid=want_bid)
+        bid = sujet_add_block(kind, after_bid=after_bid, data=data, bid=want_bid,
+                              group=group, at_start=at_start, restore=restore)
         return jsonify({"ok": True, "bid": bid})
     except Exception as e:
         return _crud_error(e)
@@ -3031,6 +3304,8 @@ def api_bank_list():
         "mes_favoris": args.get("mes_favoris") in ("1", "true", "yes"),
         "mon_tag":     args.get("mon_tag", ""),
         "status":      args.get("status", ""),
+        # Variantes : repliées par défaut (`heads`), `all` rend la liste à plat.
+        "variants":    (args.get("variants") or "heads").strip(),
     }
     try:
         items = _bank().list_questions(filters)
@@ -3408,6 +3683,38 @@ def api_bank_question_categories(bank_id):
         return _cat_error(e)
 
 
+def _var_backend():
+    """Le backend, s'il sait gérer les variantes — sinon 501, pas un
+    `AttributeError` opaque (même contrat que `_cat_backend`)."""
+    b = _bank()
+    if not hasattr(b, "list_variants"):
+        raise NotImplementedError(
+            "Les variantes ne sont pas encore disponibles sur ce type de banque.")
+    return b
+
+
+@app.route("/api/bank/<bank_id>/variants", methods=["GET", "POST"])
+def api_bank_variants(bank_id):
+    """GET → le groupe de variantes de cette question ; POST `{head_id}` →
+    l'y range, `{head_id: null}` → l'en sort.
+
+    La réponse rend **l'état réel du groupe après écriture**, jamais ce qui a
+    été demandé : attacher une question qui avait elle-même des variantes
+    fusionne les deux groupes, et la page doit afficher ce qu'elle a obtenu.
+    """
+    try:
+        b = _var_backend()
+        if request.method == "POST":
+            body = _json_body()
+            head = body.get("head_id")
+            grp = b.set_variant_of(bank_id, None if head in (None, "") else str(head))
+        else:
+            grp = b.list_variants(bank_id)
+        return jsonify({"ok": True, **grp})
+    except Exception as e:
+        return _cat_error(e)
+
+
 @app.route("/api/bank/facets")
 def api_bank_facets():
     """Facettes de navigation : `{all_tags, nodes, max_depth, can_edit}`.
@@ -3417,7 +3724,11 @@ def api_bank_facets():
     """
     try:
         b = _bank()
-        all_tags = {t for q in b.list_questions(None) for t in (q.get("tags") or [])}
+        # ⚠ `variants: "all"` : la liste par défaut replie les variantes sous
+        # leur chef, donc un tag porté par la seule variante disparaîtrait des
+        # facettes — et la case à cocher qui le retrouverait n'existerait pas.
+        all_tags = {t for q in b.list_questions({"variants": "all"})
+                    for t in (q.get("tags") or [])}
         nodes = b.list_categories() if hasattr(b, "list_categories") else []
         return jsonify({
             "ok":        True,
@@ -3484,11 +3795,19 @@ def _sync_bank_stats() -> dict:
                 total_copies += 1
                 copy_id = int(d.get("_copy_id", 1))
                 ans = {int(k): v for k, v in (d.get("answers") or {}).items()}
+                # `q_num` est un indice d'ordre du document ; `answers` et le
+                # barème sont indexés par numéro AMC. Sur un sujet à plusieurs
+                # versions, une question absente de cette copie n'a pas de
+                # numéro : elle appartient à l'autre version, on la saute.
+                t2a = tex_to_amc(copy_id)
                 for bid_bank, q_num in instances:
-                    sel = ans.get(q_num) or []
+                    q_amc = t2a.get(q_num) if t2a else q_num
+                    if q_amc is None:
+                        continue
+                    sel = ans.get(q_amc) or []
                     try:
-                        sc = score_question(q_num, sel, copy=copy_id)
-                        mx = sujet_max_score(q_num, copy=copy_id)
+                        sc = score_question(q_amc, sel, copy=copy_id)
+                        mx = max_of(q_amc, copy_id)
                     except Exception:
                         continue
                     if mx <= 0:
@@ -4216,6 +4535,7 @@ def api_ai_edit_block():
 # --------------------------------------------------------------------------
 
 import threading as _threading
+import time as _time
 import uuid as _uuid
 
 # Tâches asynchrones : task_id → {status, step, progress, log[], started_at,
@@ -4473,31 +4793,340 @@ def api_process_scans_status(task_id):
 
 
 # --------------------------------------------------------------------------
+# Onglet « Courriels » : gabarit, secret SMTP, envoi des notes
+# --------------------------------------------------------------------------
+_MAIL_TASKS: dict = {}
+
+
+def _mail_settings(cfg: dict) -> dict:
+    """Réglages d'envoi, **sans le moindre secret**.
+
+    ⚠ `password_set` est un booléen, jamais la valeur : le mot de passe ne
+    remonte à aucun client. Le champ du formulaire est en écriture seule.
+    """
+    import mail_results as mr
+    sender = (cfg.get("mail_sender") or "").strip()
+    return {
+        "subject":     cfg.get("mail_subject") or "",
+        "date":        cfg.get("mail_date") or "",
+        "sender":      sender,
+        "sender_name": cfg.get("mail_sender_name") or "",
+        "smtp_host":   cfg.get("mail_smtp_host") or "smtp.gmail.com",
+        "smtp_port":   int(cfg.get("mail_smtp_port") or 465),
+        # ⚠ Deux valeurs, pas une : `smtp_user` est l'identifiant EFFECTIF (pour
+        # se connecter), `smtp_user_raw` ce qui est réellement stocké. Le champ
+        # du formulaire affiche le second — sinon l'enregistrement automatique
+        # figerait « = adresse d'expédition » en valeur explicite, et changer
+        # l'adresse ensuite ne l'entraînerait plus.
+        "smtp_user":     (cfg.get("mail_smtp_user") or "").strip() or sender,
+        "smtp_user_raw": (cfg.get("mail_smtp_user") or "").strip(),
+        "score_col":   cfg.get("mail_score_col") or "note_finale",
+        "max_score":   float(cfg.get("mail_max_score") or 0) or None,
+        "password_set": mr.has_password(),
+        "password_path": str(mr.PASSWORD_FILE),
+        "env_password": bool(os.environ.get("AMCX_SMTP_PASSWORD")),
+    }
+
+
+def _mail_effective_max(cfg: dict, settings: dict) -> float:
+    """Barème annoncé : celui réglé dans l'onglet, sinon celui du sujet.
+
+    ⚠ Les deux colonnes vivaient sur deux échelles tant que « note finale »
+    était une agrégation réglable. Depuis que la note d'un examen est son score
+    brut, elles partagent le barème du sujet — et c'est lui qu'il faut
+    annoncer : servir une échelle d'agrégation dirait « 3,5 / 20 » sur un QCM
+    qui vaut 5.
+    """
+    import mail_results as mr
+    if settings["max_score"]:
+        return settings["max_score"]
+    return subject_total_max() or mr.default_max_score(cfg)
+
+
+def _mail_payload(cfg: dict) -> dict:
+    """Tout ce dont l'onglet a besoin : réglages, gabarit, destinataires."""
+    import mail_results as mr
+    st = _mail_settings(cfg)
+    try:
+        data = mr.load_recipients(mr.NOTES_CSV, st["score_col"])
+        recipients, skipped, error = data["recipients"], data["skipped"], ""
+    except mr.MailError as e:
+        recipients, skipped, error = [], [], str(e)
+    done = mr.already_sent(mr.SENT_LOG)
+    for r in recipients:
+        r["sent"] = r["email"] in done
+    return {
+        "settings": st,
+        "fields": list(mr.FIELDS),
+        "template": mr.load_template(),
+        "template_path": str(mr.PROJECT_TEMPLATE),
+        "notes_csv": str(mr.NOTES_CSV),
+        "log_path": str(mr.SENT_LOG),
+        "max_score": _mail_effective_max(cfg, st),
+        "recipients": recipients,
+        "skipped": [{"who": w, "why": y} for w, y in skipped],
+        "error": error,
+    }
+
+
+@app.route("/mail")
+def mail_page():
+    if not project_state.is_valid_project(config.project_root()):
+        return redirect(url_for("index"))
+    return render_template("mail.html", active="mail", **_mail_payload(load_config()))
+
+
+@app.route("/api/mail", methods=["GET"])
+def api_mail():
+    return jsonify({"ok": True, **_mail_payload(load_config())})
+
+
+@app.route("/api/mail/settings", methods=["POST"])
+def api_mail_settings():
+    """Enregistre les réglages. Le mot de passe part AILLEURS (0600, hors projet)."""
+    import mail_results as mr
+    body = request.get_json(force=True, silent=True) or {}
+    updates = {}
+    for key, cfg_key in (("subject", "mail_subject"), ("date", "mail_date"),
+                         ("sender", "mail_sender"),
+                         ("sender_name", "mail_sender_name"),
+                         ("smtp_host", "mail_smtp_host"),
+                         ("smtp_user", "mail_smtp_user"),
+                         ("score_col", "mail_score_col")):
+        if key in body:
+            updates[cfg_key] = str(body[key] or "").strip()
+    if "smtp_port" in body:
+        try:
+            port = int(body["smtp_port"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "port invalide"}), 400
+        if not (1 <= port <= 65535):
+            return jsonify({"error": "port hors bornes"}), 400
+        updates["mail_smtp_port"] = port
+    if "max_score" in body:
+        v = body["max_score"]
+        try:
+            updates["mail_max_score"] = 0 if v in (None, "") else float(v)
+        except (TypeError, ValueError):
+            return jsonify({"error": "barème invalide"}), 400
+    if "template" in body:
+        try:
+            mr.save_template(str(body["template"]))
+        except OSError as e:
+            return jsonify({"error": f"écriture du gabarit : {e}"}), 500
+    # ⚠ Écriture seule, et seulement si la clé est présente : un enregistrement
+    # de réglages ne doit pas effacer le secret parce que le champ est vide.
+    if "password" in body:
+        try:
+            mr.save_password(str(body["password"] or ""))
+        except OSError as e:
+            return jsonify({"error": f"écriture du secret : {e}"}), 500
+    cfg = save_config(updates) if updates else load_config()
+    return jsonify({"ok": True, **_mail_payload(cfg)})
+
+
+@app.route("/api/mail/preview", methods=["POST"])
+def api_mail_preview():
+    """Rend le gabarit pour UN destinataire, sans rien enregistrer ni envoyer.
+
+    Le gabarit vient du corps de la requête, pas du disque : l'aperçu porte sur
+    ce que l'utilisateur a sous les yeux, éditions non enregistrées comprises.
+    """
+    import mail_results as mr
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = load_config()
+    st = _mail_settings(cfg)
+    template = body.get("template")
+    if template is None:
+        template = mr.load_template()
+    try:
+        data = mr.load_recipients(mr.NOTES_CSV, body.get("score_col")
+                                  or st["score_col"])
+    except mr.MailError as e:
+        return jsonify({"error": str(e)}), 400
+    recipients = data["recipients"]
+    want = (body.get("email") or "").strip().lower()
+    rec = next((r for r in recipients if r["email"].lower() == want), None)
+    if rec is None:
+        rec = recipients[0] if recipients else {
+            "email": "etudiant@exemple.fr", "id": "0000",
+            "full_name": "EXEMPLE Camille", "first_name": "Camille", "score": 0.0}
+    max_score = body.get("max_score") or _mail_effective_max(cfg, st)
+    date = body.get("date") or st["date"] or ""
+    sender_name = body.get("sender_name") or st["sender_name"] or st["sender"]
+    try:
+        text = mr.render(template, rec, date=date, max_score=float(max_score),
+                         sender_name=sender_name)
+    except mr.MailError as e:
+        return jsonify({"error": str(e)}), 400
+    subject = (body.get("subject") or st["subject"]
+               or mr.default_subject(date)).strip()
+    try:
+        # L'objet passe par le même moteur : « $name, your result » est un
+        # usage légitime, et un `$champ` fautif doit se voir dans l'aperçu.
+        subject = mr.render(subject, rec, date=date, max_score=float(max_score),
+                            sender_name=sender_name)
+    except mr.MailError as e:
+        return jsonify({"error": f"objet : {e}"}), 400
+    return jsonify({"ok": True, "to": rec["email"], "to_name": rec["full_name"],
+                    "subject": subject, "body": text,
+                    "n_recipients": len(recipients)})
+
+
+def _run_mail(task_id: str, targets: list, opts: dict):
+    """Worker : envoie, journalise, et ne meurt jamais en silence."""
+    import mail_results as mr
+    t = _MAIL_TASKS.get(task_id)
+    if t is None:
+        return
+    try:
+        sent, failures = 0, []
+        ctx = __import__("ssl").create_default_context()
+        import smtplib
+        with smtplib.SMTP_SSL(opts["host"], opts["port"], context=ctx) as smtp:
+            smtp.login(opts["user"], opts["password"])
+            for i, rec in enumerate(targets, 1):
+                body = mr.render(opts["template"], rec, date=opts["date"],
+                                 max_score=opts["max_score"],
+                                 sender_name=opts["sender_name"])
+                msg = mr.build_message(
+                    rec, body,
+                    subject=mr.render(opts["subject"], rec, date=opts["date"],
+                                      max_score=opts["max_score"],
+                                      sender_name=opts["sender_name"]),
+                    sender=opts["sender"], sender_name=opts["sender_name"])
+                try:
+                    smtp.send_message(msg)
+                except Exception as e:              # noqa: BLE001
+                    failures.append(rec["email"])
+                    mr.log_send(mr.SENT_LOG, rec, "echec", str(e)[:200])
+                    t["log"].append(f"✘ {rec['full_name']} <{rec['email']}> : {e}")
+                else:
+                    sent += 1
+                    mr.log_send(mr.SENT_LOG, rec, "ok")
+                    t["log"].append(f"✓ {rec['full_name']} <{rec['email']}>")
+                t.update(progress=round(i * 100 / max(1, len(targets))),
+                         step=f"{i} / {len(targets)}")
+                if opts["delay"]:
+                    _time.sleep(opts["delay"])
+        t.update(status="done", progress=100, sent=sent, failed=len(failures),
+                 step=f"{sent} envoyé(s), {len(failures)} échec(s)")
+    except Exception as e:                          # noqa: BLE001
+        t.update(status="error", step=str(e))
+        t["log"].append(f"✘ {e}")
+
+
+@app.route("/api/mail/send", methods=["POST"])
+def api_mail_send():
+    """Lance l'envoi. `mode` : `test` (une adresse) ou `all`.
+
+    ⚠ L'envoi est irréversible et sort du poste : le front confirme, et ici on
+    refuse tout ce qui n'est pas explicitement demandé — pas de destinataire
+    par défaut, pas de renvoi aux adresses déjà servies sans `force`.
+    """
+    import mail_results as mr
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = load_config()
+    st = _mail_settings(cfg)
+    if any((t or {}).get("status") == "running" for t in _MAIL_TASKS.values()):
+        return jsonify({"error": "Un envoi est déjà en cours."}), 409
+    if not st["sender"]:
+        return jsonify({"error": "Renseigne l'adresse d'expédition."}), 400
+    try:
+        password = mr.smtp_password(interactive=False)
+    except mr.MailError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        data = mr.load_recipients(mr.NOTES_CSV, st["score_col"])
+    except mr.MailError as e:
+        return jsonify({"error": str(e)}), 400
+    recipients = data["recipients"]
+    mode = body.get("mode")
+    if mode == "test":
+        to = (body.get("to") or "").strip()
+        if not to:
+            return jsonify({"error": "Indique l'adresse de test."}), 400
+        # Un vrai destinataire sert de modèle, mais le message part à `to` :
+        # l'essai doit montrer ce que l'étudiant recevra, pas un texte inventé.
+        model = recipients[0] if recipients else {
+            "email": to, "id": "0000", "full_name": "EXEMPLE Camille",
+            "first_name": "Camille", "score": 0.0}
+        targets = [{**model, "email": to}]
+    elif mode == "all":
+        done = set() if body.get("force") else mr.already_sent(mr.SENT_LOG)
+        targets = [r for r in recipients if r["email"] not in done]
+    else:
+        return jsonify({"error": "mode inconnu"}), 400
+    if not targets:
+        return jsonify({"error": "Aucun destinataire à servir."}), 400
+
+    task_id = _uuid.uuid4().hex[:8]
+    _MAIL_TASKS[task_id] = {"status": "running", "step": "Connexion…",
+                            "progress": 0, "log": [], "sent": 0, "failed": 0,
+                            "total": len(targets), "mode": mode}
+    date = st["date"]
+    opts = {
+        "host": st["smtp_host"], "port": st["smtp_port"],
+        "user": st["smtp_user"] or st["sender"], "password": password,
+        "sender": st["sender"], "sender_name": st["sender_name"] or st["sender"],
+        "subject": st["subject"] or mr.default_subject(date),
+        "template": mr.load_template(), "date": date,
+        "max_score": _mail_effective_max(cfg, st),
+        "delay": 0.5,
+    }
+    _threading.Thread(target=_run_mail, args=(task_id, targets, opts),
+                      daemon=True).start()
+    return jsonify({"ok": True, "task_id": task_id, "total": len(targets)})
+
+
+@app.route("/api/mail/send/<task_id>")
+def api_mail_send_status(task_id):
+    t = _MAIL_TASKS.get(task_id)
+    if t is None:
+        return jsonify({"error": "task_id inconnu"}), 404
+    return jsonify({"ok": True, **t})
+
+
+# --------------------------------------------------------------------------
 # Onglet « Questions » : ranking + stats par question (QCM only) + aperçu PDF
 # --------------------------------------------------------------------------
 
-@app.route("/api/questions/stats")
-def api_questions_stats():
+def question_stats() -> dict:
     """Stats par question QCM (depuis raw_responses/) pour le projet actif.
 
-    Pour chaque QCM en ordre document, retourne `{q, tag, type, statement,
-    max_score, n_eval, n_perfect, mean (normalisé ∈ [-∞,1]), scores: [score
-    brut par copie], bank_id}`. Skip open/answerbox (pas de note auto).
-    Le front s'en sert pour ranker la liste et tracer l'histogramme.
+    Pour chaque QCM en ordre document : `{q, tag, type, statement, max_score,
+    mean_raw (points), n_eval, n_perfect, mean (normalisé ∈ [-∞,1]), scores,
+    bank_id, bid, preview_q, q_in_version, version}`. Skip open/answerbox.
+
+    ⚠ **Une seule implémentation**, servie à l'onglet Questions (via
+    `/api/questions/stats`) comme à la page Évaluation, qui n'en affiche que la
+    moyenne brute. Deux calculs finiraient par afficher deux moyennes.
+
+    ⚠ **`q` n'est ni le numéro imprimé ni la clé de l'aperçu.** Trois
+    numérotations coexistent et les confondre a été constaté sur un sujet à deux
+    versions : l'onglet Questions demandait l'aperçu de « Q10 » et recevait le
+    cadre de la question AMC 10, c'est-à-dire la **première** question de
+    l'après-midi (imprimée « Question 1 »), tandis que Q6 à Q9 tombaient sur les
+    colonnes du code étudiant et n'avaient aucun aperçu.
+
+    - `q` : ordre du document — clé de `parse_tex()`, du barème, de `answers` ;
+    - `preview_q` : clé de région (numéro AMC), via `block_preview_keys()` ;
+    - `q_in_version` + `version` : ce qui est imprimé sur la copie.
     """
-    try:
-        sub = parse_subject()
-        qs = parse_tex()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    sub = parse_subject()
+    qs = parse_tex()
     if not qs:
-        return jsonify({"ok": True, "questions": [], "total_copies": 0})
+        return {"questions": [], "total_copies": 0}
 
     # q_num → block AMCx (pour récupérer `_bank_id`). En canonique l'ordre
     # des QCM dans `sub["blocks"]` correspond aux clés de `parse_tex()`.
     qcm_blocks_in_order = [b for b in (sub.get("blocks") or [])
                            if b.kind == "question_qcm"]
     q_to_block = {i: b for i, b in enumerate(qcm_blocks_in_order, start=1)}
+    preview_keys = block_preview_keys(sub.get("blocks") or [])
+    rank_in_version = qcm_rank_in_version(sub.get("blocks") or [])
+    version_names = {v.group: (v.name or v.group)
+                     for v in (sub["config"].versions or [])}
 
     scores_per_q: dict[int, list[float]] = {q: [] for q in qs}
     n_perfect_per_q: dict[int, int] = {q: 0 for q in qs}
@@ -4517,11 +5146,15 @@ def api_questions_stats():
                 total_copies += 1
                 copy_id = int(d.get("_copy_id", 1))
                 ans = {int(k): v for k, v in (d.get("answers") or {}).items()}
+                t2a = tex_to_amc(copy_id)   # cf. note du même motif dans /api/bank/sync
                 for q_num in qs:
-                    sel = ans.get(q_num) or []
+                    q_amc = t2a.get(q_num) if t2a else q_num
+                    if q_amc is None:
+                        continue
+                    sel = ans.get(q_amc) or []
                     try:
-                        sc = score_question(q_num, sel, copy=copy_id)
-                        mx = sujet_max_score(q_num, copy=copy_id)
+                        sc = score_question(q_amc, sel, copy=copy_id)
+                        mx = max_of(q_amc, copy_id)
                     except Exception:
                         continue
                     if mx <= 0:
@@ -4553,10 +5186,28 @@ def api_questions_stats():
             "n_eval":    n_eval,
             "n_perfect": n_perfect_per_q[q_num],
             "mean":      round(mean, 4) if mean is not None else None,
+            # Moyenne en POINTS du barème : ce que l'évaluation affiche. La
+            # version normalisée sert au ranking de l'onglet Questions.
+            "mean_raw":  round(sum(scores) / n_eval, 3) if n_eval else None,
             "scores":    [round(s, 4) for s in scores],
             "bank_id":   (block.data.get("_bank_id") if block else None),
+            "bid":       (block.bid if block else None),
+            # Clé de l'aperçu PDF — surtout pas `q` (cf. la note ci-dessus).
+            "preview_q": (preview_keys.get(block.bid) if block else None),
+            "q_in_version": (rank_in_version.get(block.bid) if block else None),
+            "version":   (version_names.get(block.group, "") if block else ""),
         })
-    return jsonify({"ok": True, "questions": out, "total_copies": total_copies})
+    return {"questions": out, "total_copies": total_copies}
+
+
+@app.route("/api/questions/stats")
+def api_questions_stats():
+    """Stats par question, en JSON, pour l'onglet Questions."""
+    try:
+        out = question_stats()
+    except Exception as e:                              # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, **out})
 
 
 @app.route("/questions")
@@ -4641,6 +5292,25 @@ def sujet_region_info(q):
     })
 
 
+def qcm_rank_in_version(blocks) -> dict:
+    """`{bid: rang du QCM DANS SA VERSION}` — le numéro imprimé sur la copie.
+
+    ⚠ Le rang global (l'ordre du document) reste la clé de `parse_tex()` et du
+    barème, mais il n'est **imprimé nulle part** : avec deux versions, la 6e
+    question du document est « Question 1 » sur le sujet de l'après-midi. Une
+    seule implémentation, partagée par l'onglet Sujet, l'onglet Questions et la
+    page Évaluation — trois numérotations divergentes, c'est trois pages qui
+    nomment la même question différemment.
+    """
+    out, seen = {}, {}
+    for b in blocks:
+        if b.kind != "question_qcm":
+            continue
+        seen[b.group] = seen.get(b.group, 0) + 1
+        out[b.bid] = seen[b.group]
+    return out
+
+
 def block_preview_keys(blocks):
     """`{bid: clé de région}` pour chaque bloc du sujet.
 
@@ -4655,12 +5325,16 @@ def block_preview_keys(blocks):
     classification range la grille de barème d'un `answerbox` (étiquetée 0,1,2…)
     parmi les colonnes du code étudiant.
     """
-    tag_to_q = {}
+    # tag AMC → numéro. Un tag dupliqué (question importée dans son propre
+    # projet d'origine) ne désigne personne : on le retire plutôt que de
+    # garder le dernier vu.
+    by_tag: dict = {}
     try:
         for q_num, tag in layout_store.get_layout().question_names.items():
-            tag_to_q[str(tag).strip()] = q_num
+            by_tag.setdefault(str(tag).strip(), []).append(q_num)
     except Exception:
         pass
+    tag_to_q = {t: n[0] for t, n in by_tag.items() if len(n) == 1}
     try:
         regions = pdf_regions()
     except Exception:
@@ -4671,7 +5345,13 @@ def block_preview_keys(blocks):
         key = None
         if b.kind == "question_qcm":
             qcm_seq += 1
-            key = qcm_seq
+            # ⚠ Par le TAG, pas par la position. Les deux coïncident sur un
+            # sujet simple ; avec plusieurs versions la 6e question du document
+            # porte le numéro AMC 10, et l'indexer par sa position collait son
+            # cadre d'aperçu sur la question de l'autre version.
+            key = tag_to_q.get((b.data.get("tag") or "").strip())
+            if key is None:
+                key = qcm_seq
         elif b.kind in ("question_open", "question_freeform"):
             key = tag_to_q.get((b.data.get("tag") or "").strip())
         elif b.kind == "answerbox":
@@ -4725,12 +5405,18 @@ def sujet_regions_all():
     except Exception:
         total_pages = 0
     # Dimensions par page (px 300 dpi) — mêmes valeurs de repli que pdf_regions().
-    try:
-        lay = layout_store.get_layout()
-        dims = {p: (float(pi.width), float(pi.height))
-                for p, pi in lay.pages.items()}
-    except Exception:
-        dims = {}
+    # Une passe par version : avec deux `\exemplaire`, le calage de la copie 1
+    # ne décrit que les pages de la première moitié du sujet, et l'aperçu ne
+    # montrait donc qu'un seul groupe.
+    dims = {}
+    for _c in sujet_region_copies():
+        try:
+            lay = layout_store.get_layout(copy=_c)
+        except Exception:
+            continue
+        _pm = lay.pdf_page_map()
+        dims.update({_pm.get(p, p): (float(pi.width), float(pi.height))
+                     for p, pi in lay.pages.items()})
     # Chaque région reçoit le `bid` du bloc qu'elle représente : c'est la clé
     # que l'éditeur utilise pour relier un bloc à son cadre. Tous les blocs ont
     # un bid, y compris ceux sans région (pas encore compilés) — c'est ce qui
@@ -4809,6 +5495,61 @@ def api_projects():
     })
 
 
+@app.route("/api/projects/browse")
+def api_projects_browse():
+    """Sous-dossiers d'un dossier, pour choisir où créer un projet.
+
+    `?path=` (défaut : la racine des projets). Renvoie `{path, display,
+    parent, at_root, dirs:[{name, path, is_project}]}` — `parent` vaut `null`
+    quand on est à la racine autorisée, ce qui grise le bouton « remonter ».
+
+    ⚠ Borné au dossier personnel (`project_state.browse_root`) : le serveur
+    n'est pas authentifié et `--host` permet de l'exposer.
+    """
+    raw = request.args.get("path") or ""
+    path = project_state.resolve_dir(raw)
+    try:
+        dirs = project_state.list_subdirs(path)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 403
+    except NotADirectoryError:
+        return jsonify({"error": f"Dossier introuvable : {path}"}), 404
+    root = project_state.browse_root().resolve()
+    resolved = path.resolve()
+    return jsonify({
+        "path": str(resolved),
+        "display": project_state.display_dir(resolved),
+        "parent": None if resolved == root else str(resolved.parent),
+        "at_root": resolved == root,
+        "dirs": dirs,
+    })
+
+
+@app.route("/api/projects/mkdir", methods=["POST"])
+def api_projects_mkdir():
+    """Crée un sous-dossier : `{parent, name}` → `{path, display}`.
+
+    Sert à ranger les projets sans quitter la modale. Même borne que le
+    sélecteur (`project_state.check_under_browse_root`) et même règle de nom
+    que pour un projet — un dossier de rangement peut en devenir un.
+    """
+    body = _json_body()
+    parent = project_state.resolve_dir(body.get("parent"))
+    name = str(body.get("name") or "").strip()
+    try:
+        created = project_state.make_subdir(parent, name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except NotADirectoryError:
+        return jsonify({"error": f"Dossier introuvable : {parent}"}), 404
+    except FileExistsError:
+        return jsonify({"error": f"« {name} » existe déjà."}), 409
+    except OSError as e:
+        return jsonify({"error": f"Création impossible : {e}"}), 400
+    return jsonify({"ok": True, "path": str(created),
+                    "display": project_state.display_dir(created)})
+
+
 @app.route("/api/projects/open", methods=["POST"])
 def api_projects_open():
     """Switche le projet actif vers `path` puis redémarre Flask.
@@ -4836,16 +5577,32 @@ def api_projects_open():
         return jsonify({"error": "Tâche en cours : " + ", ".join(busy)
                                  + ". Attends la fin avant de changer de projet."}), 409
     # Réponse renvoyée AVANT le restart : Flask flushe la réponse, puis on exec.
-    # On utilise un after_request pour différer le restart d'un petit délai
-    # via un thread daemon (le request handler doit retourner pour que la
-    # réponse parte au client).
+    return _restart_after_response(
+        jsonify({"ok": True, "active": str(p),
+                 "active_name": project_state.display_name(p)}), p)
+
+
+def _restart_after_response(resp, target):
+    """Programme le redémarrage du serveur **après** l'envoi de la réponse.
+
+    ⚠ L'ancienne version lançait un thread qui dormait 200 ms puis appelait
+    `os._exit(0)`, sans lien avec l'état de la réponse. Sur une création de
+    projet un peu longue (import d'un `.tex`, écriture disque), la connexion
+    était coupée avant que le corps ne soit parti : le navigateur affichait
+    « Erreur réseau » alors que le projet avait bien été créé.
+
+    `call_on_close` se déclenche quand le corps de la réponse a été remis au
+    serveur WSGI ; le court délai qui suit laisse le socket se vider.
+    """
     import threading
-    def _do_restart():
-        import time
-        time.sleep(0.2)
-        project_state.restart_server_with_project(p)
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return jsonify({"ok": True, "active": str(p), "active_name": project_state.display_name(p)})
+    import time as _t
+
+    def _go():
+        _t.sleep(0.4)
+        project_state.restart_server_with_project(target)
+
+    resp.call_on_close(lambda: threading.Thread(target=_go, daemon=True).start())
+    return resp
 
 
 @app.route("/api/projects/discover")
@@ -4930,11 +5687,13 @@ def api_projects_create():
     from new_project import create_project as np_create
     name = ""
     template = "examen_minimal"
+    parent_raw = ""
     source_tex: Path | None = None
 
     if request.content_type and request.content_type.startswith("multipart/"):
         name = (request.form.get("name") or "").strip()
         template = (request.form.get("template") or "examen_minimal").strip()
+        parent_raw = (request.form.get("parent") or "").strip()
         if template == "from_amc":
             f = request.files.get("file")
             if not f or not f.filename:
@@ -4947,11 +5706,11 @@ def api_projects_create():
         data = request.get_json(silent=True) or {}
         name = (data.get("name") or "").strip()
         template = (data.get("template") or "examen_minimal").strip()
+        parent_raw = (data.get("parent") or "").strip()
 
-    # Validation nom (slug-safe, sans `/`)
-    import re as _re
-    if not name or not _re.match(r"^[A-Za-z0-9_\-. ]+$", name) or name in {".", ".."}:
-        return jsonify({"error": "Nom invalide (lettres, chiffres, espace, _ - .)."}), 400
+    err = project_state.project_name_error(name)
+    if err:
+        return jsonify({"error": err}), 400
 
     # Comme /api/projects/open : la création se termine par un restart.
     busy = running_tasks()
@@ -4959,13 +5718,22 @@ def api_projects_create():
         return jsonify({"error": "Tâche en cours : " + ", ".join(busy)
                                  + ". Attends la fin avant de créer un projet."}), 409
 
-    project_state.ensure_default_root()
-    dest = project_state.DEFAULT_PROJECTS_ROOT / name
+    # Dossier parent choisi par l'utilisateur, défaut = la racine des projets.
+    parent = project_state.resolve_dir(parent_raw)
+    if parent == project_state.DEFAULT_PROJECTS_ROOT:
+        project_state.ensure_default_root()
+    if not parent.is_dir():
+        return jsonify({"error": f"Dossier introuvable : {parent}"}), 400
+    if not os.access(parent, os.W_OK):
+        return jsonify({"error": f"Dossier non modifiable : {parent}"}), 400
+    dest = parent / name
     if dest.exists():
         return jsonify({"error": f"Existe déjà : {dest}"}), 409
 
+    import_report: dict = {}
     try:
-        ag = np_create(dest, template=template, source_tex=source_tex)
+        ag = np_create(dest, template=template, source_tex=source_tex,
+                       report=import_report)
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 400
     except KeyError as e:
@@ -4973,17 +5741,197 @@ def api_projects_create():
     except Exception as e:
         return jsonify({"error": f"Échec création : {e}"}), 500
 
-    # Restart dans un thread daemon pour que la réponse parte d'abord.
-    import threading, time as _t
-    def _do_restart():
-        _t.sleep(0.2)
-        project_state.restart_server_with_project(ag)
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return jsonify({
-        "ok": True,
-        "path": str(ag),
-        "name": project_state.display_name(ag),
-    })
+    out = {"ok": True, "path": str(ag), "name": project_state.display_name(ag)}
+    # Import AMC dont la structure n'a pas été comprise : le projet existe et
+    # se corrige, mais le sujet n'est pas éditable. Le dire — sans ça, l'écran
+    # annonce « projet créé » et l'onglet Sujet s'ouvre vide.
+    if import_report and not import_report.get("migrated"):
+        out["warning"] = import_report.get("log") or (
+            "Le sujet importé n'a pas pu être converti : il reste en lecture "
+            "seule (mode legacy).")
+    return _restart_after_response(jsonify(out), ag)
+
+
+# ==========================================================================
+# Vue d'ensemble — plusieurs examens d'un même dossier
+# ==========================================================================
+# ⚠ Ces routes ne dépendent PAS du projet actif : un ensemble lit ses examens
+# par sous-processus (`cohort.read_members`). Changer d'ensemble ne redémarre
+# donc pas le serveur, contrairement à changer de projet.
+
+
+def _cohort_dir():
+    d = project_state.active_cohort()
+    return d if (d and Path(d).is_dir()) else None
+
+
+def _cohort_view(d: Path) -> dict:
+    """Tout ce que la page affiche : rapport + géométries des graphiques."""
+    rep = cohort.report(d)
+    cfg, cols, rows = rep["config"], rep["columns"], rep["students"]
+    g = float(cfg.get("hist_granularity", 1.0))
+    thr = float(cfg.get("final_threshold", 20.0))
+    pass_mark = float(cfg.get("pass_mark", 10.0))
+    top = compute_multi_series_stats(cohort.calibration_series(rows, cols), g)
+    finals = [r["final"] for r in rows if r.get("final") is not None]
+    bottom = compute_multi_series_stats(
+        [{"name": "Note finale", "color": SERIES_COLORS[0],
+          "values": finals, "opacity": 1.0}], g)
+    stats = dict(bottom["series"][0]["stats"])
+    stats["pass_mark"] = pass_mark
+    stats["n_below"] = sum(1 for v in finals if v < pass_mark)
+    scale = max([c["max"] for c in cols] + [thr, 1.0])
+    return {
+        **rep,
+        "hist_top": multi_histogram_geometry(top, mean_line=False),
+        "hist_bottom": multi_histogram_geometry(bottom, mean_line=True,
+                                                vline=pass_mark),
+        "stats": stats,
+        "formula": build_formula(cols, thr),
+        "scatter": cohort.scatter_data(rows, cols),
+        "ranges": slider_ranges(cfg, cols, scale),
+    }
+
+
+@app.route("/cohorte")
+def cohorte_page():
+    d = _cohort_dir()
+    view = None
+    error = ""
+    if d:
+        try:
+            view = _cohort_view(d)
+        except cohort.CohortError as e:
+            error = str(e)
+    return render_template("cohorte.html", view=view, error=error,
+                           cohort_dir=str(d) if d else "",
+                           default_root=str(project_state.DEFAULT_PROJECTS_ROOT),
+                           active="cohorte")
+
+
+@app.route("/api/cohorte/open", methods=["POST"])
+def api_cohorte_open():
+    """Ouvre un dossier comme ensemble. ⚠ `create` est explicite : poser un
+    `cohorte.json` dans un dossier au hasard n'est pas anodin."""
+    body = request.get_json(force=True)
+    raw = str(body.get("path", "")).strip()
+    if not raw:
+        return jsonify({"error": "chemin vide"}), 400
+    d = Path(raw).expanduser()
+    try:
+        project_state.check_under_browse_root(d)
+    except (ValueError, PermissionError) as e:
+        return jsonify({"error": str(e)}), 403
+    if not d.is_dir():
+        return jsonify({"error": f"{d} n'existe pas"}), 404
+    if not cohort.is_cohort(d):
+        if not body.get("create"):
+            return jsonify({"error": f"{d} ne contient pas de {cohort.COHORT_FILE}",
+                            "can_create": True}), 404
+        cohort.save(d, dict(cohort.DEFAULTS, name=d.name))
+    project_state.set_active_cohort(d)
+    return jsonify({"ok": True, "path": str(d)})
+
+
+@app.route("/api/cohorte/config", methods=["POST"])
+def api_cohorte_config():
+    """Réglages de l'ensemble : plafond, seuil de réussite, granularité, et
+    les trois nombres de chaque colonne (normalisation, échelle, poids)."""
+    d = _cohort_dir()
+    if not d:
+        return jsonify({"error": "aucun ensemble actif"}), 404
+    body = request.get_json(force=True)
+    cfg = cohort.load(d)
+    for key in ("final_threshold", "pass_mark", "hist_granularity"):
+        if key in body and body[key] is not None:
+            cfg[key] = _pos_float(body, key, allow_zero=(key == "pass_mark"))
+    by_path = {e["path"]: e for e in cfg.get("exams", [])}
+    for c in body.get("columns") or []:
+        e = by_path.get(str(c.get("path", "")))
+        if e is None:
+            continue
+        # ⚠ `null` = « auto » (le barème de l'examen), et c'est une valeur : la
+        # remplacer par le nombre affiché figerait l'échelle au barème du jour.
+        for k in ("seuil", "max"):
+            if k in c:
+                e[k] = None if c[k] in (None, "") else float(c[k])
+        if c.get("agg_weight") is not None:
+            e["agg_weight"] = float(c["agg_weight"])
+    cohort.save(d, cfg)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cohorte/exams", methods=["POST"])
+def api_cohorte_exams():
+    """Ajoute ou retire un examen. Retirer ne touche **rien** sur le disque."""
+    d = _cohort_dir()
+    if not d:
+        return jsonify({"error": "aucun ensemble actif"}), 404
+    body = request.get_json(force=True)
+    rel = str(body.get("path", "")).strip()
+    if not rel or ".." in rel or Path(rel).is_absolute():
+        return jsonify({"error": "chemin invalide"}), 400
+    cfg = cohort.load(d)
+    exams = [e for e in cfg.get("exams", []) if e["path"] != rel]
+    if not body.get("remove"):
+        if not (d / rel).is_dir():
+            return jsonify({"error": f"{rel} introuvable"}), 404
+        exams.append({"path": rel, "label": str(body.get("label") or rel),
+                      "seuil": None, "max": None, "agg_weight": 1.0})
+    cfg["exams"] = exams
+    cohort.save(d, cfg)
+    return jsonify({"ok": True, "n_exams": len(exams)})
+
+
+@app.route("/api/cohorte/report", methods=["POST"])
+def api_cohorte_report():
+    """Écrit `<ensemble>/compte_rendu/notes.csv`, **envoyable tel quel**.
+
+    ⚠ Ce n'est pas un second format : c'est le même fichier que
+    `/cohorte/export.csv`, posé là où les courriels le cherchent. Ses colonnes
+    portent les noms qu'attend `mail_results.load_recipients` (`id_canonique`,
+    `nom_prenom`, `courriel`, `note_finale`).
+
+    ⚠ L'envoi lui-même passe par la ligne de commande, avec **`--log` sur le
+    journal de l'ensemble** : le journal du projet ferait sauter les étudiants
+    déjà servis pour l'examen — même adresse, autre note.
+    """
+    d = _cohort_dir()
+    if not d:
+        return jsonify({"error": "aucun ensemble actif"}), 404
+    rep = cohort.report(d)
+    header, rows = cohort.export_rows(rep["students"], rep["columns"])
+    out_dir = Path(d) / "compte_rendu"
+    out_dir.mkdir(exist_ok=True)
+    notes = out_dir / "notes.csv"
+    with open(notes, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+    scale = max([c["max"] for c in rep["columns"]]
+                + [float(rep["config"].get("final_threshold", 20.0))])
+    cmd = (f'python auto_grading/mail_results.py --notes "{notes}" '
+           f'--log "{out_dir / "mail_log.csv"}" --out-of {scale:g}')
+    return jsonify({"ok": True, "path": str(notes), "n_rows": len(rows),
+                    "command": cmd})
+
+
+@app.route("/cohorte/export.csv")
+def cohorte_export_csv():
+    d = _cohort_dir()
+    if not d:
+        abort(404)
+    rep = cohort.report(d)
+    header, rows = cohort.export_rows(rep["students"], rep["columns"])
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(header)
+    w.writerows(rows)
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", rep["name"]) or "ensemble"
+    return app.response_class(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={name}_notes.csv"},
+    )
 
 
 def _check_pdflatex():

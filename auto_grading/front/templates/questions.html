@@ -141,7 +141,7 @@ function renderList() {
 
     li.innerHTML =
       '<div class="q-item-head">' +
-        '<span class="q-num">Q' + q.q + '</span>' +
+        '<span class="q-num">' + escapeHtml(qLabel(q)) + '</span>' +
         '<span class="q-tag">' + escapeHtml(q.tag || '') + '</span>' +
         (q.bank_id ? '<span class="q-bank-icon" title="Importée depuis la banque ' + escapeHtml(q.bank_id) + '">🔗</span>' : '') +
         '<span class="q-success q-success-' + cls + '" title="' +
@@ -157,6 +157,15 @@ function renderList() {
     li.addEventListener('click', () => selectQuestion(q.q));
     host.appendChild(li);
   });
+}
+
+// ⚠ Le numéro affiché est celui IMPRIMÉ sur la copie (rang dans sa version),
+// pas l'ordre du document : avec deux versions, la 6e question du document est
+// « Question 1 » sur le sujet de l'après-midi. Le rang global reste la clé du
+// barème et de `answers`, il n'est imprimé nulle part.
+function qLabel(q) {
+  const n = q.q_in_version || q.q;
+  return 'Q' + n + (q.version ? ' · ' + q.version : '');
 }
 
 function miniBar(q) {
@@ -180,13 +189,22 @@ function selectQuestion(q_num) {
   const q = QUESTIONS.find(x => x.q === q_num);
   if (!q) return;
   document.getElementById('q-pdf-label').textContent =
-    'Q' + q.q + ' — ' + (q.tag || '(sans tag)');
-  loadPdfPreview(q.q);
+    qLabel(q) + ' — ' + (q.tag || '(sans tag)');
+  // ⚠ L'aperçu se demande par `preview_q` (le numéro AMC), jamais par `q` :
+  // demander la région « 10 » pour la 10e question du document rendait le
+  // cadre de la PREMIÈRE question de l'après-midi, et les questions 6 à 9
+  // tombaient sur les colonnes du code étudiant, donc sans aucun aperçu.
+  loadPdfPreview(q.preview_q);
   renderHistogram(q);
 }
 
 async function loadPdfPreview(q_num) {
   const wrap = document.getElementById('q-pdf-wrap');
+  if (q_num == null) {
+    wrap.innerHTML = '<p class="q-empty">Cette question n\'est pas dans le PDF '
+                   + 'compilé — compile le sujet pour la voir.</p>';
+    return;
+  }
   wrap.innerHTML = '<p class="q-empty">Chargement…</p>';
   // Vérifie d'abord que la région existe
   let meta = null;

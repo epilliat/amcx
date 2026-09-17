@@ -13,8 +13,8 @@ import sys
 import time
 from pathlib import Path
 
-from score import question_set, score_copy
-from sujet_store import effective_spec
+from score import all_question_numbers, score_copy
+from sujet_store import amc_question_map, effective_spec
 from student_list import StudentMatcher
 import config
 # `grade_image` (voie Claude-vision) est importé paresseusement dans process() :
@@ -50,7 +50,11 @@ def csv_header() -> list[str]:
     cols = ["batch", "page",
             "id_canonical", "nom_canonical", "prenom_canonical", "match_method", "match_flag",
             "id_lu", "nom_lu"]
-    for q in question_set():
+    # Colonnes = union sur toutes les copies : un sujet à plusieurs versions
+    # (matin/après-midi) donne des questions différentes selon la copie, mais
+    # un CSV a besoin d'un en-tête stable pour tout le lot. Les colonnes d'une
+    # version que la copie n'a pas restent vides.
+    for q in all_question_numbers():
         cols += [f"Q{q}_selected", f"Q{q}_correct", f"Q{q}_score"]
     cols += ["total_qcm", "model_notes", "warnings"]
     return cols
@@ -66,10 +70,14 @@ def csv_row(batch: str, page_num: int, data: dict, scores: dict, match: dict) ->
            data["student_id"], data["student_name"]]
     copy = int(data.get("_copy_id", 1) or 1)
     answers = data.get("answers", {}) or {}
-    for q in question_set():
+    qmap = amc_question_map(copy)["qcm"]
+    for q in all_question_numbers():
+        if qmap and q not in qmap:
+            row += ["", "", ""]      # question d'une autre version du sujet
+            continue
         # Les clés JSON sont des chaînes ; accepter les deux formes.
         sel = "".join(answers.get(str(q), answers.get(q, [])))
-        cor = effective_spec(q, copy=copy)["correct"]
+        cor = effective_spec(qmap.get(q, q), copy=copy)["correct"]
         row += [sel, cor, scores["per_question"].get(q, "")]
     row += [scores["total"], data.get("notes", ""), " | ".join(data.get("warnings", []))]
     return row
@@ -180,7 +188,7 @@ def main():
         except Exception as e:  # noqa
             print(f"  [{i:3d}/{len(items)}] {batch}/page_{path.stem} ERREUR: {e}", flush=True)
             err_row = [batch, int(path.stem.split("_")[1]), "", "", "", "error", str(e), "", ""] \
-                + [""] * (3 * len(question_set())) + ["", "", str(e)]
+                + [""] * (3 * len(all_question_numbers())) + ["", "", str(e)]
             rows.append(err_row)
 
     with open(args.csv, "w", newline="") as f:

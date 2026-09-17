@@ -19,11 +19,12 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from config import load_config, resolve_path
-from grade_imports import _col_label, _first_run, jsonable_cell, read_table
+from grade_imports import (_col_label, _first_run, jsonable_cell, list_sheets,
+                           read_table)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -40,6 +41,11 @@ class Student:
     id: str      # identifiant complet, tel qu'il figure dans la liste
     nom: str
     prenom: str
+    # Courriel institutionnel, quand la liste en porte un. ⚠ Facultatif et
+    # jamais deviné : `""` si la colonne n'est pas configurée. Il ne sert pas au
+    # rattachement des copies (rien ne l'écrit sur une feuille) — seulement à
+    # l'export, pour pouvoir renvoyer les notes.
+    email: str = ""
 
     @property
     def last4(self) -> str:
@@ -122,6 +128,21 @@ def roster_columns(cfg: dict, rows: list[list]) -> tuple[int, int, int | None, i
             by_name("xlsx_prenom_col", required=False), start)
 
 
+def mail_column(cfg: dict, ncol: int) -> int | None:
+    """Index de la colonne courriel, ou `None`.
+
+    Volontairement à part de `roster_columns` : le courriel est une colonne
+    neuve, sans équivalent dans les configs d'avant (qui désignaient les
+    colonnes par intitulé). Absent ou hors bornes = pas de courriel, jamais une
+    erreur — une liste sans courriel reste une liste parfaitement valide.
+    """
+    try:
+        v = int(cfg.get("xlsx_mail_idx", -1))
+    except (TypeError, ValueError):
+        return None
+    return v if 0 <= v < ncol else None
+
+
 def load_students() -> list[Student]:
     """Charge la liste depuis le fichier + les colonnes de la config.
 
@@ -137,25 +158,30 @@ def load_students() -> list[Student]:
     if not path.exists() or path.is_dir():
         raise RosterError(f"fichier introuvable : {path}")
     try:
-        rows = read_table(path)
+        rows = read_table(path, cfg.get("xlsx_sheet") or None)
     except (OSError, ValueError) as e:
         raise RosterError(f"lecture impossible : {e}") from e
     if not rows:
         raise RosterError("fichier vide")
     i_id, i_nom, i_prenom, start = roster_columns(cfg, rows)
-    return _students_from_rows(rows, i_id, i_nom, i_prenom, start)
+    ncol = max((len(r) for r in rows), default=0)
+    return _students_from_rows(rows, i_id, i_nom, i_prenom, start,
+                               mail_column(cfg, ncol))
 
 
 def _students_from_rows(rows, i_id: int, i_nom: int,
-                        i_prenom: int | None, start: int) -> list[Student]:
+                        i_prenom: int | None, start: int,
+                        i_mail: int | None = None) -> list[Student]:
+    def cell(row, i):
+        return _cell_text(row[i]) if (i is not None and i < len(row)) else ""
+
     out = []
     for row in rows[start:]:
-        sid = _cell_text(row[i_id]) if i_id < len(row) else ""
+        sid = cell(row, i_id)
         if not sid:
             continue
-        nom = _cell_text(row[i_nom]) if i_nom < len(row) else ""
-        prenom = _cell_text(row[i_prenom]) if (i_prenom is not None and i_prenom < len(row)) else ""
-        out.append(Student(id=sid, nom=nom, prenom=prenom))
+        out.append(Student(id=sid, nom=cell(row, i_nom),
+                           prenom=cell(row, i_prenom), email=cell(row, i_mail)))
     return _pad_leading_zeros(out)
 
 
@@ -165,13 +191,21 @@ def students_from_file(path, cols: dict) -> list[Student]:
     Sert à contrôler un import avant de l'enregistrer : ce qui est annoncé à
     l'utilisateur est alors ce qui sera réellement chargé, et non un compte de
     lignes.
+
+    ⚠ `cols["sheet"]` fait partie du mapping au même titre qu'un index de
+    colonne : sur un classeur à plusieurs onglets, le contrôle doit porter sur
+    celui que l'utilisateur a désigné, pas sur l'onglet actif du fichier.
     """
-    rows = read_table(path)
+    try:
+        rows = read_table(path, (cols.get("sheet") or None))
+    except (OSError, ValueError) as e:
+        raise RosterError(str(e)) from e
     if not rows:
         raise RosterError("fichier vide")
     ncol = max(len(r) for r in rows)
     i_id, i_nom = int(cols.get("id_idx", -1)), int(cols.get("nom_idx", -1))
     i_prenom = int(cols.get("prenom_idx", -1))
+    i_mail = int(cols.get("mail_idx", -1))
     start = int(cols.get("data_start", 1))
     if not (0 <= i_id < ncol):
         raise RosterError("choisis la colonne du numéro étudiant")
@@ -180,7 +214,8 @@ def students_from_file(path, cols: dict) -> list[Student]:
     if not (0 <= start < len(rows)):
         raise RosterError(f"1re ligne de données hors du fichier ({len(rows)} lignes)")
     return _students_from_rows(rows, i_id, i_nom,
-                               i_prenom if 0 <= i_prenom < ncol else None, start)
+                               i_prenom if 0 <= i_prenom < ncol else None, start,
+                               i_mail if 0 <= i_mail < ncol else None)
 
 
 def roster_report(students: list[Student], id_width: int | None = None,
@@ -241,7 +276,7 @@ def _pad_leading_zeros(students: list[Student]) -> list[Student]:
     if count / len(digits) < 0.8:
         return students        # largeurs hétérogènes : on ne devine rien
     return [
-        Student(id=s.id.zfill(width), nom=s.nom, prenom=s.prenom)
+        replace(s, id=s.id.zfill(width))
         if (s.id.isdigit() and len(s.id) < width) else s
         for s in students
     ]
@@ -251,10 +286,17 @@ def _pad_leading_zeros(students: list[Student]) -> list[Student]:
 # Analyse d'un fichier de liste (pré-remplissage du formulaire d'import)
 # --------------------------------------------------------------------------
 def _profile(rows: list[list], ncol: int) -> list[dict]:
-    """Par colonne : lignes numériques (avec leur largeur), lignes alphabétiques."""
+    """Par colonne : lignes numériques (avec leur largeur), lignes alphabétiques.
+
+    ⚠ Une adresse de courriel sans chiffre (`jean.dupont@ensai.fr`) passe le
+    test « alphabétique » et concourait donc comme colonne de nom. Sur un export
+    où le courriel s'intercale entre le numéro et le nom, c'est LUI qui était
+    proposé comme nom de famille — plausible dans l'aperçu, faux. Une colonne
+    dont les cellules contiennent « @ » est comptée à part.
+    """
     prof = []
     for ci in range(ncol):
-        digit_rows, alpha_rows, widths, upper = [], [], {}, 0
+        digit_rows, alpha_rows, widths, upper, at = [], [], {}, 0, 0
         for ri, r in enumerate(rows):
             t = _cell_text(r[ci]) if ci < len(r) else ""
             if not t:
@@ -263,6 +305,9 @@ def _profile(rows: list[list], ncol: int) -> list[dict]:
                 digit_rows.append(ri)
                 widths[len(t)] = widths.get(len(t), 0) + 1
             elif re.fullmatch(r"[^\W\d_][^\d]*", t, flags=re.UNICODE):
+                if "@" in t:
+                    at += 1
+                    continue
                 alpha_rows.append(ri)
                 if t == t.upper():
                     upper += 1
@@ -271,12 +316,51 @@ def _profile(rows: list[list], ncol: int) -> list[dict]:
             "digit_rows": [ri for ri in digit_rows
                            if len(_cell_text(rows[ri][ci])) == modal_w],
             "alpha_rows": alpha_rows, "modal_width": modal_w,
+            "n_email": at,
             "upper_ratio": upper / len(alpha_rows) if alpha_rows else 0.0,
         })
     return prof
 
 
-def analyze_roster(path) -> dict:
+def sheet_summaries(path, max_sheets: int = 20) -> list[dict]:
+    """Un récapitulatif par onglet : `{name, nrow, ncol, n_students}`.
+
+    ⚠ C'est ce qui rend le choix d'onglet utilisable. Une liste de noms bruts
+    (« Feuil1 », « resultat - 2026-09-14T100003.33 », « Reg-EN », « Reg-FR »)
+    ne dit pas lequel porte une liste d'étudiants, ni combien : le classeur
+    d'où vient ce besoin en a cinq, dont trois exploitables et deux qui
+    décrivent des promotions différentes.
+
+    `n_students` vaut `None` si l'onglet n'a pas été compris — mieux vaut ne
+    rien annoncer qu'annoncer un compte faux. Au-delà de `max_sheets` onglets,
+    on rend les noms seuls : le récapitulatif relit le classeur une fois par
+    onglet, et ce n'est pas un prix à payer sans limite.
+    """
+    names = list_sheets(path)
+    out = []
+    for i, name in enumerate(names):
+        info = {"name": name, "nrow": None, "ncol": None, "n_students": None}
+        if i < max_sheets:
+            try:
+                a = analyze_roster(path, name)
+                info.update(nrow=a["nrow"], ncol=a["ncol"])
+                info["n_students"] = len(
+                    _students_from_rows_safe(path, name, a["suggested"]))
+            except Exception:                            # noqa: BLE001
+                pass                                     # onglet illisible
+        out.append(info)
+    return out
+
+
+def _students_from_rows_safe(path, sheet, suggested) -> list:
+    """Étudiants qu'un onglet rendrait avec les colonnes DÉDUITES pour lui."""
+    try:
+        return students_from_file(path, {**suggested, "sheet": sheet})
+    except RosterError:
+        return []
+
+
+def analyze_roster(path, sheet: str | None = None) -> dict:
     """Devine la structure d'un fichier de liste, pour pré-remplir le formulaire.
 
     ⚠ La détection est **par contenu**, pas par confrontation à la liste des
@@ -287,13 +371,17 @@ def analyze_roster(path) -> dict:
     Règles, dans l'ordre : une colonne d'identifiants est faite de nombres de
     largeur constante ; les lignes de données commencent au premier bloc de
     trois lignes consécutives où cette colonne est remplie ; les colonnes de
-    noms sont alphabétiques ; entre deux, celle qui est le plus en MAJUSCULES
-    est le nom de famille — et à défaut, celle de gauche.
+    noms sont alphabétiques — une colonne de courriels n'en est pas une, cf.
+    `_profile` ; entre deux, celle qui est le plus en MAJUSCULES est le nom de
+    famille — et à défaut, celle de gauche.
     """
-    rows = read_table(path)
+    try:
+        rows = read_table(path, sheet)
+    except (OSError, ValueError) as e:
+        raise RosterError(str(e)) from e
     ncol = max((len(r) for r in rows), default=0)
     if ncol == 0 or not rows:
-        raise RosterError("fichier vide")
+        raise RosterError("onglet vide" if sheet else "fichier vide")
     prof = _profile(rows, ncol)
 
     id_scores = [(len(p["digit_rows"]) if p["modal_width"] >= MIN_ID_WIDTH else 0)
@@ -302,6 +390,15 @@ def analyze_roster(path) -> dict:
     if id_scores[id_idx] < 2:
         id_idx = -1
     data_start = _first_run(prof[id_idx]["digit_rows"]) if id_idx >= 0 else 1
+
+    # La colonne de courriels, elle, se reconnaît sans ambiguïté : c'est celle
+    # qui porte des « @ ». Pas de repli si aucune n'en a — une liste sans
+    # courriel est une liste valide, et deviner ici remplirait l'export de
+    # colonnes fausses.
+    mail_scores = [prof[c]["n_email"] for c in range(ncol)]
+    mail_idx = max(range(ncol), key=lambda c: mail_scores[c]) if ncol else -1
+    if mail_idx < 0 or mail_scores[mail_idx] < 2:
+        mail_idx = -1
 
     name_cols = sorted((c for c in range(ncol)
                         if c != id_idx and len(prof[c]["alpha_rows"]) >= 2),
@@ -332,13 +429,16 @@ def analyze_roster(path) -> dict:
             "sample": sample,
             "looks_id": ci == id_idx,
             "looks_name": ci in (nom_idx, prenom_idx),
+            "looks_mail": ci == mail_idx,
         })
     return {
         "nrow": len(rows), "ncol": ncol, "columns": columns,
+        "sheet": sheet,
         "preview": [[jsonable_cell(c) for c in (list(r) + [None] * (ncol - len(r)))]
                     for r in rows[:8]],
         "suggested": {"id_idx": id_idx, "nom_idx": nom_idx,
-                      "prenom_idx": prenom_idx, "data_start": data_start},
+                      "prenom_idx": prenom_idx, "mail_idx": mail_idx,
+                      "data_start": data_start},
     }
 
 
@@ -346,14 +446,25 @@ def analyze_roster(path) -> dict:
 # Rattachement d'une copie à un étudiant
 # --------------------------------------------------------------------------
 class StudentMatcher:
-    def __init__(self) -> None:
+    def __init__(self, students: list | None = None) -> None:
+        """`students` fourni = liste explicite, sans lire le projet actif.
+
+        C'est ce qui permet de rattacher des notes importées à une population
+        qui n'est pas celle d'un projet — la réunion des étudiants de plusieurs
+        examens, par exemple. Sans argument, le comportement est inchangé : la
+        liste du projet actif.
+        """
         self.error = ""
-        try:
-            self.students = load_students()
-        except RosterError as e:
-            # Ne jamais lever ici : toutes les pages construisent un matcher.
-            # L'erreur est portée par l'objet et affichée là où elle se voit.
-            self.students, self.error = [], str(e)
+        if students is not None:
+            self.students = list(students)
+        else:
+            try:
+                self.students = load_students()
+            except RosterError as e:
+                # Ne jamais lever ici : toutes les pages construisent un
+                # matcher. L'erreur est portée par l'objet et affichée là où
+                # elle se voit.
+                self.students, self.error = [], str(e)
         self._by_id = {s.id: s for s in self.students}
         self._by_suffix: dict[int, dict[str, Student | None]] = {}
         # Index de noms normalisés pour le fuzzy. Deux homonymes partagent la

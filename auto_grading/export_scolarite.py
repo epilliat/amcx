@@ -42,6 +42,9 @@ QCM_COL = 6          # colonne F : QCM
 FINALE_COL = 7       # colonne G : note finale
 
 
+from exam_results import ABSENT_MARK   # unique déclaration (cf. son en-tête)
+
+
 def _num(v):
     """Convertit une chaîne csv en float, ou None si vide/illisible."""
     if v is None or str(v).strip() == "":
@@ -64,13 +67,22 @@ def main(out_path: Path) -> None:
                  "→ clique « Sauvegarder le compte rendu » dans le dashboard d'abord.")
 
     # 1. notes.csv → {id_canonique: (qcm_brut_sur_32, note_finale)}
+    # `absents` à part : depuis que l'export porte une ligne ABS par étudiant
+    # sans copie, ces lignes existent dans le csv. Les traiter comme les autres
+    # les compterait « remplis » avec une cellule vide — exactement
+    # l'ambiguïté que le marqueur ABS sert à lever.
     by_id: dict[str, tuple] = {}
+    absents: list[str] = []
     with open(NOTES_CSV, encoding="utf-8") as f:
         for row in csv.DictReader(f):
             sid = (row.get("id_canonique") or "").strip()
-            if sid:
-                by_id[sid] = (_num(row.get("QCM_brut_sur_32")),
-                              _num(row.get("note_finale")))
+            if not sid:
+                continue
+            if (row.get("note_finale") or "").strip().upper() == ABSENT_MARK:
+                absents.append(sid)
+                continue
+            by_id[sid] = (_num(row.get("QCM_brut_sur_32")),
+                          _num(row.get("note_finale")))
 
     # 2. matcher pour relier un nom du fichier scolarité → étudiant → id
     matcher = StudentMatcher()
@@ -80,12 +92,20 @@ def main(out_path: Path) -> None:
     ws = wb.active
     ws.cell(row=1, column=FINALE_COL, value="note finale")   # en-tête colonne G
 
-    n_filled = n_missing = 0
+    absent_ids = set(absents)
+    n_filled = n_missing = n_absent = 0
     for r in range(DATA_START_ROW, ws.max_row + 1):
         name = ws.cell(row=r, column=NAME_COL).value
         if name is None or not str(name).strip():
             continue
         student, _score = matcher.by_name(str(name))
+        if student is not None and student.id in absent_ids:
+            n_absent += 1
+            # ⚠ La cellule reste VIDE, pas « ABS » : la colonne est numérique
+            # dans le modèle de la scolarité, et y écrire du texte peut faire
+            # échouer leur import. L'absence est dite ici, pas devinée là-bas.
+            print(f"  ⊘ absent (pas de copie) : {name}")
+            continue
         rec = by_id.get(student.id) if student is not None else None
         if rec is None:
             n_missing += 1
@@ -99,7 +119,8 @@ def main(out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     print(f"\n✓ {out_path}")
-    print(f"  {n_filled} étudiants remplis ; {n_missing} sans correspondance.")
+    print(f"  {n_filled} étudiants remplis ; {n_absent} absent(s) laissé(s) "
+          f"vides ; {n_missing} sans correspondance.")
 
 
 if __name__ == "__main__":

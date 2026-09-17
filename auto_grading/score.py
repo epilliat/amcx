@@ -72,12 +72,46 @@ def effective_bounds(q: int, copy: int = 1) -> tuple:
     return (gf if lo is None else lo, gc if hi is None else hi)
 
 
-def question_set() -> list[int]:
-    """Numéros des questions QCM à noter, dérivés du sujet."""
+def question_set(copy: int = 1) -> list[int]:
+    """Numéros **AMC** des questions QCM à noter pour cette copie.
+
+    ⚠ Ce sont les numéros du calage (ceux qui indexent `answers` dans
+    `raw_responses/`), pas les indices d'ordre du document. Les deux coïncident
+    sur un sujet simple — un QCM par question, aucun groupe, code étudiant
+    après les questions — et c'est ce qui masquait la confusion.
+
+    Ils divergent dès qu'un sujet a **plusieurs versions** (matin/après-midi) :
+    la copie 1 porte les questions AMC 1-5 et la copie 2 les 10-14, alors que
+    l'ordre du document numérote les dix de 1 à 10. Itérer l'ordre du document
+    faisait alors chercher `answers[1]` sur une copie qui n'a que des clés
+    10-14 → toutes les questions à zéro, sans un mot.
+
+    Sans calage lisible (projet jamais compilé), repli sur l'ordre du document.
+    """
     try:
+        qmap = amc_question_map(copy)["qcm"]
+        if qmap:
+            return sorted(qmap)
         return sorted(parse_tex().keys())
     except Exception:
         return []
+
+
+def all_question_numbers() -> list[int]:
+    """Union des numéros AMC notés, toutes copies confondues.
+
+    Sert aux sorties qui ont besoin d'un jeu de colonnes **stable** pour tout un
+    lot (l'en-tête CSV), alors que chaque copie n'en remplit qu'une partie.
+    """
+    try:
+        import layout_store
+        copies = layout_store.get_available_copies() or (1,)
+    except Exception:
+        copies = (1,)
+    out: set[int] = set()
+    for c in copies:
+        out.update(question_set(c))
+    return sorted(out)
 
 
 def score_question(q: int, selected: list[str], copy: int = 1,
@@ -141,7 +175,7 @@ def score_copy(answers: dict[int, list[str]], copy: int = 1, copy_floor=_UNSET) 
     if copy_floor is _UNSET:
         copy_floor = floors_from_config()[1]
     per_q = {q: score_question(q, answers.get(q, []), copy=copy)
-             for q in question_set()}
+             for q in question_set(copy)}
     total = round(sum(per_q.values()), 4)
     if copy_floor is not None:
         total = max(total, float(copy_floor))
@@ -149,9 +183,13 @@ def score_copy(answers: dict[int, list[str]], copy: int = 1, copy_floor=_UNSET) 
 
 
 if __name__ == "__main__":
+    # ⚠ `question_set` rend des numéros AMC, `effective_spec` prend un indice
+    # d'ordre du document : la carte du calage fait le pont (cf. sa docstring).
+    _qmap = amc_question_map(1)["qcm"]
+    _spec = lambda q: effective_spec(_qmap.get(q, q))   # noqa: E731
     qset = question_set()
     # auto-test: copie parfaite = total max du barème courant
-    perfect = {q: list(effective_spec(q)["correct"]) for q in qset}
+    perfect = {q: list(_spec(q)["correct"]) for q in qset}
     r = score_copy(perfect)
     print("Copie parfaite:", r["total"], "/ total_max =", total_max())
     assert abs(r["total"] - total_max()) < 1e-6, (r["total"], total_max())
@@ -163,16 +201,16 @@ if __name__ == "__main__":
     assert r["total"] == 0.0
 
     # cocher tout: les single donnent 0 (pas exact), les mult cumulent malus (sans plancher)
-    all_ticked = {q: list(effective_spec(q)["options"]) for q in qset}
+    all_ticked = {q: list(_spec(q)["options"]) for q in qset}
     r = score_copy(all_ticked)
     print("Tout coché:", r["total"])
 
     # une mauvaise réponse seule sur une question mult donne bien un score négatif
-    mult_qs = [q for q in qset if effective_spec(q)["type"] == "mult"]
+    mult_qs = [q for q in qset if _spec(q)["type"] == "mult"]
     if mult_qs:
         neg = {q: [] for q in qset}
         wrong_q = mult_qs[0]
-        spec = effective_spec(wrong_q)
+        spec = _spec(wrong_q)
         wrong = [c for c in spec["options"] if c not in spec["correct"]]
         if wrong:
             neg[wrong_q] = [wrong[0]]

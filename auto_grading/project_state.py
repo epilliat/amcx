@@ -28,11 +28,156 @@ APP_NAME = "AMCx"
 STATE_DIR = Path.home() / ".config" / "amcx"
 ACTIVE_FILE = STATE_DIR / "active_project"
 RECENT_FILE = STATE_DIR / "recent.json"
+# Ensemble actif (plusieurs examens d'un même dossier). ⚠ Indépendant du
+# projet actif, et **sans redémarrage** : une vue d'ensemble lit ses examens
+# par sous-processus, elle ne fige aucun chemin dans ce process.
+COHORT_FILE = STATE_DIR / "active_cohort"
 
 DEFAULT_PROJECTS_ROOT = Path.home() / "Documents" / "AMCx"
 
 
 # --- état global ------------------------------------------------------------
+
+# Caractères qui cassent un chemin (POSIX ou Windows) ou permettent d'en sortir.
+_BAD_NAME_CHARS = set('/\\:*?"<>|')
+# Noms de périphérique réservés sous Windows : créer « CON » ou « NUL.txt » y
+# échoue ou ouvre le périphérique, quelle que soit la casse ou l'extension.
+_WIN_RESERVED = {"con", "prn", "aux", "nul",
+                 *(f"com{i}" for i in range(1, 10)),
+                 *(f"lpt{i}" for i in range(1, 10))}
+
+
+def resolve_dir(raw: str | None) -> Path:
+    """Chemin de dossier saisi par l'utilisateur → `Path` absolu.
+
+    Développe `~` et les variables d'environnement : le champ affiche
+    `~/Documents/AMCx`, et l'utilisateur s'attend à pouvoir le taper.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_PROJECTS_ROOT
+    return Path(os.path.expandvars(s)).expanduser()
+
+
+def display_dir(path: Path) -> str:
+    """Chemin abrégé avec `~` pour l'affichage."""
+    home = Path.home()
+    if path == home:
+        return "~"
+    try:
+        return "~/" + str(path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def browse_root() -> Path:
+    """Racine au-delà de laquelle le sélecteur de dossier ne remonte pas.
+
+    ⚠ Le serveur n'a **aucune authentification** et `--host` permet de
+    l'exposer : une route qui énumère n'importe quel dossier de la machine
+    serait une primitive de reconnaissance offerte à qui l'atteint. Le
+    sélecteur est donc borné au dossier personnel — ce qui couvre tous les cas
+    réalistes — et le champ texte reste libre pour poser un projet ailleurs
+    (un disque externe), sans que rien ne soit énumérable pour autant.
+    """
+    return Path.home()
+
+
+def check_under_browse_root(path: Path) -> Path:
+    """Résout `path` et vérifie qu'il ne sort pas de `browse_root()`.
+
+    Partagé par la lecture (`list_subdirs`) et l'écriture (`make_subdir`) :
+    deux contrôles séparés finiraient par diverger, et c'est celui de
+    l'écriture qui coûterait cher.
+    """
+    root = browse_root().resolve()
+    try:
+        resolved = path.resolve()
+    except OSError as e:
+        raise NotADirectoryError(str(e)) from e
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"hors du dossier personnel : {resolved}")
+    return resolved
+
+
+def make_subdir(parent: Path, name: str) -> Path:
+    """Crée `parent/name` et retourne son chemin.
+
+    Le nom passe par `project_name_error` : un dossier de rangement obéit aux
+    mêmes contraintes qu'un dossier de projet (il peut en devenir un). Lève
+    `ValueError` (nom refusé, hors racine), `NotADirectoryError` (parent
+    absent) ou `FileExistsError`.
+    """
+    err = project_name_error(name)
+    if err:
+        raise ValueError(err)
+    resolved = check_under_browse_root(parent)
+    if not resolved.is_dir():
+        raise NotADirectoryError(str(resolved))
+    target = resolved / name
+    if target.exists():
+        raise FileExistsError(str(target))
+    target.mkdir(parents=False)
+    return target
+
+
+def list_subdirs(path: Path) -> list[dict]:
+    """Sous-dossiers directs de `path`, triés, sans les dossiers cachés.
+
+    Lève `ValueError` si `path` sort de `browse_root()`, `NotADirectoryError`
+    s'il n'existe pas. Un sous-dossier illisible est ignoré plutôt que de faire
+    échouer toute la liste.
+    """
+    resolved = check_under_browse_root(path)
+    if not resolved.is_dir():
+        raise NotADirectoryError(str(resolved))
+    out = []
+    try:
+        entries = sorted(resolved.iterdir(), key=lambda p: p.name.lower())
+    except OSError as e:
+        raise NotADirectoryError(str(e)) from e
+    for d in entries:
+        if d.name.startswith("."):
+            continue
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue
+        out.append({"name": d.name, "path": str(d),
+                    "is_project": is_valid_project(d) or is_valid_project(d / "auto_grading")})
+    return out
+
+
+def project_name_error(name: str) -> str | None:
+    """Message d'erreur si `name` ne peut pas être un nom de dossier de projet.
+
+    ⚠ Liste **noire**, pas blanche. L'ancienne version n'acceptait que
+    `[A-Za-z0-9_-. ]` : un nom français accentué (« Régression ») était refusé,
+    avec un message annonçant « lettres » qui ne disait pas pourquoi. On
+    n'interdit donc que ce qui casse vraiment un chemin, et le message nomme le
+    problème.
+    """
+    if not name:
+        return "Donne un nom au projet."
+    if len(name) > 100:
+        return "Nom trop long (100 caractères maximum)."
+    bad = sorted({c for c in name if c in _BAD_NAME_CHARS})
+    if bad:
+        return ("Caractère interdit dans un nom de dossier : "
+                + " ".join(bad) + ".")
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return "Le nom contient un caractère de contrôle."
+    if name in {".", ".."} or set(name) == {"."}:
+        return "Nom réservé."
+    # Windows retire silencieusement les points et espaces de fin : le dossier
+    # créé ne porterait pas le nom affiché.
+    if name[-1] in ". ":
+        return "Le nom ne peut pas finir par un point ni un espace."
+    if name.split(".")[0].lower() in _WIN_RESERVED:
+        return f"« {name} » est un nom réservé par Windows."
+    return None
+
 
 def ensure_state_dir() -> Path:
     """Crée `~/.config/amcx/` au besoin et retourne le chemin."""
@@ -96,6 +241,27 @@ def set_active_project(path: Path) -> None:
     p = Path(path).expanduser().resolve()
     ACTIVE_FILE.write_text(str(p), encoding="utf-8")
     _touch_recent(p)
+
+
+def active_cohort() -> Path | None:
+    """Dossier de l'ensemble actif, ou `None`. Env `AMCX_COHORT_DIR` prioritaire."""
+    env = os.environ.get("AMCX_COHORT_DIR")
+    if env:
+        return Path(env).expanduser()
+    if COHORT_FILE.is_file():
+        raw = COHORT_FILE.read_text(encoding="utf-8").strip()
+        if raw:
+            return Path(raw)
+    return None
+
+
+def set_active_cohort(path: Path) -> None:
+    ensure_state_dir()
+    COHORT_FILE.write_text(str(Path(path).resolve()), encoding="utf-8")
+
+
+def clear_active_cohort() -> None:
+    COHORT_FILE.unlink(missing_ok=True)
 
 
 def clear_active_project() -> None:

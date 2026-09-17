@@ -70,21 +70,50 @@ def _read_csv(path) -> list[list]:
             for row in reader]
 
 
-def _read_xlsx(path) -> list[list]:
+def list_sheets(path) -> list[str]:
+    """Noms des onglets d'un classeur ; `[]` pour un csv (qui n'en a pas)."""
+    if Path(path).suffix.lower() not in (".xlsx", ".xlsm"):
+        return []
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+def _read_xlsx(path, sheet: str | None = None) -> list[list]:
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb.active
-    rows = [list(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
-    return rows
+    try:
+        if sheet is None:
+            ws = wb.active
+        elif sheet in wb.sheetnames:
+            ws = wb[sheet]
+        else:
+            # ⚠ Ne JAMAIS retomber sur `wb.active` : l'onglet a été renommé ou
+            # supprimé depuis l'import, et lire silencieusement un autre onglet
+            # rendrait une tout autre promo — c'est précisément le défaut que
+            # le choix d'onglet corrige.
+            raise ValueError(
+                f"onglet « {sheet} » absent du classeur "
+                f"(présents : {', '.join(wb.sheetnames)})")
+        return [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
 
 
-def read_table(path) -> list[list]:
-    """Toutes les lignes d'un fichier csv/xlsx, paddées à la largeur max."""
+def read_table(path, sheet: str | None = None) -> list[list]:
+    """Toutes les lignes d'un fichier csv/xlsx, paddées à la largeur max.
+
+    ⚠ `sheet=None` sur un classeur lit l'onglet **actif**, c'est-à-dire celui
+    qui était sélectionné au dernier enregistrement — pas le premier, et rien
+    qui se voie dans l'interface. Tout appelant qui expose un classeur à
+    l'utilisateur doit donc lui faire choisir l'onglet et le passer ici.
+    """
     ext = Path(path).suffix.lower()
     if ext == ".csv":
         rows = _read_csv(path)
     elif ext in (".xlsx", ".xlsm"):
-        rows = _read_xlsx(path)
+        rows = _read_xlsx(path, sheet)
     else:
         raise ValueError(f"format non supporté: {ext}")
     ncol = max((len(r) for r in rows), default=0)
@@ -272,7 +301,8 @@ def _resolve_join_cell(cell, join_mode: str, matcher, overrides: dict) -> str | 
 def build_series_map(file_cfg: dict, idx: int, matcher=None) -> dict[str, float]:
     """{identifiant_canonique: note} pour une colonne de notes d'un fichier."""
     try:
-        rows = read_table(resolve_path(file_cfg["path"]))
+        rows = read_table(resolve_path(file_cfg["path"]),
+                          file_cfg.get("sheet") or None)
     except (OSError, ValueError):
         return {}
     join_col = file_cfg.get("join_col", 0)
@@ -318,7 +348,8 @@ def match_report(file_cfg: dict, matcher) -> dict:
     empty = {"n_matched": 0, "n_ambiguous": 0, "n_unmatched": 0,
              "n_ignored": 0, "problems": [], "resolved": []}
     try:
-        rows = read_table(resolve_path(file_cfg["path"]))
+        rows = read_table(resolve_path(file_cfg["path"]),
+                          file_cfg.get("sheet") or None)
     except (OSError, ValueError):
         return empty
     join_col = file_cfg.get("join_col", 0)

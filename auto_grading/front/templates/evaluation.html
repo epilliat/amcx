@@ -1,0 +1,693 @@
+{% extends "base.html" %}
+{% block title %}Évaluation — {{ total }} copies{% endblock %}
+
+{% block content %}
+
+<div class="dash">
+
+  <aside class="dash-left">
+    <div class="dash-left-head">
+      <input type="text" id="dash-search" placeholder="Rechercher nom / ID…">
+      <div class="filters chips">
+        <button data-filter="all" class="active">Tous</button>
+        <button data-filter="diff">Diff CV/AMC</button>
+        <button data-filter="amc_unvalidated">AMC non validé</button>
+        <button data-filter="no_mires">NO_MIRES</button>
+        <button data-filter="id_incomplet">ID incomplet</button>
+        <button data-filter="ambiguous">Ambigu</button>
+        <button data-filter="validated">Validés</button>
+      </div>
+      <div class="list-count"><span id="visible-count">{{ total }}</span> / {{ total }} copies</div>
+    </div>
+    <div class="student-list" id="student-list">
+      {% for c in copies %}
+        {% set has_diff = (c.cv_amc_diff_count is not none) and (c.cv_amc_diff_count > 0) %}
+        <div class="student-row"
+             data-batch="{{ c.batch }}" data-page="{{ c.page }}"
+             data-flags="{{ ' '.join(c.flags) }}"
+             data-diff="{{ 1 if has_diff else 0 }}"
+             data-search="{{ c.canonical_name|lower }} {{ c.canonical_id }} {{ c.student_id }}">
+          <span class="sr-name">{{ c.canonical_name }}</span>
+          <span class="sr-dots">
+            {% if c.validated %}<span class="dot dot-validated" title="validé"></span>{% endif %}
+            {% if has_diff %}<span class="dot dot-diff" title="diff CV/AMC"></span>{% endif %}
+            {% if 'ambiguous' in c.flags %}<span class="dot dot-ambig" title="ambigu"></span>{% endif %}
+            {% if 'no_mires' in c.flags or 'id_incomplet' in c.flags %}<span class="dot dot-danger" title="lecture incertaine"></span>{% endif %}
+          </span>
+          <span class="sr-score">{{ "%.1f"|format(c.score) }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <main class="dash-right">
+
+    {# ===== Fichiers du projet : copies scannées + liste étudiants ============== #}
+    <section class="project-files">
+      <h2 class="pf-title">📁 Fichiers du projet</h2>
+      <div class="pf-grid">
+
+        {# Carte 1 : copies scannées (PDF) #}
+        <div class="pf-card pf-card-scans">
+          <div class="pf-card-head">
+            <span class="pf-card-icon">📄</span>
+            <span>Copies scannées (PDF)</span>
+          </div>
+          <div class="pf-card-body">
+            <div class="pf-path">
+              Dossier : <code>{{ project_files.amc_dir }}</code>
+            </div>
+            {% if project_files.scan_pdfs %}
+            <ul class="pf-pdf-list">
+              {% for pdf in project_files.scan_pdfs %}
+              <li>
+                <button type="button" class="pf-pdf-hide" data-name="{{ pdf.name }}"
+                        title="Retirer ce PDF de la liste AMCx (fichier conservé sur disque)">✕</button>
+                <div class="pf-pdf-info">
+                  <span class="pf-pdf-name">{{ pdf.name }}</span>
+                  <span class="pf-pdf-meta">{{ pdf.pages }} pages · {{ "%.1f"|format(pdf.size_mb) }} Mo · {{ pdf.mtime }}</span>
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+            <div class="pf-stats">
+              📥 <strong>{{ project_files.n_extracted }}</strong> extraites ·
+              ⚙ <strong>{{ project_files.n_corrected }}</strong> corrigées ·
+              ✓ <strong>{{ project_files.n_validated }}</strong> validées
+            </div>
+            {% else %}
+            <div class="pf-empty">Aucun PDF dans <code>{{ project_files.amc_dir }}</code>.</div>
+            {% endif %}
+            {% if project_files.scan_pdfs_hidden %}
+            <details class="pf-hidden-pdfs">
+              <summary>{{ project_files.scan_pdfs_hidden|length }} fichier(s) retiré(s) de la liste</summary>
+              <ul class="pf-pdf-list pf-hidden-list">
+                {% for pdf in project_files.scan_pdfs_hidden %}
+                <li>
+                  <button type="button" class="pf-pdf-unhide" data-name="{{ pdf.name }}"
+                          title="Ré-ajouter à la liste AMCx">+</button>
+                  <span class="pf-pdf-name pf-pdf-hidden">{{ pdf.name }}</span>
+                </li>
+                {% endfor %}
+              </ul>
+            </details>
+            {% endif %}
+
+            <div class="pf-actions">
+              <label class="btn btn-primary btn-small">
+                + Ajouter un PDF
+                <input type="file" accept=".pdf" hidden id="pf-upload-pdf">
+              </label>
+              <button type="button" class="btn btn-small" id="pf-process"
+                      {% if not project_files.scan_pdfs %}disabled{% endif %}>
+                ⚙ Traiter les scans
+              </button>
+              <span id="pf-status" class="settings-hint"></span>
+            </div>
+
+            <div class="pf-progress" id="pf-progress" hidden>
+              <div class="pf-progress-step" id="pf-progress-step">Préparation…</div>
+              <div class="pf-progress-bar">
+                <div class="pf-progress-fill" id="pf-progress-fill" style="width:0%"></div>
+              </div>
+              <details class="pf-progress-log-wrap">
+                <summary>voir le détail</summary>
+                <pre class="pf-progress-log" id="pf-progress-log"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        {# Carte 2 : liste étudiants xlsx #}
+        <div class="pf-card pf-card-students">
+          <div class="pf-card-head">
+            <span class="pf-card-icon">📋</span>
+            <span>Liste étudiants</span>
+          </div>
+          <div class="pf-card-body">
+            {% if project_files.student_xlsx_name %}
+            <div class="pf-xlsx-file">
+              Fichier : <code>{{ project_files.student_xlsx_name }}</code>
+              {% if project_files.student_sheet %}
+              <span class="pf-sheet">onglet <b>{{ project_files.student_sheet }}</b></span>
+              {% endif %}
+              {% if not project_files.student_xlsx_exists %}
+              <span class="pf-warn">⚠ introuvable</span>
+              {% endif %}
+            </div>
+            <div class="pf-stats">
+              👥 <strong>{{ project_files.n_students }}</strong> étudiants
+            </div>
+            {% for w in project_files.student_warnings %}
+            <div class="pf-warn-line">⚠ {{ w }}</div>
+            {% endfor %}
+            {% else %}
+            <div class="pf-empty">Aucune liste d'étudiants chargée.</div>
+            {% endif %}
+            <div class="pf-actions">
+              <button type="button" class="btn btn-primary btn-small" id="pf-open-xlsx">
+                {% if project_files.student_xlsx_name %}↻ Changer la liste{% else %}+ Charger la liste{% endif %}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {# ===== La note de cet examen ============================================
+       Aucun réglage ici, volontairement : la note est le score BRUT sur le
+       barème du sujet. Seuiller et ramener sur une autre échelle ne sert qu'à
+       comparer ou agréger cet examen avec autre chose — c'est le travail du
+       niveau au-dessus, pas de cette page. Les histogrammes, le nuage de
+       points et la formule sont partis pour la même raison. #}
+    <section class="global-stats">
+      <h2 class="gs-title">Résultats — {{ total }} copies{% if bareme %} ·
+        barème {{ "%g"|format(bareme) }} points{% endif %}</h2>
+
+      {% if legacy %}
+      {# ⚠ Ces réglages ne sont pas effacés — ils restent dans config.json et
+         remonteront au niveau qui les rend utiles. Les taire serait une note
+         qui change sans un mot, sur un fichier qui part à la scolarité. #}
+      <div class="eval-legacy">
+        <b>⚠ Réglages conservés mais plus appliqués ici :</b>
+        {{ legacy|join(' · ') }}.
+        <div class="small">La note de cet examen est son score brut sur le
+          barème. Mettre à une autre échelle, pondérer, agréger avec d'autres
+          notes : ça décrit un <i>ensemble</i> d'examens, pas celui-ci. Rien
+          n'est perdu — <code>config.json</code> garde ces valeurs.</div>
+      </div>
+      {% endif %}
+
+      <div class="gs-stats">
+        <span class="gs-stats-of">Note brute</span>
+        <span><b>{{ "%.2f"|format(stats.mean) }}</b> moyenne μ</span>
+        <span><b>{{ "%.2f"|format(stats.std) }}</b> écart-type σ</span>
+        <span><b>{{ "%.1f"|format(stats.median) }}</b> médiane</span>
+        <span><b>{{ "%.1f"|format(stats.min) }} – {{ "%.1f"|format(stats.max) }}</b> étendue</span>
+      </div>
+
+      <div class="eval-actions">
+        <button id="save-report" class="btn btn-small">💾 Sauvegarder le compte rendu</button>
+        <span id="report-status" class="settings-hint"></span>
+      </div>
+
+      {# ===== Moyenne par question ============================================
+         Servie par `server.question_stats()`, la même fonction que l'onglet
+         Questions : deux calculs finiraient par afficher deux moyennes. #}
+      <div class="eval-questions">
+        <div class="eq-head">
+          <h3>Score moyen par question</h3>
+          <a class="small" href="/questions">détail, énoncés et aperçu → onglet Questions</a>
+        </div>
+        {% if q_error %}
+          <div class="pf-warn-line">⚠ sujet illisible : {{ q_error }}</div>
+        {% elif not questions %}
+          <div class="pf-empty">Aucune question QCM dans le sujet.</div>
+        {% else %}
+        <table class="eq-table">
+          <thead>
+            <tr><th>Question</th><th>Type</th><th class="eq-num">Moyenne</th>
+                <th class="eq-num">Barème</th><th class="eq-num">Réussite</th>
+                <th class="eq-num">Copies</th></tr>
+          </thead>
+          <tbody>
+          {% for q in questions %}
+            <tr>
+              {# ⚠ Le numéro imprimé sur la copie (rang dans sa version), pas
+                 l'ordre du document : avec deux versions, la 6e question du
+                 document est « Question 1 » sur le sujet de l'après-midi. #}
+              <td><b>Q{{ q.q_in_version or q.q }}</b>
+                {%- if q.version %} <span class="small">{{ q.version }}</span>{% endif %}
+                <span class="small">{{ q.tag }}</span></td>
+              <td class="small">{{ 'choix multiple' if q.type == 'mult' else 'choix unique' }}</td>
+              <td class="eq-num">{% if q.mean_raw is not none %}{{ "%.2f"|format(q.mean_raw) }}{% else %}—{% endif %}</td>
+              <td class="eq-num small">{{ "%g"|format(q.max_score) }}</td>
+              <td class="eq-num">{% if q.mean is not none %}{{ "%.0f"|format(q.mean * 100) }} %{% else %}—{% endif %}</td>
+              <td class="eq-num small">{{ q.n_eval }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </section>
+  </main>
+
+</div>
+
+<div class="modal-overlay" id="xlsx-modal">
+  <div class="modal modal-wide">
+    <h3>Liste étudiants</h3>
+    <p class="modal-hint">Un fichier Excel (.xlsx) ou CSV. AMCx propose les colonnes
+       d'après leur <b>contenu</b> — l'aperçu montre ce qui sera réellement chargé.</p>
+    <label class="modal-field">Fichier
+      <input type="file" id="xlsx-file" accept=".xlsx,.xlsm,.csv">
+    </label>
+    {# Choix de l'onglet — affiché SEULEMENT si le classeur en a plusieurs, et
+       rien n'est présélectionné : lire d'office l'onglet actif donnait une
+       liste plausible et fausse. Le compte d'étudiants par onglet est ce qui
+       rend le choix possible, les noms bruts ne disent rien. #}
+    <div id="xlsx-sheets" class="rl-sheets" hidden>
+      <div class="rl-sheets-title">Ce classeur contient plusieurs onglets —
+        lequel porte la liste à charger ?</div>
+      <div class="rl-sheet-list" id="xlsx-sheet-list"></div>
+    </div>
+    <div id="xlsx-cols" class="xlsx-cols" style="display:none">
+      <div class="rl-preview-wrap"><table class="rl-preview" id="xlsx-preview"></table></div>
+      <div class="rl-fields">
+        <label class="modal-field">Numéro étudiant <select id="col-id"></select></label>
+        <label class="modal-field">Nom <select id="col-nom"></select></label>
+        <label class="modal-field">Prénom <select id="col-prenom"></select></label>
+        <label class="modal-field">Courriel <select id="col-mail"></select></label>
+        <label class="modal-field rl-field-start">1re ligne de données
+          <input type="number" id="col-start" min="1" step="1" value="2"></label>
+      </div>
+      <div id="xlsx-report" class="rl-report"></div>
+    </div>
+    <div id="xlsx-status" class="modal-status"></div>
+    <div class="modal-actions">
+      <button class="btn" id="xlsx-cancel">Annuler</button>
+      <button class="btn btn-primary" id="xlsx-save" disabled>Enregistrer</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const rows = Array.from(document.querySelectorAll('.student-row'));
+const search = document.getElementById('dash-search');
+const visibleCount = document.getElementById('visible-count');
+let activeFilter = 'all';
+
+document.querySelectorAll('[data-filter]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-filter]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    activeFilter = b.dataset.filter;
+    applyFilter();
+  });
+});
+search.addEventListener('input', applyFilter);
+
+function applyFilter() {
+  const q = search.value.toLowerCase().trim();
+  let n = 0;
+  rows.forEach(r => {
+    const flags = r.dataset.flags;
+    const hasDiff = r.dataset.diff === '1';
+    let vis = true;
+    if (activeFilter === 'diff') vis = hasDiff;
+    else if (activeFilter === 'validated') vis = flags.includes('validated');
+    else if (activeFilter !== 'all') vis = flags.includes(activeFilter);
+    if (vis && q) vis = r.dataset.search.includes(q);
+    r.style.display = vis ? '' : 'none';
+    if (vis) n++;
+  });
+  visibleCount.textContent = n;
+}
+
+// Click sur un étudiant → ouvre la vue copie
+rows.forEach(r => r.addEventListener('click', () => {
+  location.href = `/student/${r.dataset.batch}/${r.dataset.page}`;
+}));
+
+// --- sauvegarde du compte rendu (notes.csv) ---
+// ⚠ C'est ce fichier que lit l'onglet Courriels : sans lui, pas d'envoi. La
+// page ne porte plus aucun graphique, donc plus de SVG à joindre — la route
+// en accepte toujours, elle servira à la vue d'ensemble.
+document.getElementById('save-report').addEventListener('click', async () => {
+  const status = document.getElementById('report-status');
+  status.textContent = 'Sauvegarde…';
+  const r = await fetch('/api/save-report', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({svgs: []})
+  });
+  const j = await r.json();
+  status.textContent = r.ok
+    ? `✓ compte rendu enregistré dans ${j.dir}/ (${j.n_rows} notes)`
+    : '✘ ' + (j.error || 'erreur');
+});
+
+// === Fichiers du projet : upload PDF + pipeline ============================
+// Upload : POST /api/upload-scan-pdf, puis reload de la page pour rafraîchir
+// la liste. Traitement : POST /api/process-scans → task_id → polling à 1.5 s.
+(function () {
+  const upInput = document.getElementById('pf-upload-pdf');
+  const procBtn = document.getElementById('pf-process');
+  const status  = document.getElementById('pf-status');
+  const progress = document.getElementById('pf-progress');
+  const stepEl  = document.getElementById('pf-progress-step');
+  const fillEl  = document.getElementById('pf-progress-fill');
+  const logEl   = document.getElementById('pf-progress-log');
+
+  // --- Upload PDF ---------------------------------------------------------
+  if (upInput) {
+    upInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      status.textContent = `Upload ${file.name} (${(file.size/1e6).toFixed(1)} Mo)…`;
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const r = await fetch('/api/upload-scan-pdf', {method: 'POST', body: fd});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) { status.textContent = '✘ ' + (j.error || 'erreur'); return; }
+        status.textContent = `✓ ${j.name} (${j.pages} pages, ${j.size_mb} Mo) — rechargement…`;
+        setTimeout(() => location.reload(), 600);
+      } catch (err) {
+        status.textContent = '✘ Réseau : ' + err;
+      }
+    });
+  }
+
+  // --- Process scans (async) ----------------------------------------------
+  if (procBtn) {
+    procBtn.addEventListener('click', async () => {
+      if (!confirm('Lancer le traitement des PDFs ?\n\n' +
+                   '1. Extraction PDF → JPGs (300 dpi)\n' +
+                   '2. Correction CV+ML (peut prendre plusieurs minutes selon le nombre de copies)\n' +
+                   '3. Fusion dans raw_responses/\n\n' +
+                   'Les copies déjà validées dans l\'UI seront préservées.')) return;
+      procBtn.disabled = true;
+      progress.hidden = false;
+      stepEl.textContent = 'Démarrage…';
+      fillEl.style.width = '0%';
+      logEl.textContent = '';
+      try {
+        const r = await fetch('/api/process-scans', {method: 'POST'});
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          status.textContent = '✘ ' + (j.error || 'erreur');
+          procBtn.disabled = false;
+          return;
+        }
+        await _pollTask(j.task_id);
+      } catch (e) {
+        status.textContent = '✘ ' + e;
+        procBtn.disabled = false;
+      }
+    });
+  }
+
+  async function _pollTask(taskId) {
+    while (true) {
+      let s;
+      try {
+        const r = await fetch('/api/process-scans/' + taskId);
+        s = await r.json();
+      } catch (e) {
+        stepEl.textContent = 'Erreur réseau : ' + e;
+        break;
+      }
+      stepEl.textContent = s.step || '…';
+      fillEl.style.width = (s.progress || 0) + '%';
+      if (s.log) logEl.textContent = s.log.slice(-50).join('\n');
+      if (s.status === 'done') {
+        status.textContent = `✓ Traitement terminé · ${s.n_extracted||0} extraites · ${s.n_graded||0} corrigées · ${s.n_seeded||0} dans raw_responses/`;
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+      if (s.status === 'error') {
+        status.textContent = '✘ Pipeline : ' + (s.error || 'erreur');
+        if (procBtn) procBtn.disabled = false;
+        return;
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  // --- Bouton "Changer la liste" → ouvre la modale xlsx existante ---------
+  const openXlsxBtn = document.getElementById('pf-open-xlsx');
+  if (openXlsxBtn) {
+    openXlsxBtn.addEventListener('click', () => {
+      const m = document.getElementById('xlsx-modal');
+      if (m) m.classList.add('open');
+    });
+  }
+
+  // --- Hide / unhide d'un PDF (le fichier reste sur disque) ---------------
+  document.querySelectorAll('.pf-pdf-hide').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      if (!name) return;
+      if (!confirm(`Retirer « ${name} » de la liste AMCx ?\n\n` +
+                   `Le fichier reste sur le disque (tu peux le ré-ajouter plus tard). ` +
+                   `Les pages déjà extraites et corrigées de ce PDF ne sont pas supprimées.`)) return;
+      btn.disabled = true;
+      const r = await fetch('/api/scan-pdf/hide', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        alert('Échec : ' + (j.error || 'erreur'));
+        btn.disabled = false;
+        return;
+      }
+      location.reload();
+    });
+  });
+  document.querySelectorAll('.pf-pdf-unhide').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name;
+      if (!name) return;
+      btn.disabled = true;
+      const r = await fetch('/api/scan-pdf/unhide', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        alert('Échec : ' + (j.error || 'erreur'));
+        btn.disabled = false;
+        return;
+      }
+      location.reload();
+    });
+  });
+})();
+
+// --- modale liste étudiants (xlsx / csv) ---
+// Les colonnes sont désignées par INDEX : un intitulé peut changer d'un export
+// à l'autre, disparaître, ou être dupliqué. L'aperçu montre le fichier tel
+// qu'il est lu, et le compte affiché vient du serveur — c'est le nombre
+// d'étudiants réellement construits, pas de lignes.
+const xlsxModal = document.getElementById('xlsx-modal');
+const xlsxStatus = document.getElementById('xlsx-status');
+const xlsxSave = document.getElementById('xlsx-save');
+const xlsxReport = document.getElementById('xlsx-report');
+let RL = null;   // analyse du fichier en attente
+
+let RL_SHEET = null;   // onglet choisi (null = fichier sans onglets)
+
+function rlSel(id) { return document.getElementById(id); }
+function rlCols() {
+  return {
+    id_idx: parseInt(rlSel('col-id').value, 10),
+    nom_idx: parseInt(rlSel('col-nom').value, 10),
+    prenom_idx: parseInt(rlSel('col-prenom').value, 10),
+    // Facultatif : il ne sert qu'à l'export, jamais au rattachement.
+    mail_idx: parseInt(rlSel('col-mail').value, 10),
+    // Affiché en numérotation humaine (ligne 1 = 1re ligne du fichier).
+    data_start: Math.max(0, parseInt(rlSel('col-start').value, 10) - 1),
+    // L'onglet voyage avec les colonnes : l'aperçu, le contrôle et
+    // l'enregistrement doivent tous porter sur celui-là.
+    sheet: RL_SHEET,
+  };
+}
+
+// Liste des onglets. ⚠ Aucun n'est coché au départ quand il y en a plusieurs :
+// c'est le choix que l'interface doit obtenir avant de continuer.
+function rlRenderSheets(sheets) {
+  const box = document.getElementById('xlsx-sheets');
+  const list = document.getElementById('xlsx-sheet-list');
+  list.textContent = '';
+  if (!sheets || sheets.length < 2) { box.hidden = true; return; }
+  box.hidden = false;
+  sheets.forEach(sh => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rl-sheet' + (sh.name === RL_SHEET ? ' is-active' : '')
+                + (sh.n_students ? '' : ' is-empty');
+    // ⚠ Nom d'onglet = contenu d'un fichier utilisateur → textContent.
+    const n = document.createElement('span');
+    n.className = 'rl-sheet-name'; n.textContent = sh.name;
+    const m = document.createElement('span');
+    m.className = 'rl-sheet-meta';
+    // `null` = onglet non compris : ne rien annoncer plutôt qu'un « 0 étudiant »
+    // qu'on n'a pas vérifié. Il reste choisissable, les colonnes se règlent à la main.
+    m.textContent = sh.n_students === null
+      ? 'aucune liste reconnue'
+      : sh.n_students + ' étudiant' + (sh.n_students > 1 ? 's' : '')
+        + ' · ' + sh.nrow + ' lignes';
+    b.append(n, m);
+    b.addEventListener('click', () => rlPickSheet(sh.name));
+    list.appendChild(b);
+  });
+}
+
+async function rlPickSheet(name) {
+  RL_SHEET = name;
+  document.querySelectorAll('#xlsx-sheet-list .rl-sheet').forEach(b =>
+    b.classList.toggle('is-active',
+                       b.querySelector('.rl-sheet-name').textContent === name));
+  xlsxStatus.textContent = 'Lecture de l\'onglet « ' + name + ' »…';
+  const r = await fetch('/api/student-list/analyze', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sheet: name})});
+  const j = await r.json();
+  if (!r.ok) { xlsxStatus.textContent = '✘ ' + j.error; return; }
+  rlApplyAnalysis(j);
+}
+
+function rlRenderPreview() {
+  if (!RL) return;
+  const c = rlCols();
+  const role = {}; role[c.id_idx] = 'id'; role[c.nom_idx] = 'nom';
+  if (c.prenom_idx >= 0) role[c.prenom_idx] = 'prenom';
+  if (c.mail_idx >= 0) role[c.mail_idx] = 'mail';
+  const t = document.getElementById('xlsx-preview');
+  t.textContent = '';
+  RL.preview.forEach((row, ri) => {
+    const tr = document.createElement('tr');
+    if (ri < c.data_start) tr.className = 'rl-skip';
+    const th = document.createElement('td');
+    th.className = 'rl-rownum'; th.textContent = ri + 1;
+    tr.appendChild(th);
+    row.forEach((cell, ci) => {
+      const td = document.createElement('td');
+      if (role[ci]) td.className = 'rl-col-' + role[ci];
+      td.textContent = cell === null || cell === undefined ? '' : String(cell);
+      tr.appendChild(td);
+    });
+    t.appendChild(tr);
+  });
+}
+
+let rlTimer = null;
+function rlRefresh() {
+  rlRenderPreview();
+  clearTimeout(rlTimer);
+  rlTimer = setTimeout(async () => {
+    const r = await fetch('/api/student-list/preview', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(rlCols())});
+    const j = await r.json();
+    xlsxReport.textContent = '';
+    if (!r.ok) {
+      xlsxReport.className = 'rl-report is-bad';
+      xlsxReport.textContent = '✘ ' + j.error;
+      xlsxSave.disabled = true;
+      return;
+    }
+    xlsxSave.disabled = j.n_students === 0;
+    xlsxReport.className = 'rl-report' +
+      (j.n_students === 0 ? ' is-bad' : (j.problems.length ? ' is-warn' : ' is-ok'));
+    const head = document.createElement('div');
+    head.className = 'rl-report-head';
+    // Le ✓ ne s'affiche que si rien ne cloche : une coche verte au-dessus d'un
+    // avertissement invite à passer outre.
+    head.textContent = (j.n_students === 0 ? '✘ aucun étudiant lisible'
+                        : (j.problems.length ? '⚠ ' : '✓ ') + j.n_students + ' étudiants');
+    xlsxReport.appendChild(head);
+    if (j.sample.length) {
+      const ex = document.createElement('div');
+      ex.className = 'small';
+      ex.textContent = 'ex. : ' + j.sample.map(
+        s => s.id + ' — ' + s.nom + ' ' + s.prenom).join(' · ');
+      xlsxReport.appendChild(ex);
+    }
+    j.problems.forEach(pb => {
+      const d = document.createElement('div');
+      d.className = 'rl-problem'; d.textContent = '⚠ ' + pb;
+      xlsxReport.appendChild(d);
+    });
+  }, 200);
+}
+
+document.getElementById('xlsx-cancel').addEventListener('click', async () => {
+  xlsxModal.classList.remove('open');
+  RL = null; RL_SHEET = null;
+  document.getElementById('xlsx-sheets').hidden = true;
+  document.getElementById('xlsx-cols').style.display = 'none';
+  xlsxReport.textContent = '';
+  xlsxStatus.textContent = '';
+  // Ne pas laisser traîner le fichier en attente sur le disque du projet.
+  await fetch('/api/student-list/cancel', {method: 'POST'});
+});
+
+// Applique une analyse (fichier fraîchement téléversé, ou changement d'onglet).
+function rlApplyAnalysis(j) {
+  RL = j;
+  RL_SHEET = j.sheet || null;
+  // ⚠ Intitulés et exemples viennent d'un fichier fourni par l'utilisateur :
+  // ils passent par textContent, jamais par innerHTML.
+  const fillSel = (sel, withNone) => {
+    sel.textContent = '';
+    if (withNone) {
+      const o = document.createElement('option');
+      o.value = '-1'; o.textContent = '(aucune)'; sel.appendChild(o);
+    }
+    j.columns.forEach(c => {
+      const o = document.createElement('option');
+      o.value = String(c.idx);
+      o.textContent = c.label + (c.sample.length ? ' — ' + c.sample.slice(0, 2).join(', ') : '');
+      sel.appendChild(o);
+    });
+  };
+  fillSel(rlSel('col-id'), false);
+  fillSel(rlSel('col-nom'), false);
+  fillSel(rlSel('col-prenom'), true);
+  fillSel(rlSel('col-mail'), true);
+  const sg = j.suggested;
+  if (sg.id_idx >= 0) rlSel('col-id').value = sg.id_idx;
+  if (sg.nom_idx >= 0) rlSel('col-nom').value = sg.nom_idx;
+  rlSel('col-prenom').value = sg.prenom_idx >= 0 ? sg.prenom_idx : -1;
+  rlSel('col-mail').value = sg.mail_idx >= 0 ? sg.mail_idx : -1;
+  rlSel('col-start').value = sg.data_start + 1;
+  rlSel('col-start').max = j.nrow;
+  document.getElementById('xlsx-cols').style.display = '';
+  xlsxStatus.textContent = (j.sheet ? 'Onglet « ' + j.sheet + ' » — ' : '')
+    + j.nrow + ' lignes · ' + j.ncol + ' colonnes détectées.';
+  rlRefresh();
+}
+
+document.getElementById('xlsx-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  xlsxStatus.textContent = 'Lecture du fichier…';
+  RL = null; RL_SHEET = null;
+  document.getElementById('xlsx-cols').style.display = 'none';
+  xlsxReport.textContent = '';
+  xlsxSave.disabled = true;
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch('/api/upload-xlsx', {method: 'POST', body: fd});
+  const j = await r.json();
+  if (!r.ok) { xlsxStatus.textContent = '✘ ' + j.error; return; }
+  rlRenderSheets(j.sheets);
+  if (j.needs_sheet) {
+    // Le formulaire de colonnes reste fermé tant qu'aucun onglet n'est choisi.
+    xlsxStatus.textContent = j.sheets.length + ' onglets — choisis celui à charger.';
+    return;
+  }
+  rlApplyAnalysis(j);
+});
+
+['col-id', 'col-nom', 'col-prenom', 'col-mail', 'col-start'].forEach(id =>
+  document.getElementById(id).addEventListener('input', rlRefresh));
+
+xlsxSave.addEventListener('click', async () => {
+  xlsxStatus.textContent = 'Enregistrement…';
+  const r = await fetch('/api/student-list', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(rlCols())
+  });
+  const j = await r.json();
+  if (r.ok) { xlsxStatus.textContent = '✓ ' + j.n_students + ' étudiants — rechargement…'; location.reload(); }
+  else xlsxStatus.textContent = '✘ ' + j.error;
+});
+
+</script>
+{% endblock %}

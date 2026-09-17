@@ -203,7 +203,7 @@ def process_copy(batch: str, page: int, layout: list[BoxLayout],
                 continue
             feats = extract_features(warped, b, q_ratios, copy_baseline,
                                      offsets.get(q, (0, 0)), ref=ref,
-                                     ref_corners=ref_frames.get((q, b.answer)))
+                                     ref_corners=ref_frames.get((q, b.char)))
             row = {
                 "copy_key": f"{batch}/page_{page:03d}",
                 "batch": batch,

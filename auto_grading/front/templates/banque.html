@@ -230,6 +230,11 @@ const ACTIVE_PROJECT = '{{ active_project_name|default("") }}';
 let bankMode = '{{ cfg.bank_mode|default("local") }}';
 let bankUserId = '';
 let currentQuestion = null;  // question affichée dans le détail
+// Mode « lier une variante » : bank_id de la question à rattacher, ou null.
+// ⚠ Un clic dans la liste veut alors dire « c'est de CELLE-CI qu'elle est une
+// variante » et non « affiche-la » : la liste change de sens, donc elle le dit
+// (bandeau + classe `is-linking`) plutôt que de surprendre au premier clic.
+let linkSource = null;
 
 // === DOM refs =============================================================
 const connWrap      = document.getElementById('conn-wrap');
@@ -565,6 +570,7 @@ function renderList(items, err) {
     return;
   }
   host.innerHTML = '';
+  host.classList.toggle('is-linking', !!linkSource);
   items.forEach(it => {
     const row = document.createElement('div');
     row.className = 'banque-q-row';
@@ -574,6 +580,9 @@ function renderList(items, err) {
       '<span class="banque-q-icon">' + (KIND_ICON[it.kind] || '·') + '</span>' +
       '<span class="banque-q-title">' + escapeHtml(it.title || '(sans titre)') + '</span>' +
       (isMine ? '<span class="banque-q-mine" title="ma question">★</span>' : '') +
+      (it.n_variants ?
+        '<span class="bq-var-badge" title="' + it.n_variants +
+          ' variante(s) de cette question">\u{1F500} ' + it.n_variants + '</span>' : '') +
       (it.status && it.status !== 'public' ?
         '<span class="banque-q-status banque-q-status-' + it.status + '">' + it.status + '</span>' : '');
     // Chemin de catégorie : inutile quand on est déjà DANS la catégorie.
@@ -583,7 +592,13 @@ function renderList(items, err) {
       if (path) {
         const line = document.createElement('span');
         line.className = 'bq-cat-path';
-        line.textContent = path.join(' › ') + (cats.length > 1 ? '  +' + (cats.length - 1) : '');
+        // ⚠ La FEUILLE, pas le chemin entier. La colonne fait ~270 px : un
+        // « Modèle linéaire › Validation › Points atypiques » y était tronqué
+        // à « Modèle linéaire › V… », qui ne distingue rien, tout en rongeant
+        // la moitié de la place du titre. Le chemin complet reste en infobulle.
+        line.textContent = path[path.length - 1] +
+                           (cats.length > 1 ? '  +' + (cats.length - 1) : '');
+        line.title = path.join(' › ');
         row.appendChild(line);
       }
     }
@@ -596,7 +611,10 @@ function renderList(items, err) {
     });
     row.addEventListener('dragend', () => row.classList.remove('is-dragging'));
     row.title = 'Glisser sur une catégorie pour l\u2019y classer';
-    row.addEventListener('click', () => selectQuestion(it.bank_id));
+    row.addEventListener('click', () => {
+      if (linkSource) { linkVariant(linkSource, it.bank_id); return; }
+      selectQuestion(it.bank_id);
+    });
     host.appendChild(row);
   });
 }
@@ -685,6 +703,9 @@ function renderDetailPane(q, blockHtml) {
 
   // === Catégories (chips-chemin + sélecteur) ===
   renderDetailCats(host, q);
+
+  // === Variantes (le groupe, et de quoi le composer) ===
+  renderDetailVariants(host, q);
 
   // === Body : preview OU éditeur selon le mode ===
   const body = document.createElement('div');
@@ -813,6 +834,142 @@ function renderDetailPane(q, blockHtml) {
       '<tbody>' + rows + '</tbody></table>';
     host.appendChild(stDiv);
   }
+}
+
+// === Variantes ===========================================================
+//
+// La liste ne montre que le CHEF de chaque groupe ; c'est ici qu'on voit le
+// groupe entier et qu'on le compose. Rien de tout ça sur une banque en ligne :
+// les routes y répondent 501, afficher les commandes promettrait une action
+// impossible.
+
+async function renderDetailVariants(host, q) {
+  if (bankMode === 'online') return;
+  const box = document.createElement('div');
+  box.className = 'bq-variants';
+  box.innerHTML = '<span class="bq-var-loading">⏳ variantes…</span>';
+  host.appendChild(box);
+
+  let grp;
+  try {
+    const r = await fetch('/api/bank/' + encodeURIComponent(q.bank_id) + '/variants');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { box.remove(); return; }
+    grp = j;
+  } catch (e) { box.remove(); return; }
+
+  const isHead  = grp.head === q.bank_id;
+  const others  = (grp.members || []).filter(m => m.bank_id !== q.bank_id);
+  box.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'bq-var-head';
+  head.textContent = others.length
+    ? (isHead ? '\u{1F500} ' + others.length + ' variante(s) de cette question'
+              : '\u{1F500} Variante — ' + grp.members.length + ' au total')
+    : '\u{1F500} Aucune variante';
+  box.appendChild(head);
+
+  if (grp.members.length > 1) {
+    const ul = document.createElement('div');
+    ul.className = 'bq-var-list';
+    grp.members.forEach(m => {
+      const li = document.createElement('div');
+      li.className = 'bq-var-item' + (m.bank_id === q.bank_id ? ' is-current' : '');
+      const name = document.createElement('button');
+      name.type = 'button';
+      name.className = 'bq-var-name';
+      // ⚠ Titre venu d'une banque partagée : textContent, jamais innerHTML.
+      name.textContent = m.title || '(sans titre)';
+      name.addEventListener('click', () => selectQuestion(m.bank_id));
+      li.appendChild(name);
+      if (m.bank_id === grp.head) {
+        const tag = document.createElement('span');
+        tag.className = 'bq-var-main';
+        tag.textContent = 'affichée dans la liste';
+        li.appendChild(tag);
+      } else {
+        const off = document.createElement('button');
+        off.type = 'button';
+        off.className = 'bq-var-detach';
+        off.title = 'Détacher : cette question redevient autonome dans la liste';
+        off.textContent = '✕';
+        off.addEventListener('click', () => detachVariant(m.bank_id, q.bank_id));
+        li.appendChild(off);
+      }
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  const act = document.createElement('div');
+  act.className = 'bq-var-actions';
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'btn btn-small';
+  link.textContent = linkSource === q.bank_id
+    ? '✕ Annuler le rattachement' : '\u{1F500} Rattacher à une autre question…';
+  link.addEventListener('click', () => {
+    linkSource = (linkSource === q.bank_id) ? null : q.bank_id;
+    renderLinkBanner();
+    reloadList();
+    selectQuestion(q.bank_id);
+  });
+  act.appendChild(link);
+  box.appendChild(act);
+}
+
+function renderLinkBanner() {
+  const old = document.getElementById('bq-link-banner');
+  if (old) old.remove();
+  if (!linkSource) return;
+  const host = document.getElementById('bq-list');
+  const b = document.createElement('div');
+  b.id = 'bq-link-banner';
+  b.className = 'bq-link-banner';
+  const txt = document.createElement('span');
+  txt.textContent = 'Cliquez la question dont celle-ci est une variante.';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn btn-small';
+  cancel.textContent = 'Annuler';
+  cancel.addEventListener('click', () => {
+    const src = linkSource; linkSource = null;
+    renderLinkBanner(); reloadList(); if (src) selectQuestion(src);
+  });
+  b.appendChild(txt); b.appendChild(cancel);
+  host.parentNode.insertBefore(b, host);
+}
+
+async function linkVariant(sourceId, headId) {
+  if (sourceId === headId) {
+    alert('✘ Choisissez une AUTRE question que celle qu\'on rattache.');
+    return;
+  }
+  const r = await fetch('/api/bank/' + encodeURIComponent(sourceId) + '/variants', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({head_id: headId})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { alert('✘ ' + (j.error || 'erreur')); return; }
+  linkSource = null;
+  renderLinkBanner();
+  await reloadList();
+  // On affiche le CHEF réel rendu par le serveur : rattacher une question qui
+  // avait elle-même des variantes fusionne les deux groupes, et le résultat
+  // n'est pas forcément celui qu'on croit avoir demandé.
+  selectQuestion(j.head);
+}
+
+async function detachVariant(bankId, backTo) {
+  const r = await fetch('/api/bank/' + encodeURIComponent(bankId) + '/variants', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({head_id: null})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { alert('✘ ' + (j.error || 'erreur')); return; }
+  await reloadList();
+  selectQuestion(backTo);
 }
 
 // === Sauvegarde d'un bloc édité dans la banque ============================

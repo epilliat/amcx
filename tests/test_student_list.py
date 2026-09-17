@@ -169,7 +169,8 @@ class TestAnalyze(RosterCase):
         sl = self.configure()
         a = sl.analyze_roster(self.csv("s.csv", SCOLARITE))
         self.assertEqual(a["suggested"], {"id_idx": 2, "nom_idx": 0,
-                                          "prenom_idx": 1, "data_start": 3})
+                                          "prenom_idx": 1, "mail_idx": -1,
+                                          "data_start": 3})
 
     def test_xlsx_columns_in_any_order(self):
         sl = self.configure()

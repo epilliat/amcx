@@ -16,7 +16,8 @@ Ce module mesure la noirceur **uniquement hors de l'encre imprimée** :
    case, relative au niveau du papier (p85 du crop). Aucune soustraction d'image.
 
 API :
-  - `get_reference(lay)`  → `(ref_img, ref_frames)`, mis en cache (mtime du PDF) ;
+  - `get_reference(lay)`  → `(ref_img, ref_frames)` (cadres indexés par (question,
+    lettre) — cf. l'avertissement dans sa docstring), mis en cache ;
   - `masked_features(...)` → dict des features masquées (cf. `MASKED_FEATURE_COLS`),
     branché dans `cv_grade.extract_features` / `FEATURE_COLS`.
 
@@ -75,15 +76,22 @@ def _subject_pdf() -> Path:
 def render_reference(lay, page: int | None = None) -> np.ndarray:
     """Rendu 300 dpi, en gris, d'une feuille de réponses du PDF du sujet.
 
-    `page` : numéro de page AMC (1-based). Par défaut la feuille principale —
-    un sujet dont les réponses débordent sur plusieurs feuilles en a une par
-    page, et chacune a sa propre référence.
+    `page` : numéro de page AMC (1-based) **de cette copie**. Par défaut la
+    feuille principale — un sujet dont les réponses débordent sur plusieurs
+    feuilles en a une par page, et chacune a sa propre référence.
+
+    ⚠ Le calage numérote les pages **par copie**, le PDF les concatène :
+    `lay.pdf_page()` fait la conversion. Sans elle, un sujet à plusieurs
+    versions prenait la feuille de la PREMIÈRE version comme référence de
+    toutes — donc un masque d'encre imprimée posé à côté des cases sur les
+    copies de l'autre version.
     """
     if page is None:
         page = lay.answer_sheet_page
     doc = fitz.open(str(_subject_pdf()))
     try:
-        pix = doc[page - 1].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
+        pix = doc[lay.pdf_page(page) - 1].get_pixmap(
+            matrix=fitz.Matrix(300 / 72, 300 / 72))
     finally:
         doc.close()
     a = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
@@ -294,6 +302,23 @@ _REF_CACHE: dict = {}
 _REF_MAX = 4
 
 
+def sheet_signature(lay, page: int | None = None) -> tuple:
+    """Signature géométrique d'une feuille de réponses — la clé du cache.
+
+    ⚠ Deux copies d'une **même version** ont des feuilles de réponses
+    géométriquement identiques (mêmes cases aux mêmes pixels ; seul le code
+    imprimé en haut change) : elles doivent partager une référence, sinon on
+    re-rend une page de PDF par copie scannée. Deux copies de versions
+    **différentes** n'ont ni les mêmes questions ni les mêmes positions : elles
+    doivent en avoir deux. C'est la géométrie qui tranche, pas le numéro de
+    copie.
+    """
+    if page is None:
+        page = lay.answer_sheet_page
+    return tuple(sorted((b.question, b.char, round(b.xmin), round(b.ymin))
+                        for b in lay.sheet_boxes(page=page)))
+
+
 def get_reference(lay, page: int | None = None):
     """`(ref_img, ref_frames)` : rendu du PDF sujet + cadre détecté par case.
 
@@ -301,20 +326,33 @@ def get_reference(lay, page: int | None = None):
     plusieurs feuilles, chacune a sa référence et ses cadres — les mélanger
     ferait chercher les cases de la feuille 2 aux positions de la feuille 1.
 
-    `ref_frames` = `dict[(question, answer) → 4 coins | None]`. Mis en cache
-    par (PDF, mtime, page) — recalculer à chaque case serait catastrophique.
+    `ref_frames` = `dict[(question, **char**) → 4 coins | None]`.
+
+    ⚠ **La clé est la LETTRE, pas l'indice de réponse.** `b.answer` est
+    l'ordre de déclaration LaTeX : il est permuté d'une copie à l'autre par
+    `shuffle_answers`, alors que la case `A` de la question 1 est toujours au
+    même endroit sur la feuille. Keyée par `answer`, la table rendait donc le
+    cadre d'une AUTRE case (jusqu'à 300 px plus loin) dès que la copie scannée
+    n'était pas la copie 1 : le masque d'encre imprimée tombait à côté, et la
+    mesure masquée devenait du bruit. Mesuré sur ce projet — 23 cases pourtant
+    noircies à plus de 50 % étaient lues **non cochées**, et 27 % des cases
+    vides dépassaient le seuil d'encre E1 (donc signalées « douteuses » sans
+    raison). Après correction : 0 et 1 %.
+
+    Mis en cache par (PDF, mtime, page, géométrie de la feuille) — cf.
+    `sheet_signature`.
     """
     if page is None:
         page = lay.answer_sheet_page
     pdf = _subject_pdf()
-    key = (str(pdf), pdf.stat().st_mtime, page)
+    key = (str(pdf), pdf.stat().st_mtime, page, sheet_signature(lay, page))
     hit = _REF_CACHE.get(key)
     if hit is None:
         ref = render_reference(lay, page)
         frames = {}
         for b in lay.sheet_boxes(page=page):
             sc, _ = detect_frame(ref, b)
-            frames[(b.question, b.answer)] = sc
+            frames[(b.question, b.char)] = sc
         if len(_REF_CACHE) >= _REF_MAX:
             _REF_CACHE.pop(next(iter(_REF_CACHE)))
         hit = _REF_CACHE[key] = (ref, frames)
@@ -343,7 +381,7 @@ def main():
     sample = lay.sheet_boxes(page=lay.answer_sheet_page)[:8]
     print("\nmasked_features sur la référence (cases vides → ratios attendus bas) :")
     for b in sample:
-        f = masked_features(ref, ref, b, frames.get((b.question, b.answer)))
+        f = masked_features(ref, ref, b, frames.get((b.question, b.char)))
         print(f"  Q{b.question}{b.char or '?'}: "
               f"e5={f['masked_ratio_e5']:.3f} frame={f['frame_detected']:.0f} "
               f"resid={f['align_residual']:.2f}")

@@ -48,7 +48,13 @@ DEFAULTS = {
     "xlsx_id_idx": -1,
     "xlsx_nom_idx": -1,
     "xlsx_prenom_idx": -1,
+    "xlsx_mail_idx": -1,      # colonne courriel (-1 = aucune) — export seul
     "xlsx_data_start": 1,     # index de la 1re ligne de DONNÉES (en-tête au-dessus)
+    # Onglet du classeur (xlsx) — "" = onglet actif du fichier. ⚠ L'onglet
+    # actif est celui qui était sélectionné au dernier enregistrement : sur
+    # un classeur à plusieurs onglets, il faut le demander (cf. la modale
+    # « Liste étudiants ») et l'écrire ici.
+    "xlsx_sheet": "",
     "xlsx_id_col": "id_etudiant",       # legacy : intitulés (repli si *_idx = -1)
     "xlsx_nom_col": "nom",
     "xlsx_prenom_col": "prenom_etat_civil",
@@ -56,8 +62,12 @@ DEFAULTS = {
     "export_template_xlsx": "",  # modèle xlsx scolarité (export_scolarite.py) ; "" = aucun
     "grade_files": [],        # fichiers de notes importés (csv/xlsx) — grade_imports.py
     "hist_granularity": 1.0,  # largeur d'une barre d'histogramme, en points
-    "qcm_seuil": 32.0,        # note QCM maximale théorique (barème)
-    "qcm_max": 20.0,          # échelle cible du QCM rescalé (QCM* = QCM × max / seuil)
+    # Normalisation du QCM : diviseur du rescaling (QCM* = QCM × max / norm).
+    # `None` = AUTO, résolu au barème maximal du sujet (`server.subject_total_max`).
+    # Un nombre écrit ici l'emporte — c'est le cas d'un barème volontairement
+    # décalé (noter sur 10 un QCM qui vaut 5, par exemple).
+    "qcm_seuil": None,
+    "qcm_max": 20.0,          # échelle cible du QCM rescalé (QCM* = QCM × max / norm)
     "qcm_agg_weight": 1.0,    # poids du QCM dans l'agrégation finale
     "final_threshold": 20.0,  # plafond dur appliqué à la note finale agrégée
     "pass_mark": 10.0,        # seuil de réussite (ligne verticale sur l'histo final)
@@ -65,6 +75,18 @@ DEFAULTS = {
     "question_ceiling": None, # plafond par question (points barème) ; None = aucun
     "total_floor": None,      # plancher du total QCM brut (points barème) ; None = aucun
     "show_score_range": False,# imprime « entre LO et HI pt » sous chaque QCM (compile)
+    # --- envoi des notes par courriel (onglet Courriels) -------------------
+    # ⚠ Aucun secret ici : `config.json` suit le projet quand on le partage.
+    # Le mot de passe vit dans `~/.config/amcx/smtp_password` (cf. mail_results).
+    "mail_subject":     "",          # "" = « MCQ results — <date> »
+    "mail_date":        "",          # date de l'épreuve, telle qu'affichée
+    "mail_sender":      "",          # adresse d'expédition
+    "mail_sender_name": "",          # nom affiché
+    "mail_smtp_host":   "smtp.gmail.com",
+    "mail_smtp_port":   465,
+    "mail_smtp_user":   "",          # "" = identique à mail_sender
+    "mail_score_col":   "note_finale",
+    "mail_max_score":   0,           # 0 = échelle déduite des réglages
     # --- IA (édition assistée de questions) --------------------------------
     "anthropic_api_key": "", # clé sk-ant-… stockée dans config.json du projet
     "ai_model":          "claude-sonnet-4-6",   # ou claude-opus-4-7
@@ -137,7 +159,32 @@ def load_config() -> dict:
                 cfg.update(json.load(f))
         except (json.JSONDecodeError, OSError):
             pass
-    return _migrate_banks(cfg)
+    return _migrate_banks(_migrate_qcm_seuil(cfg))
+
+
+# Valeurs que les gabarits d'AMCx ont écrites d'office dans `qcm_seuil` avant
+# qu'il devienne « auto » : 32 (DEFAULTS, câblé sur EXAM_2026) et 10
+# (new_project). Aucune ne décrivait le sujet du projet.
+_LEGACY_QCM_SEUIL = (10.0, 32.0)
+
+
+def _migrate_qcm_seuil(cfg: dict) -> dict:
+    """Ramène à « auto » un `qcm_seuil` qui n'est qu'un reste de gabarit.
+
+    ⚠ Migration in-memory, sans écriture — comme `_migrate_banks`.
+
+    Ces deux valeurs n'ont jamais été un choix de l'utilisateur : elles étaient
+    posées par le gabarit de projet, quel que soit le barème réel du sujet (5
+    ici), ce qui divisait la note par le mauvais diviseur sans rien signaler.
+    Le seul cas où la migration change quelque chose est donc celui où la
+    valeur ne correspond PAS au barème — si elle y correspond, « auto » rend
+    exactement le même nombre.
+    """
+    v = cfg.get("qcm_seuil")
+    if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and float(v) in _LEGACY_QCM_SEUIL:
+        cfg["qcm_seuil"] = None
+    return cfg
 
 
 # --------------------------------------------------------------------------

@@ -89,6 +89,18 @@ _QCM_ANSWER_END_BLOCKS_END = "%%QCM-ANSWER-END-BLOCKS-END"
 _QCM_EXEMPLAIRE_OPEN = "%%QCM-EXEMPLAIRE-OPEN"
 _QCM_EXEMPLAIRE_CLOSE = "%%QCM-EXEMPLAIRE-CLOSE"
 
+# Sujet à plusieurs versions (groupes AMC) : un bloc `%%QCM-VERSION …` par
+# `\exemplaire`. Chaque segment porte son propre en-tête et sa propre feuille
+# de réponses, d'où un parsing par segment et non un `tex.find()` global.
+_QCM_VERSION_START = "%%QCM-VERSION"
+_QCM_VERSION_END = "%%QCM-VERSION-END"
+_QCM_VERSION_RE = re.compile(r"^%%QCM-VERSION\s+(?P<attrs>.+?)\s*$", re.MULTILINE)
+
+# Groupe des blocs qui n'appartiennent à aucune version : restitué par TOUTES.
+# Sans lui, un bloc sans groupe dans un sujet multi-versions serait déclaré au
+# niveau document hors de tout `\element` — donc jamais imprimé, en silence.
+COMMON_GROUP = "commun"
+
 # Kinds canoniques supportés (la validation amont d'`add_block` les vérifie).
 _VALID_KINDS = ("text", "question_qcm", "question_open", "question_freeform",
                 "answerbox")
@@ -102,6 +114,10 @@ _VALID_KINDS = ("text", "question_qcm", "question_open", "question_freeform",
 #
 # ⚠ La liste ne filtre QUE la création : les blocs existants restent lisibles
 # et supprimables, sinon un projet qui en contient deviendrait inéditable.
+# Clés de `data` que l'éditeur ne renvoie pas (il ne les édite pas) et qui
+# doivent survivre à un `update_block`. Cf. la note dans `update_block`.
+_CARRIED_DATA_KEYS = ("_bank_id", "epilogue")
+
 DISABLED_KINDS = frozenset({"question_freeform"})
 _DISABLED_MSG = {
     "question_freeform": (
@@ -127,10 +143,19 @@ class HeaderBlock:
     establishment: str = ""
     year: str = ""
     author: str = ""
+    # `date` : date de l'épreuve, texte libre (« 8/9/2026 », « Session de
+    # janvier »). Distincte de `year`, qui est l'année universitaire imprimée
+    # en haut à droite — les deux cohabitent sur les en-têtes réels.
+    date: str = ""
     title: str = ""
     duration: str = ""
     subtitle: str = ""
     instructions: str = ""
+    # `rules` : filets horizontaux (`\hrule`) au-dessus et au-dessous des
+    # instructions. C'est la seule décoration qu'on retrouve sur tous les
+    # en-têtes réels observés — sans elle il fallait passer au LaTeX brut pour
+    # ce seul trait.
+    rules: bool = False
     # `raw_tex` : LaTeX brut de l'en-tête. Si rempli, prime sur les champs
     # structurés ci-dessus (utilisé pour les sujets migrés depuis legacy dont
     # l'en-tête est trop complexe pour être décomposé proprement).
@@ -146,6 +171,32 @@ class AnswerSheetConfig:
 
 
 @dataclass
+class SubjectVersion:
+    """Une **version** du sujet : un `\\exemplaire{N}{…}` qui restitue un groupe.
+
+    C'est la construction AMC qui permet de donner des questions *toutes
+    différentes* à deux populations (matin / après-midi) : chaque question est
+    déclarée dans un `\\element{groupe}{…}` au niveau document, et chaque
+    version ne restitue que son groupe. La disjonction est garantie par
+    construction — contrairement à un tirage dans un pool commun
+    (`\\restituegroupe[k]{pool}`), où deux copies peuvent partager des
+    questions.
+
+    AMC numérote les copies **en continu** d'une version à l'autre : deux
+    `\\exemplaire{1}` donnent les copies 1 et 2, deux `\\exemplaire{40}` les
+    copies 1-40 puis 41-80 (vérifié sur un sujet compilé). Le code imprimé en
+    haut de page porte donc le numéro de copie, et c'est lui qui dit de quelle
+    version vient une feuille scannée : matin et après-midi peuvent être
+    scannés dans le même lot.
+    """
+    vid: str
+    name: str = ""                  # libellé UI (« Matin ») — jamais imprimé
+    group: str = ""                 # groupe AMC restitué par cette version
+    num_copies: int = 1
+    header: HeaderBlock = field(default_factory=HeaderBlock)
+
+
+@dataclass
 class SubjectConfig:
     num_copies: int = 1
     random_seed: int = DEFAULT_SEED
@@ -158,6 +209,11 @@ class SubjectConfig:
     # feuille de réponses canoniques depuis `render_preamble`/`render_answer_sheet`.
     preamble_tex: str = ""
     answer_sheet_tex: str = ""
+    # Versions (groupes AMC). **Vide = sujet à une seule version**, et tout le
+    # chemin de rendu/parsing reste alors identique au byte près à ce qu'il
+    # était avant l'ajout des groupes — c'est ce qui protège les projets déjà
+    # compilés et scannés.
+    versions: list = field(default_factory=list)   # list[SubjectVersion]
 
 
 @dataclass
@@ -165,6 +221,13 @@ class Block:
     bid: str
     kind: str             # 'text' | 'question_qcm' | 'question_open' | 'question_freeform' | 'answerbox'
     data: dict = field(default_factory=dict)
+    # Groupe AMC auquel ce bloc appartient (`\element{<group>}{…}`). Vide = le
+    # flux par défaut, rendu directement dans `\exemplaire`.
+    #
+    # ⚠ Le groupe vit sur le **Block**, pas dans `data` : `data` est ce qui part
+    # dans la banque de questions (`bank.py` n'en retire que `bid`/`_bank_id`),
+    # et « matin » n'a aucun sens dans un autre projet.
+    group: str = ""
     # positions du bloc dans le tex source (utilisé en mode legacy pour
     # `save_questions` qui patche en place ; -1 en mode canonique).
     _start: int = -1
@@ -178,9 +241,52 @@ def _gen_bid(kind: str) -> str:
     return f"{prefix}-{secrets.token_hex(4)}"
 
 
+def _gen_vid() -> str:
+    """Identifiant stable d'une version (`\\exemplaire` + groupe restitué)."""
+    return f"v-{secrets.token_hex(4)}"
+
+
+# Groupes AMC que le rendu d'AMCx utilise pour son propre compte : ils ne
+# désignent pas une version du sujet. `questions` sert au mélange
+# (`\melangegroupe{questions}`), `open` aux `\AMCOpen` pleine largeur et
+# `bareme` aux lignes de notation des answerbox (cf. `render_answer_sheet`).
+RESERVED_GROUPS = frozenset({"questions", "open", "bareme"})
+
+
+def _slug_group(name: str) -> str:
+    """Nom de groupe AMC sûr depuis un libellé libre (« Après-midi » → `apresmidi`).
+
+    AMC construit des noms de macro à partir du nom de groupe (`\\csname
+    <grp>@k\\endcsname`) : tout ce qui n'est pas une lettre ASCII casse la
+    compilation, sans message utilisable.
+    """
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(name or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^A-Za-z]", "", s).lower()
+    return s or "grp"
+
+
 def _block_to_dict(b: Block) -> dict:
     """Convertit un Block en dict JSON-sérialisable (pour l'API)."""
-    return {"bid": b.bid, "kind": b.kind, "data": b.data}
+    return {"bid": b.bid, "kind": b.kind, "data": b.data, "group": b.group}
+
+
+def _version_to_dict(v: SubjectVersion) -> dict:
+    return {"vid": v.vid, "name": v.name, "group": v.group,
+            "num_copies": v.num_copies, "header": v.header.__dict__.copy()}
+
+
+def _version_from_dict(d: dict) -> SubjectVersion:
+    h = d.get("header") or {}
+    return SubjectVersion(
+        vid=str(d.get("vid") or _gen_vid()),
+        name=str(d.get("name") or ""),
+        group=str(d.get("group") or ""),
+        num_copies=max(1, int(d.get("num_copies", 1) or 1)),
+        header=HeaderBlock(**{k: v for k, v in h.items()
+                              if k in HeaderBlock.__dataclass_fields__}),
+    )
 
 
 def _config_to_dict(cfg: SubjectConfig) -> dict:
@@ -191,6 +297,7 @@ def _config_to_dict(cfg: SubjectConfig) -> dict:
         "shuffle_questions": cfg.shuffle_questions,
         "header": cfg.header.__dict__.copy(),
         "answer_sheet": cfg.answer_sheet.__dict__.copy(),
+        "versions": [_version_to_dict(v) for v in cfg.versions],
     }
 
 
@@ -228,8 +335,10 @@ def _subject_to_store(subject: dict) -> dict:
             "answer_sheet": cfg.answer_sheet.__dict__.copy(),
             "preamble_tex": cfg.preamble_tex,
             "answer_sheet_tex": cfg.answer_sheet_tex,
+            "versions": [_version_to_dict(v) for v in cfg.versions],
         },
-        "blocks": [{"bid": b.bid, "kind": b.kind, "data": b.data}
+        "blocks": [{"bid": b.bid, "kind": b.kind, "data": b.data,
+                    "group": b.group}
                    for b in subject["blocks"]],
         # Le mode DOIT être persisté : un sujet legacy bootstrappé dans le
         # store restait « legacy » en mémoire mais repassait « canonical » à
@@ -260,9 +369,11 @@ def _subject_from_store(d: dict) -> dict:
         answer_sheet=answer_sheet,
         preamble_tex=cd.get("preamble_tex", "") or "",
         answer_sheet_tex=cd.get("answer_sheet_tex", "") or "",
+        versions=[_version_from_dict(v) for v in (cd.get("versions") or [])],
     )
     blocks = [Block(bid=b.get("bid") or _gen_bid(b.get("kind", "")),
-                    kind=b.get("kind", ""), data=b.get("data") or {})
+                    kind=b.get("kind", ""), data=b.get("data") or {},
+                    group=str(b.get("group") or ""))
               for b in (d.get("blocks") or [])]
     return {"config": cfg, "blocks": blocks,
             "mode": d.get("mode") or "canonical"}
@@ -479,6 +590,12 @@ def amc_question_map(copy: int = 1) -> dict:
         num = unique_tag.get(tag)
         if num in letter_nums and num not in out["qcm"]:
             out["qcm"][num] = q_tex
+        elif num is not None:
+            # Le calage connaît ce tag, mais pas sur CETTE copie : question
+            # d'une autre version du sujet (matin ↔ après-midi). Ce n'est ni un
+            # écart ni un candidat au repli positionnel — l'y envoyer collerait
+            # une question du matin sur un numéro de l'après-midi.
+            continue
         else:
             unmatched_tex.append(q_tex)
     free = [n for n, _ in letters if n not in out["qcm"]]
@@ -534,7 +651,20 @@ def check_layout_consistency(verbose: bool = True) -> list[str]:
     Appelé au démarrage du serveur : un décalage ici fausse silencieusement
     toutes les notes, autant le dire fort.
     """
-    issues = amc_question_map(1)["issues"]
+    # Sujet à versions : contrôler la copie 1 ne dirait rien de l'après-midi.
+    # On prend la première copie de chaque version — les autres n'en diffèrent
+    # que par la permutation des lettres, pas par le jeu de questions.
+    copies = [1]
+    try:
+        cfg = parse_subject()["config"]
+        if cfg.versions:
+            copies = [a for a, _ in version_copy_ranges(cfg)]
+    except Exception:
+        pass
+    issues = []
+    for c in copies:
+        prefix = f"copie {c} : " if len(copies) > 1 else ""
+        issues += [prefix + i for i in amc_question_map(c)["issues"]]
     if issues and verbose:
         print("⚠ Sujet et calage (.xy) incohérents — les notes peuvent être fausses :")
         for i in issues:
@@ -601,8 +731,14 @@ def _parse_block(body, kind, tag):
         rest = body[rm.end():]
         em = _REP_END.search(rest)
         ans_raw = rest[:em.start()] if em else rest
+        # Ce qui suit `\end{reponses}` à l'intérieur de la question. C'est
+        # rare mais pas exotique : un sujet qui met les réponses en colonnes
+        # ouvre `\begin{multicols}{2}` dans l'énoncé et le referme ICI. Le
+        # jeter — ce que faisait la version précédente — produisait un
+        # `\begin{multicols}` jamais fermé, donc un sujet qui ne compile plus.
+        epilogue = rest[em.end():] if em else ""
     else:
-        env, statement, ans_raw = "reponses", body, ""
+        env, statement, ans_raw, epilogue = "reponses", body, "", ""
 
     answers = []
     i = 0
@@ -635,12 +771,21 @@ def _parse_block(body, kind, tag):
         if m:
             content, _ = _balanced(body, m.end() - 1)
             bareme = {"value": _parse_bareme(content).get("b", "1")}
+            # `\bareme{b=1,m=0}` posé juste après `\begin{question}{tag}` tombe
+            # dans l'énoncé, alors qu'il est déjà lu ici et réémis par
+            # `_render_qcm_body`. L'y laisser affichait la commande en tête du
+            # champ « énoncé » et, dès qu'on changeait la valeur, produisait
+            # DEUX `\bareme` dans la même question.
+            statement = re.sub(r"^\s*\\bareme\{[^}]*\}", "", statement)
         else:
             bareme = {"value": "1"}
     else:
         bareme = {}
 
-    return {"tag": tag, "type": qtype, "env": env,
+    # `\bareme{…}` d'une question single est reconnu plus haut : il ne doit pas
+    # ressortir aussi dans l'épilogue, sinon il serait émis deux fois.
+    epilogue = re.sub(r"\\bareme\{[^}]*\}", "", epilogue).strip()
+    return {"tag": tag, "type": qtype, "env": env, "epilogue": epilogue,
             "statement": statement, "answers": answers, "bareme": bareme}
 
 
@@ -685,6 +830,36 @@ def _parse_attrs(line):
         if "=" in tok:
             k, v = tok.split("=", 1)
             out[k.strip()] = v.strip()
+    return out
+
+
+def _strip_element_wrap(body: str, group: str) -> str:
+    """Retire un `\\element{<group>}{ … }` englobant. No-op s'il n'y en a pas."""
+    s = body.strip()
+    head = "\\element{" + group + "}{"
+    if not s.startswith(head):
+        return body
+    try:
+        inner, after = _balanced(s, len(head) - 1)
+    except ValueError:
+        return body
+    # On n'ouvre que si le wrap couvre bien TOUT le corps : sinon on ne
+    # comprend pas la structure et il vaut mieux ne rien toucher.
+    return inner.strip("\n") if not s[after:].strip() else body
+
+
+def _parse_version_attrs(line: str) -> dict:
+    """Attributs d'un marqueur `%%QCM-VERSION`.
+
+    ⚠ `name` est un libellé libre qui peut contenir des espaces (« Session du
+    matin ») : il est écrit en **dernier** et tout ce qui le suit lui appartient.
+    `_parse_attrs`, qui découpe sur les blancs, le tronquerait au premier mot.
+    """
+    i = line.find("name=")
+    if i < 0:
+        return _parse_attrs(line)
+    out = _parse_attrs(line[:i])
+    out["name"] = line[i + len("name="):].strip()
     return out
 
 
@@ -749,6 +924,7 @@ def _parse_block_body(kind, body, attrs):
                 for a in info["answers"]
             ],
             "value": info["bareme"].get("value", "1"),
+            "epilogue": info.get("epilogue", ""),
         }
     if kind == "question_open":
         tag = attrs.get("tag", "")
@@ -931,12 +1107,14 @@ def _parse_header_tex(t):
     for k, pat in (("establishment", r"%%H:establishment\{([^}]*)\}"),
                    ("year",           r"%%H:year\{([^}]*)\}"),
                    ("author",         r"%%H:author\{([^}]*)\}"),
+                   ("date",           r"%%H:date\{([^}]*)\}"),
                    ("title",          r"%%H:title\{([^}]*)\}"),
                    ("duration",       r"%%H:duration\{([^}]*)\}"),
                    ("subtitle",       r"%%H:subtitle\{([^}]*)\}")):
         m = re.search(pat, t)
         if m:
             setattr(h, k, m.group(1))
+    h.rules = "%%H:rules{1}" in t
     s = t.find("%%H:instructions-start")
     e = t.find("%%H:instructions-end")
     if s >= 0 and e > s:
@@ -986,9 +1164,33 @@ def _parse_canonical(tex):
     cfg.shuffle_questions = "\\melangegroupe" in tex
     cfg.shuffle_answers = "%%QCM-NO-SHUFFLE-ANSWERS" not in tex
 
+    # Versions : un segment `%%QCM-VERSION … %%QCM-VERSION-END` par
+    # `\exemplaire`. Chacun porte SON en-tête, d'où un parsing par segment —
+    # un `tex.find(_QCM_HEADER_START)` global ne verrait que le premier.
+    for vm in _QCM_VERSION_RE.finditer(tex):
+        attrs = _parse_version_attrs(vm.group("attrs"))
+        vid = attrs.get("vid") or _gen_vid()
+        end_re = re.compile(r"^%%QCM-VERSION-END\s+vid=" + re.escape(vid) + r"\s*$",
+                            re.MULTILINE)
+        em = end_re.search(tex, vm.end())
+        seg = tex[vm.end():em.start()] if em else tex[vm.end():]
+        vh = HeaderBlock()
+        s, e = seg.find(_QCM_HEADER_START), seg.find(_QCM_HEADER_END)
+        if s >= 0 and e > s:
+            vh = _parse_header_tex(seg[s + len(_QCM_HEADER_START):e])
+        cfg.versions.append(SubjectVersion(
+            vid=vid, name=attrs.get("name", ""),
+            group=attrs.get("group", ""),
+            num_copies=max(1, int(attrs.get("ncopies") or 1)),
+            header=vh))
+    if cfg.versions:
+        # `num_copies` global = total imprimé, ce que voit la feuille de
+        # réponses (et ce que compte la numérotation continue d'AMC).
+        cfg.num_copies = sum(v.num_copies for v in cfg.versions)
+
     hs = tex.find(_QCM_HEADER_START)
     he = tex.find(_QCM_HEADER_END)
-    if hs >= 0 and he > hs:
+    if not cfg.versions and hs >= 0 and he > hs:
         cfg.header = _parse_header_tex(tex[hs + len(_QCM_HEADER_START):he])
 
     as_s = tex.find(_QCM_ANSWER_SHEET_START)
@@ -1023,8 +1225,16 @@ def _parse_canonical(tex):
             if em is None:
                 continue
             block_body = body[m.end():em.start()].strip("\n")
+            grp = attrs.get("group", "") or ""
+            # Le wrap `\element{<groupe>}{…}` posé par `render_block` est une
+            # décoration de rendu : le retirer ici évite qu'un round-trip
+            # parse → render l'empile (visible sur les blocs `text`, dont le
+            # `data.tex` est repris verbatim).
+            if grp:
+                block_body = _strip_element_wrap(block_body, grp)
             b = Block(bid=bid, kind=kind,
-                      data=_parse_block_body(kind, block_body, attrs))
+                      data=_parse_block_body(kind, block_body, attrs),
+                      group=grp)
             # Restaure la trace d'origine si le bloc vient d'une banque
             # (cf. `render_block`). Pas écrasé si déjà présent dans `data`.
             if attrs.get("bank_id") and "_bank_id" not in b.data:
@@ -1068,6 +1278,206 @@ def _legacy_segment_title(seg: str) -> tuple[str | None, str | None]:
     if "\\begin{answerbox}" in seg:
         return "answerbox", "Cadre de réponse manuscrite"
     return None, None
+
+
+_ELEMENT_RE = re.compile(r"\\element\{([A-Za-z0-9@]+)\}\{")
+_RESTITUE_RE = re.compile(
+    r"\\(?:restituegroupe|insertgroup)(?:\[[^\]]*\])?\{([A-Za-z0-9@]+)\}")
+
+
+def _split_answer_sheet(body: str) -> tuple[str, str]:
+    """Coupe le corps d'un `\\exemplaire` en (contenu, feuille de réponses).
+
+    La frontière est le dernier `\\newpage` qui précède le 1er marqueur AMC de
+    feuille de réponses ; à défaut, le marqueur lui-même. La feuille est
+    conservée **verbatim** : c'est elle qui fixe la géométrie des cases.
+    """
+    as_marker = -1
+    for marker in ("\\AMCdebutFormulaire", "\\formulaire",
+                   "\\champnom", "\\AMCcodeGridInt"):
+        i = body.find(marker)
+        if i >= 0 and (as_marker < 0 or i < as_marker):
+            as_marker = i
+    if as_marker < 0:
+        return body, ""
+    np = body.rfind("\\newpage", 0, as_marker)
+    as_start = np if np >= 0 else as_marker
+    return body[:as_start], body[as_start:].strip()
+
+
+def _exemplaire_spans(tex: str) -> list[dict]:
+    """Tous les `\\exemplaire{N}{…}` du tex, avec leur corps délimité."""
+    out = []
+    for m in re.finditer(r"\\exemplaire\{(\d+)\}\{", tex):
+        try:
+            body, after = _balanced(tex, m.end() - 1)
+        except ValueError:
+            continue
+        out.append({"num": int(m.group(1)), "start": m.start(), "end": after,
+                    "body_start": m.end(), "body_end": after - 1, "body": body})
+    return out
+
+
+def _top_level_elements(tex: str, spans: list[dict]) -> list[dict]:
+    """`\\element{G}{…}` déclarés **hors** de tout `\\exemplaire`.
+
+    C'est ce qui distingue un groupe de *version* (déclaré au niveau document,
+    restitué par un seul `\\exemplaire`) des groupes de *mise en page* que le
+    rendu d'AMCx pose lui-même à l'intérieur d'un `\\exemplaire`
+    (`questions`, `open`, `bareme` — cf. `RESERVED_GROUPS`).
+    """
+    out = []
+    for m in _ELEMENT_RE.finditer(tex):
+        pos = m.start()
+        if any(s["body_start"] <= pos < s["body_end"] for s in spans):
+            continue
+        grp = m.group(1)
+        if grp in RESERVED_GROUPS:
+            continue
+        try:
+            body, after = _balanced(tex, m.end() - 1)
+        except ValueError:
+            continue
+        out.append({"group": grp, "body": body, "start": pos, "end": after})
+    return out
+
+
+def _split_grouped_tex(tex: str) -> dict | None:
+    """Découpe un sujet AMC **à groupes** (une version par `\\exemplaire`).
+
+    Retourne `None` si le tex n'a pas cette forme — auquel cas les découpeurs
+    historiques (`_split_legacy_tex`) reprennent la main sans changement.
+
+    Le critère est double, et les deux moitiés comptent : des `\\element{G}{…}`
+    au niveau document **et** au moins un `\\exemplaire` qui restitue un de ces
+    groupes. Un sujet AMCx avec `shuffle_questions` a bien des `\\element`,
+    mais à l'intérieur de son `\\exemplaire` et sur un groupe réservé — il ne
+    doit surtout pas être lu comme un sujet à versions.
+    """
+    spans = _exemplaire_spans(tex)
+    elements = _top_level_elements(tex, spans)
+    if not spans or not elements:
+        return None
+    elt_groups = {e["group"] for e in elements}
+    versions = []
+    for s in spans:
+        restored = [g for g in _RESTITUE_RE.findall(s["body"]) if g in elt_groups]
+        if not restored:
+            continue
+        content, sheet = _split_answer_sheet(s["body"])
+        # L'en-tête est le corps privé des commandes de restitution : le rendu
+        # les réémet lui-même, les garder les dupliquerait.
+        header = _RESTITUE_RE.sub("", content)
+        header = re.sub(r"\\melangegroupe\{[A-Za-z0-9@]+\}", "", header).strip()
+        versions.append({"num": s["num"], "group": restored[0],
+                          "groups": restored, "header": header,
+                          "answer_sheet_tex": sheet})
+    if not versions:
+        return None
+    first = min([e["start"] for e in elements] + [s["start"] for s in spans])
+    return {"preamble": tex[:first].rstrip(),
+            "elements": elements, "versions": versions}
+
+
+def _blocks_from_body(body: str, group: str = "",
+                      readonly: bool = False) -> list[Block]:
+    """Découpe un fragment de sujet AMC en blocs (`question_qcm` + `text`).
+
+    Même logique de frontières que `migrate_to_canonical` — questions et titres
+    de section — mais applicable à un fragment quelconque : le corps d'un
+    `\\exemplaire` comme celui d'un `\\element{groupe}{…}`.
+    """
+    boundaries: list[dict] = []
+    for m in _Q_BEGIN.finditer(body):
+        end = body.find("\\end{%s}" % m.group(1), m.end())
+        if end == -1:
+            continue
+        try:
+            info = _parse_block(body[m.end():end], m.group(1), m.group(2).strip())
+        except ValueError:
+            continue
+        boundaries.append({"pos": m.start(),
+                            "end": end + len("\\end{%s}" % m.group(1)),
+                            "kind": "qcm", "info": info})
+    for sm in _LEGACY_SECTION_RE.finditer(body):
+        boundaries.append({"pos": sm.start(), "end": sm.end(), "kind": "section",
+                            "level": sm.group(1), "title": sm.group(2).strip()})
+    boundaries.sort(key=lambda b: b["pos"])
+
+    blocks: list[Block] = []
+
+    def _add_text(a: int, z: int, level=None, title=None):
+        seg = body[a:z].strip()
+        if not seg:
+            return
+        meaningful = re.sub(r"%.*", "", seg)
+        meaningful = re.sub(r"\\(newpage|vspace|hspace|hrule|smallskip|"
+                             r"medskip|bigskip|hfill|noindent)\b\*?(\{[^}]*\})?",
+                             "", meaningful)
+        if len(meaningful.strip()) < 10 and not title:
+            return
+        data = {"tex": seg}
+        if readonly:
+            lvl, ttl = _legacy_segment_title(seg)
+            data.update(readonly=True, level=level or lvl or "intercalaire",
+                        title=title or ttl or _legacy_text_preview(seg))
+        blocks.append(Block(bid=_gen_bid("text"), kind="text", data=data,
+                            group=group))
+
+    for i, b in enumerate(boundaries):
+        nxt = boundaries[i + 1]["pos"] if i + 1 < len(boundaries) else len(body)
+        if b["kind"] == "qcm":
+            info = b["info"]
+            blocks.append(Block(
+                bid=_gen_bid("question_qcm"), kind="question_qcm", group=group,
+                data={
+                    "tag": info["tag"], "qtype": info["type"], "env": info["env"],
+                    "statement": info["statement"].strip(),
+                    "answers": [{"text": a["text"], "correct": a["correct"],
+                                 "bareme": a.get("points", "0")}
+                                for a in info["answers"]],
+                    "value": info["bareme"].get("value", "1"),
+                    "epilogue": info.get("epilogue", ""),
+                }))
+        else:
+            _add_text(b["pos"], b["end"], level=b["level"], title=b["title"])
+        if b["end"] < nxt:
+            _add_text(b["end"], nxt)
+    return blocks
+
+
+def _grouped_subject(tex: str, split: dict, mode: str) -> dict:
+    """Construit le Subject multi-versions à partir de `_split_grouped_tex`."""
+    seed_m = re.search(r"\\AMCrandomseed\{(\d+)\}", split["preamble"])
+    versions, groups_seen = [], []
+    for v in split["versions"]:
+        groups_seen.append(v["group"])
+        versions.append(SubjectVersion(
+            vid=_gen_vid(),
+            # Nom d'affichage : le tex n'en porte pas, on part du groupe AMC.
+            name=v["group"].replace("_", " ").strip().capitalize(),
+            group=v["group"], num_copies=v["num"],
+            header=HeaderBlock(raw_tex=v["header"])))
+    blocks: list[Block] = []
+    for e in split["elements"]:
+        # Un `\element` dont le groupe n'est restitué par aucun `\exemplaire`
+        # n'est imprimé nulle part : on le range en commun plutôt que de le
+        # perdre, et l'UI le montre.
+        grp = e["group"] if e["group"] in groups_seen else COMMON_GROUP
+        blocks.extend(_blocks_from_body(e["body"], group=grp,
+                                        readonly=(mode == "legacy")))
+    cfg = SubjectConfig(
+        num_copies=sum(v.num_copies for v in versions),
+        random_seed=int(seed_m.group(1)) if seed_m else DEFAULT_SEED,
+        shuffle_answers=True,
+        shuffle_questions="\\melangegroupe" in tex,
+        header=HeaderBlock(),
+        answer_sheet=AnswerSheetConfig(),
+        preamble_tex=split["preamble"],
+        answer_sheet_tex=split["versions"][0]["answer_sheet_tex"],
+        versions=versions,
+    )
+    return {"config": cfg, "blocks": blocks, "mode": mode}
 
 
 def _split_legacy_tex(tex: str) -> dict | None:
@@ -1143,6 +1553,12 @@ def _parse_legacy_subject(tex):
     l'outline et la liste centrale, même si l'utilisateur ne peut pas l'éditer
     via l'UI (le canonique débloque l'édition complète après migration).
     """
+    # Sujet à groupes (une version par `\exemplaire`) : les questions vivent
+    # hors du `\exemplaire`, le découpage ci-dessous ne les verrait pas.
+    grouped = _split_grouped_tex(tex)
+    if grouped:
+        return _grouped_subject(tex, grouped, mode="legacy")
+
     cfg = SubjectConfig()
     m = re.search(r"\\AMCrandomseed\{(\d+)\}", tex)
     if m:
@@ -1241,6 +1657,7 @@ def _parse_legacy_subject(tex):
                     for a in info["answers"]
                 ],
                 "value": info["bareme"].get("value", "1"),
+                "epilogue": info.get("epilogue", ""),
             }
             blk = Block(bid=f"q-legacy-{b['q']}", kind="question_qcm", data=data)
             blk._start, blk._end = info["block"]
@@ -1343,6 +1760,304 @@ def render_preamble(cfg: SubjectConfig) -> str:
     return _PREAMBLE_TEMPLATE.replace("{{SEED}}", str(cfg.random_seed))
 
 
+# --------------------------------------------------------------------------
+# Décomposition d'un en-tête LaTeX brut en champs structurés
+# --------------------------------------------------------------------------
+#
+# Un sujet importé arrive avec son en-tête VERBATIM dans `raw_tex` : c'est ce
+# qui garantit un `.xy` identique au bit près, donc un calage utilisable sur
+# des copies déjà imprimées. Le prix, c'est un en-tête qu'on ne peut plus
+# éditer autrement qu'en LaTeX.
+#
+# ⚠ Cette décomposition est une PROPOSITION, jamais une conversion silencieuse.
+# Elle change forcément la mise en page (les `\vspace` d'origine, la position
+# des `\hfill`), donc le `.xy` : l'appliquer après impression désaligne les
+# copies. Elle rend aussi la liste de ce qu'elle n'a PAS su placer, et
+# l'appelant doit la montrer — un fragment avalé en silence, c'est une ligne
+# de l'en-tête qui disparaît du sujet imprimé.
+
+# Ce qui ne porte aucune information : présentation pure. Ce qui reste après
+# retrait de ces motifs décide si un fragment est « non reconnu ».
+_HDR_NOISE = re.compile(
+    r"\\(?:vspace|vskip|hspace)\*?\s*\{[^{}]*\}"
+    r"|\\(?:noindent|par|hrule|smallskip|medskip|bigskip|newpage|clearpage"
+    r"|hfill|centering|AMCcleardoublepage)\b"
+    r"|\\AMCaddpagesto\s*\{[^{}]*\}"
+    r"|\\begin\{center\}|\\end\{center\}"
+    r"|\\\\")
+
+# ⚠ Les motifs sont testés sur du texte REPLIÉ (accents retirés, `\'e` comme
+# « é ») : un en-tête réel écrit « dur\'ee » ou « Ann\'ee », et chercher
+# « durée » n'y trouvait rien. Le repli ne sert QU'À reconnaître — ce qui est
+# rangé dans les champs reste le texte d'origine, accents LaTeX compris.
+_HDR_DURATION = re.compile(r"duree|duration|\b\d+\s*(?:min|mn|h\b|heures?|hours?)",
+                           re.I)
+_HDR_DATE = re.compile(
+    r"\b\d{1,2}\s*[/.-]\s*\d{1,2}\s*[/.-]\s*\d{2,4}\b"
+    r"|\b\d{1,2}(?:er)?\s+(?:janv|fevr|mars|avril|mai|juin|juil|aout|sept"
+    r"|octo|nove|dece|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{4}\b",
+    re.I)
+_HDR_YEAR = re.compile(r"\b(?:19|20)\d\d\s*[-–/]\s*(?:19|20)?\d\d\b"
+                       r"|\bannee\b|\byear\b"
+                       r"|^\s*(?:19|20)\d\d\s*$", re.I)
+_HDR_PAREN = re.compile(r"[(\[]([^()\[\]]*)[)\]]")
+_HDR_ACCENT = re.compile(r"\\[`'^\"~=.]\s*\{?([A-Za-z])\}?"
+                         r"|\\c\s*\{?([A-Za-z])\}?")
+
+
+def _hdr_fold(text: str) -> str:
+    """Texte replié pour la RECONNAISSANCE seule : accents LaTeX et Unicode ôtés."""
+    import unicodedata
+    t = _HDR_ACCENT.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    t = unicodedata.normalize("NFKD", t)
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def _hdr_strip_noise(text: str) -> str:
+    return _HDR_NOISE.sub(" ", text)
+
+
+def _hdr_is_noise(text: str) -> bool:
+    """Vrai si le fragment ne porte que de la présentation (ou rien)."""
+    return not _hdr_strip_noise(text).strip(" \t\n{}")
+
+
+def _hdr_drop_comments(tex: str) -> str:
+    """Retire les commentaires LaTeX (`%` non échappé jusqu'à la fin de ligne)."""
+    out = []
+    for line in tex.split("\n"):
+        i, esc = 0, False
+        cut = None
+        while i < len(line):
+            c = line[i]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == "%":
+                cut = i
+                break
+            i += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
+def _hdr_clean_cell(text: str) -> str:
+    """Nettoie une cellule : retire l'habillage de présentation, garde le texte.
+
+    `\\textsc{ENSAI}` → `ENSAI` : le rendu structuré remet lui-même les petites
+    capitales sur l'établissement. Le reste du balisage (maths, accents LaTeX)
+    est conservé tel quel — c'est du contenu.
+    """
+    t = _hdr_strip_noise(text)
+    for _ in range(3):
+        t2 = re.sub(r"\\(?:textsc|textbf|textit|emph|underline|text)\s*\{([^{}]*)\}",
+                    r"\1", t)
+        t2 = re.sub(r"\{\s*\\(?:sc|bf|it|em|small|large)\s+([^{}]*)\}", r"\1", t2)
+        if t2 == t:
+            break
+        t = t2
+    t = re.sub(r"\s+", " ", t).strip()
+    # ⚠ Ne PAS rogner les accolades à l'aveugle : `\includegraphics{logo.png}`
+    # y perdait la sienne et partait dans un champ en LaTeX cassé. On ne retire
+    # qu'une paire qui enveloppe toute la cellule.
+    while len(t) >= 2 and t[0] == "{" and t[-1] == "}" and _hdr_braces_balanced(t[1:-1]):
+        t = t[1:-1].strip()
+    return t
+
+
+def _hdr_braces_balanced(text: str) -> bool:
+    depth, esc = 0, False
+    for c in text:
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+# Commandes qui ne sont pas du texte de ligne : les ranger dans un champ
+# produirait un en-tête plausible et faux (un logo à la place du nom de
+# l'établissement, un `\input` qui tire un fichier entier).
+_HDR_NOT_TEXT = re.compile(
+    r"\\(?:includegraphics|input|include|usepackage|def|newcommand|renewcommand"
+    r"|AMCcode|AMCcodeGridInt|champnom|AMCdebutFormulaire|AMCform|exemplaire"
+    r"|element|restituegroupe|melangegroupe)\b")
+
+
+def _hdr_placeable(text: str) -> bool:
+    """Vrai si la cellule peut tenir dans un champ d'une ligne, telle quelle.
+
+    Une structure (`\begin{tabular}`), des accolades déséquilibrées ou une
+    commande qui n'est pas du texte ne se rangent PAS : elles ressortent en
+    « non reconnu », à charge de l'utilisateur de trancher. Le contraire —
+    couper une structure en deux moitiés pour remplir deux champs — donne un
+    sujet qui ne compile plus, sans un mot.
+    """
+    return (_hdr_braces_balanced(text)
+            and not re.search(r"\\(?:begin|end)\s*\{", text)
+            and not _HDR_NOT_TEXT.search(text))
+
+
+def _hdr_kind(text: str) -> str:
+    """`duration` / `date` / `year` / `text` — l'ordre des tests compte.
+
+    « Duration: 10 min » contient un nombre ; « Année 2025-2026 » contient une
+    plage d'années. Tester la durée en premier évite de ranger « 2 heures »
+    dans l'année.
+    """
+    folded = _hdr_fold(text)
+    if _HDR_DURATION.search(folded):
+        return "duration"
+    if _HDR_DATE.search(folded):
+        return "date"
+    if _HDR_YEAR.search(folded):
+        return "year"
+    return "text"
+
+
+def _hdr_split_date_label(cell: str):
+    """« 8/9/2026 - Morning » → `("8/9/2026", "Morning")`.
+
+    Un en-tête réel écrit souvent la date et la session sur la même ligne ; les
+    laisser ensemble dans `date` mettrait « Morning » en haut à gauche au lieu
+    du sous-titre.
+    """
+    m = _HDR_DATE.search(_hdr_fold(cell))
+    if not m:
+        return cell, ""
+    # ⚠ Le repli peut raccourcir la chaîne : on relocalise la date dans
+    # l'original plutôt que d'y appliquer des indices calculés ailleurs.
+    date = m.group(0).strip()
+    at = cell.find(date)
+    if at < 0:
+        return date, ""
+    rest = (cell[:at] + " " + cell[at + len(date):]).strip(" \t-–—:·|")
+    return date, rest
+
+
+def analyze_header_tex(raw: str) -> dict:
+    """Propose une décomposition d'un en-tête brut en champs structurés.
+
+    Rend `{"fields": {...}, "leftovers": [...], "ok": bool}`. `ok` ⇔ tout ce qui
+    portait de l'information a trouvé un champ. **Fonction pure** : elle n'écrit
+    rien, c'est l'appelant qui décide d'appliquer ou non.
+
+    Découpage, appris des en-têtes réels : une zone d'identité (jusqu'au
+    `\\begin{center}` ou, à défaut, au premier `\\hrule`), un bloc centré
+    titre/durée/sous-titre, puis les consignes.
+    """
+    fields = {k: "" for k in ("establishment", "year", "author", "date",
+                              "title", "duration", "subtitle", "instructions")}
+    fields["rules"] = False
+    leftovers: list[str] = []
+    body = _hdr_drop_comments(raw or "")
+    if not body.strip():
+        return {"fields": fields, "leftovers": [], "ok": False}
+
+    # Les filets sont une décoration reproductible : on la retient plutôt que
+    # de la compter comme « non reconnue ».
+    fields["rules"] = bool(re.search(r"\\hrule\b", body))
+
+    center = re.search(r"\\begin\{center\}(.*?)\\end\{center\}", body, re.S)
+    if center:
+        head, mid, tail = body[:center.start()], center.group(1), body[center.end():]
+    else:
+        cut = re.search(r"\\hrule\b", body)
+        head = body[:cut.start()] if cut else body
+        mid = ""
+        tail = body[cut.end():] if cut else ""
+
+    def place(cell: str, prefer: str) -> None:
+        cell = _hdr_clean_cell(cell)
+        if not cell:
+            return
+        if not _hdr_placeable(cell):
+            leftovers.append(cell)
+            return
+        kind = _hdr_kind(cell)
+        if kind == "date":
+            d, label = _hdr_split_date_label(cell)
+            if not fields["date"]:
+                fields["date"] = d
+                if label and not fields["subtitle"]:
+                    fields["subtitle"] = label
+                elif label:
+                    leftovers.append(label)
+                return
+        elif kind in ("year", "duration") and not fields[kind]:
+            fields[kind] = cell
+            return
+        for slot in (prefer, "establishment", "author", "subtitle"):
+            if not fields[slot]:
+                fields[slot] = cell
+                return
+        leftovers.append(cell)
+
+    # --- zone d'identité : des lignes, chacune coupée en deux par \hfill ---
+    for i, row in enumerate(re.split(r"\\\\|\\par\b", head)):
+        if _hdr_is_noise(row):
+            continue
+        cells = re.split(r"\\hfill\b", row)
+        place(cells[0], "establishment" if i == 0 else "author")
+        for extra in cells[1:]:
+            place(extra, "author")
+
+    # --- bloc centré : gras = titre, italique = sous-titre ---
+    if mid:
+        used = []
+        for m in re.finditer(r"\\(?:textbf|textsc)\s*\{([^{}]*)\}"
+                             r"|\{\s*\\(?:bf|sc)\s+([^{}]*)\}", mid):
+            txt = m.group(1) or m.group(2) or ""
+            used.append(m.span())
+            if not fields["title"]:
+                fields["title"] = _hdr_clean_cell(txt)
+            else:
+                place(txt, "subtitle")
+        for m in re.finditer(r"\\(?:textit|emph)\s*\{([^{}]*)\}"
+                             r"|\{\s*\\(?:it|em)\s+([^{}]*)\}", mid):
+            txt = m.group(1) or m.group(2) or ""
+            used.append(m.span())
+            place(txt, "subtitle")
+        rest = mid
+        for a, b in sorted(used, reverse=True):
+            rest = rest[:a] + " " + rest[b:]
+        if not _hdr_is_noise(rest):
+            place(rest, "subtitle")
+
+    # « Examen : … (durée : 2 heures) » — la durée est dans le titre.
+    if fields["title"] and not fields["duration"]:
+        for m in _HDR_PAREN.finditer(fields["title"]):
+            if _HDR_DURATION.search(_hdr_fold(m.group(1))):
+                fields["duration"] = m.group(1).strip()
+                fields["title"] = re.sub(
+                    r"\s{2,}", " ",
+                    fields["title"][:m.start()] + fields["title"][m.end():]
+                ).strip(" \t:;,-–—")
+                break
+
+    # --- consignes : tout le reste, LaTeX conservé (c'est un champ libre) ---
+    # ⚠ Une ligne VIDE est conservée : en LaTeX c'est une fin de paragraphe.
+    # Les jeter avec la présentation collait les consignes en un seul bloc —
+    # constaté en compilant : trois paragraphes devenus un.
+    instr = "\n".join(l for l in tail.split("\n")
+                      if not l.strip() or not _hdr_is_noise(l))
+    instr = re.sub(r"\n{3,}", "\n\n", instr).strip()
+    if instr:
+        fields["instructions"] = instr
+
+    # Un fragment de la zone d'identité qui n'a trouvé aucune place doit être
+    # DIT : avalé en silence, c'est une ligne qui disparaît du sujet imprimé.
+    ok = not leftovers and any(fields[k] for k in fields if k != "rules")
+    return {"fields": fields, "leftovers": leftovers, "ok": ok}
+
+
 def render_header(h: HeaderBlock) -> str:
     """Génère le bloc HEADER : métadonnées commentées + rendu LaTeX visible.
 
@@ -1357,36 +2072,105 @@ def render_header(h: HeaderBlock) -> str:
     if h.raw_tex.strip():
         return "%%H:raw-start\n" + h.raw_tex.rstrip() + "\n%%H:raw-end"
     all_empty = not any(getattr(h, k, "") for k in
-                        ("establishment", "year", "author", "title",
+                        ("establishment", "year", "author", "date", "title",
                          "duration", "subtitle", "instructions"))
     if all_empty:
         return ""
 
     meta = []
-    for k in ("establishment", "year", "author", "title", "duration", "subtitle"):
+    for k in ("establishment", "year", "author", "date", "title", "duration",
+              "subtitle"):
         v = getattr(h, k, "")
         if v:
             meta.append(f"%%H:{k}{{{v}}}")
+    if h.rules:
+        meta.append("%%H:rules{1}")
 
     parts = list(meta)
     parts.append("")
-    parts.append("\\noindent\\begin{tabular}{p{0.5\\linewidth}p{0.5\\linewidth}}")
-    parts.append(f"{{\\sc {h.establishment}}} & \\hfill {h.year} \\\\")
-    parts.append(f" & \\hfill {h.author}")
-    parts.append("\\end{tabular}\n")
-    if h.title:
-        parts.append("\\begin{center}")
-        parts.append(f"\\textbf{{{h.title}}}\\\\")
+    # ⚠ Le tableau d'identification n'est émis que s'il a quelque chose à
+    # montrer : le rendre à vide laissait une bande blanche en haut d'un sujet
+    # qui n'a qu'un titre et des consignes, sans que rien ne dise d'où elle
+    # venait.
+    if h.establishment or h.year or h.author or h.date:
+        parts.append("\\noindent\\begin{tabular}{p{0.5\\linewidth}p{0.5\\linewidth}}")
+        parts.append(f"{{\\sc {h.establishment}}} & \\hfill {h.year} \\\\")
+        parts.append(f"{h.date} & \\hfill {h.author}")
+        parts.append("\\end{tabular}\n")
+    # ⚠ Durée et sous-titre ne sont plus subordonnés au titre : les renseigner
+    # sans titre ne rendait *rien*, en silence.
+    if h.title or h.duration or h.subtitle:
+        # Les lignes sont jointes par `\\`, sans en laisser un en fin de bloc :
+        # un `\\` juste avant `\end{center}` ouvre une ligne vide (et un
+        # « Underfull \hbox » a la compilation).
+        center = []
+        if h.title:
+            center.append(f"\\textbf{{{h.title}}}")
         if h.duration:
-            parts.append(f"{{\\small {h.duration}}}\\\\")
+            center.append(f"{{\\small {h.duration}}}")
         if h.subtitle:
-            parts.append(f"{{\\small \\textit{{{h.subtitle}}}}}")
+            center.append(f"{{\\small \\textit{{{h.subtitle}}}}}")
+        parts.append("\\begin{center}")
+        parts.append("\\\\\n".join(center))
         parts.append("\\end{center}\n")
     if h.instructions:
+        if h.rules:
+            parts.append("\\hrule\n\\vspace{0.4cm}")
         parts.append("%%H:instructions-start")
         parts.append(h.instructions)
         parts.append("%%H:instructions-end")
+        if h.rules:
+            parts.append("\n\\vspace{0.2cm}\n\\hrule\n\\vspace{0.5cm}")
     return "\n".join(parts)
+
+
+def _strip_meta_markers(tex: str, prefix: str) -> str:
+    """Retire les LIGNES de métadonnées (`%%H:` / `%%A:`), garde leur contenu.
+
+    Les marqueurs `…-start` / `…-end` encadrent du texte qu'il faut conserver :
+    on n'enlève que les lignes qui *sont* des marqueurs, jamais ce qu'elles
+    entourent.
+
+    ⚠ **Rien d'autre n'est touché** — ni les lignes vides, ni les blancs de
+    début et de fin. Une ligne vide est une fin de paragraphe LaTeX : les
+    « ranger » faisait que le texte figé ne rendait plus tout à fait comme les
+    champs dont il sortait, ce que le passage au brut promet pourtant.
+    """
+    return "\n".join(l for l in tex.split("\n")
+                     if not l.lstrip().startswith(prefix))
+
+
+def header_to_raw(h: HeaderBlock) -> str:
+    """Le LaTeX que les champs structurés produisent, prêt à devenir `raw_tex`.
+
+    C'est l'inverse d'`analyze_header_tex` : figer le rendu courant pour
+    reprendre la main dessus. Le passage est **sans effet visible** — c'est
+    exactement ce qui aurait été imprimé —, donc le calage ne bouge pas ; c'est
+    le retour aux champs qui, lui, peut tout changer.
+
+    Un en-tête déjà en brut est rendu tel quel : le repasser en brut n'a pas de
+    sens et écraserait son contenu par celui, vide, des champs.
+    """
+    if h.raw_tex.strip():
+        return h.raw_tex
+    return _strip_meta_markers(render_header(h), "%%H:")
+
+
+def answer_sheet_to_raw(a: AnswerSheetConfig, num_copies: int = 1) -> str:
+    """Le LaTeX que la feuille de réponses canonique produit, prêt à être édité.
+
+    ⚠ `num_copies` compte : au-delà de 1, `render_answer_sheet` peut injecter
+    une grille de numéro de copie. Figer le rendu d'un mauvais nombre de copies
+    donnerait une feuille qui ne correspond plus au tirage.
+
+    ⚠ **Le `\newpage` fait partie du texte figé.** `render_subject` l'émet à
+    CÔTÉ de la feuille canonique et ne l'émet plus dès que
+    `cfg.answer_sheet_tex` est rempli (une feuille importée porte déjà sa
+    coupure). Sans lui, « passer au LaTeX brut » supprimait un saut de page :
+    mesuré, le `.xy` changeait — donc toutes les positions de cases.
+    """
+    return "\\newpage\n" + _strip_meta_markers(
+        render_answer_sheet(a, num_copies=num_copies), "%%A:")
 
 
 def _copy_grid_digits(num_copies: int) -> int:
@@ -1595,6 +2379,14 @@ def _render_qcm_body(data: dict) -> str:
         else:
             out.append(f"{cmd}{{{text}}}")
     out.append(f"\\end{{{env}}}")
+    # Épilogue : tex conservé verbatim entre `\end{reponses}` et la fin de la
+    # question (typiquement le `\end{multicols}` dont l'ouverture est en fin
+    # d'énoncé). La paire est donc scindée entre `statement` et `epilogue` —
+    # c'est voulu : la modéliser demanderait de comprendre l'imbrication LaTeX,
+    # alors que la conserver telle quelle suffit à ne rien perdre.
+    epi = str(data.get("epilogue", "") or "").strip()
+    if epi:
+        out.append(epi)
     if kind == "question":
         v = str(data.get("value", "1")).strip() or "1"
         fv = _frac(v)
@@ -1832,10 +2624,19 @@ def render_block(b: Block, cfg: SubjectConfig | None = None,
     # corps LaTeX au parse — ce qui n'est pas dans le corps disparaît.
     if b.data.get("_bank_id"):
         attrs.append(f"bank_id={b.data['_bank_id']}")
+    if b.group:
+        attrs.append(f"group={b.group}")
     head = "%%QCM-BLOCK " + " ".join(attrs)
     tail = f"%%QCM-END bid={b.bid}"
     body = _render_block_body(b, cfg, qnum=qnum)
-    if cfg and cfg.shuffle_questions and b.kind in (
+    if b.group:
+        # Bloc appartenant à une version : il est déclaré au niveau document
+        # dans son propre groupe, et seule la version qui fait
+        # `\restituegroupe{<group>}` l'imprime. Ce wrap prime sur les deux
+        # suivants — c'est lui qui décide *dans quel sujet* le bloc apparaît,
+        # alors que `questions`/`open` ne décident que de sa mise en page.
+        body = "\\element{" + b.group + "}{\n" + body + "\n}"
+    elif cfg and cfg.shuffle_questions and b.kind in (
             "question_qcm", "question_open", "question_freeform"):
         body = "\\element{questions}{\n" + body + "\n}"
     elif b.kind in ("question_open", "question_freeform"):
@@ -1851,6 +2652,119 @@ def _is_answer_end_block(b: Block) -> bool:
     """True ssi `b` est un answerbox avec `placement=end` (rendu en fin)."""
     return (b.kind == "answerbox"
             and str(b.data.get("placement", "inline")) == "end")
+
+
+def version_groups(cfg: SubjectConfig) -> list[str]:
+    """Groupes effectivement restitués, dans l'ordre des versions."""
+    return [v.group or _slug_group(v.name or v.vid) for v in cfg.versions]
+
+
+def version_copy_ranges(cfg: SubjectConfig) -> list[tuple[int, int]]:
+    """`(première copie, dernière copie)` de chaque version.
+
+    AMC numérote les copies **en continu** d'un `\\exemplaire` au suivant
+    (vérifié : deux `\\exemplaire{2}` donnent 1-2 puis 3-4). C'est ce qui
+    permet de savoir, à partir du seul numéro imprimé sur une feuille scannée,
+    de quelle version elle vient — et donc de scanner les deux demi-journées
+    dans le même lot.
+    """
+    out, n = [], 0
+    for v in cfg.versions:
+        k = max(1, v.num_copies)
+        out.append((n + 1, n + k))
+        n += k
+    return out
+
+
+def version_of_copy(cfg: SubjectConfig, copy: int) -> SubjectVersion | None:
+    """Version dont relève le numéro de copie donné (None si hors versions)."""
+    for v, (a, z) in zip(cfg.versions, version_copy_ranges(cfg)):
+        if a <= copy <= z:
+            return v
+    return None
+
+
+def _render_multi_version_subject(subject: dict, qnums: dict) -> str:
+    """Rendu d'un sujet à plusieurs versions (un `\\exemplaire` par version).
+
+    Différence structurelle avec le rendu à une version : les blocs sont
+    déclarés **au niveau document**, chacun dans son `\\element{groupe}{…}`, et
+    chaque `\\exemplaire` ne fait que restituer son groupe. C'est la seule
+    construction AMC qui garantit que deux versions n'ont aucune question
+    commune (cf. `SubjectVersion`).
+
+    Un bloc sans groupe est mis dans `COMMON_GROUP`, restitué par toutes les
+    versions **avant** leurs questions propres — un bloc qui n'appartient à
+    aucun groupe ne serait imprimé nulle part, sans la moindre erreur LaTeX.
+    """
+    cfg: SubjectConfig = subject["config"]
+    blocks: list[Block] = subject["blocks"]
+    groups = version_groups(cfg)
+    known = set(groups)
+    total_copies = sum(max(1, v.num_copies) for v in cfg.versions)
+
+    parts: list[str] = []
+    parts.append(_QCM_PREAMBLE_START)
+    parts.append(render_preamble(cfg))
+    parts.append(_QCM_PREAMBLE_END)
+    parts.append("")
+
+    # 1. Déclaration des blocs, hors de tout `\exemplaire`.
+    parts.append(_QCM_BLOCKS_START)
+    has_common = False
+    for b in blocks:
+        # Un groupe qui ne correspond à aucune version (version supprimée) est
+        # traité comme « commun » plutôt que perdu en silence.
+        eff = b.group if b.group in known else COMMON_GROUP
+        if eff == COMMON_GROUP:
+            has_common = True
+        rendered = Block(bid=b.bid, kind=b.kind, data=b.data, group=eff)
+        parts.append(render_block(rendered, cfg, qnum=qnums.get(b.bid)))
+        parts.append("")
+    parts.append(_QCM_BLOCKS_END)
+    parts.append("")
+
+    # 2. Un `\exemplaire` par version. AMC numérote les copies en continu d'un
+    #    `\exemplaire` à l'autre : c'est ce numéro, imprimé en haut de page,
+    #    qui dit de quelle version vient une feuille scannée.
+    for v, grp in zip(cfg.versions, groups):
+        n = max(1, v.num_copies)
+        attrs = f"vid={v.vid} group={grp} ncopies={n}"
+        if v.name:
+            attrs += f" name={v.name}"
+        parts.append(f"{_QCM_VERSION_START} {attrs}")
+        parts.append(f"\\exemplaire{{{n}}}{{")
+        parts.append("")
+        parts.append(_QCM_HEADER_START)
+        parts.append(render_header(v.header))
+        parts.append(_QCM_HEADER_END)
+        parts.append("")
+        if has_common:
+            if cfg.shuffle_questions:
+                parts.append(f"\\melangegroupe{{{COMMON_GROUP}}}")
+            parts.append(f"\\restituegroupe{{{COMMON_GROUP}}}")
+        if cfg.shuffle_questions:
+            parts.append(f"\\melangegroupe{{{grp}}}")
+        parts.append(f"\\restituegroupe{{{grp}}}")
+        parts.append("")
+        # ⚠ Pas de `\newpage` quand la feuille de réponses est conservée
+        # verbatim : le découpage (`_split_answer_sheet`) garde le saut de page
+        # d'origine s'il y en avait un. En ajouter un de plus insérait une page
+        # blanche — mesuré sur un sujet dont la feuille commence par
+        # `\AMCdebutFormulaire`, qui fait déjà la coupure : 6 pages au lieu de 4.
+        if not cfg.answer_sheet_tex:
+            parts.append("\\newpage")
+        parts.append(_QCM_ANSWER_SHEET_START)
+        parts.append(render_answer_sheet(cfg.answer_sheet,
+                                          num_copies=total_copies,
+                                          custom_tex=cfg.answer_sheet_tex))
+        parts.append(_QCM_ANSWER_SHEET_END)
+        parts.append("}")
+        parts.append(f"{_QCM_VERSION_END} vid={v.vid}")
+        parts.append("")
+
+    parts.append("\\end{document}")
+    return "\n".join(parts) + "\n"
 
 
 def render_subject(subject: dict) -> str:
@@ -1887,6 +2801,9 @@ def render_subject(subject: dict) -> str:
             if b.kind == "answerbox":
                 k += 1
                 qnums[b.bid] = n_qcm + k
+    if cfg.versions:
+        return _render_multi_version_subject(subject, qnums)
+
     parts: list[str] = []
     parts.append(_QCM_PREAMBLE_START)
     parts.append(render_preamble(cfg))
@@ -1913,7 +2830,8 @@ def render_subject(subject: dict) -> str:
         parts.append("\\restituegroupe{questions}")
     parts.append(_QCM_BLOCKS_END)
     parts.append("")
-    parts.append("\\newpage")
+    if not cfg.answer_sheet_tex:
+        parts.append("\\newpage")
     parts.append(_QCM_ANSWER_SHEET_START)
     # Les `\AMCOpen` sont sortis du multicols : ils vivent dans le groupe AMC
     # « open » que `render_answer_sheet` insère APRÈS `\formulaire` à pleine
@@ -2041,8 +2959,25 @@ def _default_block_data(kind: str, data: dict | None) -> dict:
 
 
 def add_block(kind: str, after_bid: str | None = None,
-              data: dict | None = None, bid: str | None = None) -> str:
+              data: dict | None = None, bid: str | None = None,
+              group: str | None = None, at_start: bool = False,
+              restore: bool = False) -> str:
     """Insère un bloc après `after_bid` (None = en fin). Retourne le bid créé.
+
+    ⚠ `after_bid=None` veut dire **en fin** ici, mais **en tête** pour
+    `move_block` — deux conventions opposées pour le même argument. Le chemin
+    d'annulation d'une suppression passe par `add_block` : restaurer le premier
+    bloc du sujet le renvoyait donc à la fin du document, en silence. `at_start`
+    exprime « en tête » sans changer la convention des appelants existants (les
+    boutons « + QCM » comptent sur l'ajout en fin).
+
+    `restore` : réinsertion d'un bloc supprimé, pas une création. Contourne
+    `DISABLED_KINDS` — sinon un `question_freeform` supprimé était
+    **définitivement perdu**, alors que le filtre ne vise que la création.
+
+    `group` : version à laquelle le bloc appartient (sujet à groupes). ⚠ Sans
+    lui, restaurer un bloc supprimé le rangeait dans `COMMON_GROUP`, donc
+    imprimé dans TOUTES les versions au lieu de la sienne.
 
     `bid` permet de **réutiliser un identifiant** : c'est ce qui rend
     l'annulation d'une suppression exacte. Sans lui, le bloc restauré recevrait
@@ -2053,16 +2988,19 @@ def add_block(kind: str, after_bid: str | None = None,
     """
     if kind not in _VALID_KINDS:
         raise ValueError(f"kind invalide: {kind}")
-    if kind in DISABLED_KINDS:
+    if kind in DISABLED_KINDS and not restore:
         raise ValueError(_DISABLED_MSG.get(kind, f"kind désactivé: {kind}"))
     with _io_lock:
         subject = parse_subject()
         _require_canonical(subject)
         taken = {b.bid for b in subject["blocks"]}
         bid = bid if (bid and bid not in taken) else _gen_bid(kind)
-        block = Block(bid=bid, kind=kind, data=_default_block_data(kind, data))
+        block = Block(bid=bid, kind=kind, data=_default_block_data(kind, data),
+                      group=str(group or ""))
         blocks = subject["blocks"]
-        if not after_bid:
+        if at_start:
+            blocks.insert(0, block)
+        elif not after_bid:
             blocks.append(block)
         else:
             idx = next((i for i, b in enumerate(blocks) if b.bid == after_bid), None)
@@ -2126,6 +3064,16 @@ def update_block(bid: str, data: dict) -> None:
         block = next((b for b in subject["blocks"] if b.bid == bid), None)
         if block is None:
             raise KeyError(bid)
+        # ⚠ Remplacement en bloc du `data`, MAIS on reporte les clés que
+        # l'éditeur ne renvoie jamais parce qu'il ne les édite pas. Sans ça,
+        # ouvrir puis enregistrer une question suffisait à perdre en silence :
+        #   · `epilogue` — le `\end{multicols}` d'un sujet importé, d'où un
+        #     environnement jamais fermé et un sujet qui ne compile plus ;
+        #   · `_bank_id` — la trace d'origine d'une question importée de la
+        #     banque, donc la synchro des statistiques cessait de la retrouver.
+        for k in _CARRIED_DATA_KEYS:
+            if k not in data and k in (block.data or {}):
+                data[k] = block.data[k]
         block.data = data
         _save_subject(subject)
 
@@ -2179,6 +3127,240 @@ def update_config(patch: dict) -> None:
         _save_subject(subject)
 
 
+def _unique_group(cfg: "SubjectConfig", base: str) -> str:
+    """Nom de groupe AMC libre : ni déjà pris, ni réservé au rendu AMCx.
+
+    ⚠ Deux versions qui partageraient un groupe restitueraient les mêmes
+    questions — c'est l'exact contraire de ce à quoi sert une version, et
+    LaTeX ne dirait rien.
+    """
+    taken = {v.group for v in cfg.versions} | set(RESERVED_GROUPS) | {COMMON_GROUP}
+    g = base or "grp"
+    if g not in taken:
+        return g
+    for i in range(2, 200):
+        cand = f"{g}{i}"
+        if cand not in taken:
+            return cand
+    return f"{g}{secrets.token_hex(2)}"
+
+
+def add_version(name: str = "", group: str | None = None, num_copies: int = 1,
+                vid: str | None = None, index: int | None = None,
+                header: dict | None = None) -> dict:
+    """Ajoute une version (un `\\exemplaire` qui restitue son propre groupe).
+
+    ⚠ **Sur un sujet à une seule version, le premier appel en crée deux** : la
+    version courante — qui n'existait jusque-là qu'implicitement, portée par
+    `cfg.header` et `cfg.num_copies` — puis la nouvelle. Sans ça, le sujet
+    passerait de « toutes les questions pour tout le monde » à « une version
+    vide et des questions orphelines », ce que le rendu range en `commun` : la
+    nouvelle version aurait imprimé le sujet entier.
+
+    Les blocs existants gardent leur groupe (vide = `commun`) : ils restent
+    donc imprimés sur **toutes** les versions tant qu'on ne les affecte pas
+    (`set_block_group`). C'est le seul défaut sûr — une question rangée
+    d'office dans la première version disparaîtrait de la seconde en silence.
+
+    `vid`, `group` et `index` servent à l'annulation d'une suppression : ils
+    remettent la version à sa place, avec son identité d'origine.
+    """
+    with _io_lock:
+        subject = parse_subject()
+        _require_canonical(subject)
+        cfg: SubjectConfig = subject["config"]
+        bootstrapped = False
+        if not cfg.versions:
+            first = SubjectVersion(
+                vid=_gen_vid(), name="Version 1",
+                group=_unique_group(cfg, "va"),
+                num_copies=max(1, int(cfg.num_copies or 1)),
+                header=HeaderBlock(**cfg.header.__dict__))
+            cfg.versions.append(first)
+            bootstrapped = True
+        try:
+            n = max(1, min(999, int(num_copies)))
+        except (TypeError, ValueError):
+            n = 1
+        label = str(name or "").strip() or f"Version {len(cfg.versions) + 1}"
+        grp = str(group or "").strip() or _slug_group(label)
+        if any(v.group == grp for v in cfg.versions) or grp in RESERVED_GROUPS \
+                or grp == COMMON_GROUP:
+            grp = _unique_group(cfg, _slug_group(grp))
+        h = HeaderBlock(**{k: v for k, v in (header or {}).items()
+                           if k in HeaderBlock.__dataclass_fields__})
+        v = SubjectVersion(vid=str(vid or _gen_vid()), name=label, group=grp,
+                           num_copies=n, header=h)
+        if index is None or not (0 <= int(index) <= len(cfg.versions)):
+            cfg.versions.append(v)
+        else:
+            cfg.versions.insert(int(index), v)
+        cfg.num_copies = sum(max(1, x.num_copies) for x in cfg.versions)
+        _save_subject(subject)
+        out = _version_to_dict(v)
+        out["bootstrapped"] = bootstrapped
+        return out
+
+
+def delete_version(vid: str, mode: str = "reparent") -> dict:
+    """Supprime une version. Rend de quoi la remettre **à l'identique**.
+
+    `mode` :
+    - `reparent` (défaut) — les questions de la version deviennent communes,
+      donc imprimées sur toutes les versions restantes. **Aucune question
+      n'est supprimée**, comme pour les catégories de la banque.
+    - `delete_blocks` — les questions de la version sont supprimées avec elle.
+
+    Supprimer la **dernière** version ne laisse pas un sujet sans
+    `\\exemplaire` : le sujet redevient simplement un sujet à une version
+    (`versions = []`), qui reprend l'en-tête et le nombre de copies de celle
+    qu'on retire — sinon on perdrait les deux en silence.
+
+    Le dict rendu (`undo`) est ce que `restore_version` réapplique : identité
+    de la version, sa position, et l'état exact des blocs touchés.
+    """
+    if mode not in ("reparent", "delete_blocks"):
+        raise ValueError(f"mode inconnu : {mode}")
+    with _io_lock:
+        subject = parse_subject()
+        _require_canonical(subject)
+        cfg: SubjectConfig = subject["config"]
+        blocks: list[Block] = subject["blocks"]
+        i = next((k for k, x in enumerate(cfg.versions) if x.vid == vid), None)
+        if i is None:
+            raise KeyError(f"version inconnue : {vid}")
+        v = cfg.versions[i]
+        undo = {"version": _version_to_dict(v), "index": i, "mode": mode,
+                "regrouped": [], "removed": [],
+                "prev_header": None, "prev_num_copies": None}
+        touched = [b for b in blocks if b.group == v.group]
+        if mode == "reparent":
+            for b in touched:
+                undo["regrouped"].append(b.bid)
+                b.group = ""
+        else:
+            for b in touched:
+                undo["removed"].append({"block": _block_to_dict(b),
+                                        "index": blocks.index(b)})
+            undo["removed"].sort(key=lambda e: e["index"])
+            subject["blocks"] = [b for b in blocks if b.group != v.group]
+        cfg.versions.pop(i)
+        if not cfg.versions:
+            # Retour à un sujet à une version : on récupère ce que portait la
+            # version supprimée, plutôt que de laisser un en-tête vide.
+            undo["prev_header"] = cfg.header.__dict__.copy()
+            undo["prev_num_copies"] = cfg.num_copies
+            cfg.header = HeaderBlock(**v.header.__dict__)
+            cfg.num_copies = max(1, v.num_copies)
+        else:
+            cfg.num_copies = sum(max(1, x.num_copies) for x in cfg.versions)
+        _save_subject(subject)
+        return undo
+
+
+def restore_version(undo: dict) -> dict:
+    """Annule un `delete_version` à partir du dict qu'il a rendu.
+
+    Tout se fait sous le même verrou : une restauration à moitié faite
+    laisserait des questions rattachées à une version qui n'existe pas.
+    """
+    if not isinstance(undo, dict) or not (undo.get("version") or {}).get("vid"):
+        raise ValueError("payload d'annulation invalide")
+    with _io_lock:
+        subject = parse_subject()
+        _require_canonical(subject)
+        cfg: SubjectConfig = subject["config"]
+        blocks: list[Block] = subject["blocks"]
+        vd = undo["version"]
+        v = _version_from_dict(vd)
+        if any(x.vid == v.vid for x in cfg.versions):
+            raise ValueError("cette version existe déjà")
+        idx = undo.get("index")
+        if isinstance(idx, int) and 0 <= idx <= len(cfg.versions):
+            cfg.versions.insert(idx, v)
+        else:
+            cfg.versions.append(v)
+        if undo.get("prev_header") is not None:
+            cfg.header = HeaderBlock(**{k: x for k, x in undo["prev_header"].items()
+                                        if k in HeaderBlock.__dataclass_fields__})
+        by_bid = {b.bid: b for b in blocks}
+        for bid in undo.get("regrouped") or []:
+            b = by_bid.get(bid)
+            if b is not None:
+                b.group = v.group
+        for entry in undo.get("removed") or []:
+            bd = entry.get("block") or {}
+            if bd.get("bid") in by_bid:
+                continue
+            blk = Block(bid=bd.get("bid") or _gen_bid(bd.get("kind", "text")),
+                        kind=bd.get("kind", "text"), data=bd.get("data") or {},
+                        group=bd.get("group") or v.group)
+            at = entry.get("index")
+            if isinstance(at, int) and 0 <= at <= len(blocks):
+                blocks.insert(at, blk)
+            else:
+                blocks.append(blk)
+        cfg.num_copies = sum(max(1, x.num_copies) for x in cfg.versions) \
+            if cfg.versions else max(1, int(undo.get("prev_num_copies") or 1))
+        _save_subject(subject)
+        return _version_to_dict(v)
+
+
+def set_block_group(bid: str, group: str) -> str:
+    """Affecte un bloc à une version (son groupe AMC). Rend le groupe précédent.
+
+    `group` vide (ou `COMMON_GROUP`) = bloc commun, imprimé sur **toutes** les
+    versions. Un groupe qui ne correspond à aucune version est refusé : le
+    rendu le traiterait en commun, donc le bloc serait imprimé partout au lieu
+    de nulle part — silencieux dans les deux cas.
+    """
+    g = str(group or "").strip()
+    with _io_lock:
+        subject = parse_subject()
+        _require_canonical(subject)
+        cfg: SubjectConfig = subject["config"]
+        if g and g != COMMON_GROUP and g not in {v.group for v in cfg.versions}:
+            raise ValueError(f"aucune version ne restitue le groupe « {g} »")
+        if g == COMMON_GROUP:
+            g = ""
+        b = next((x for x in subject["blocks"] if x.bid == bid), None)
+        if b is None:
+            raise KeyError(f"bloc inconnu : {bid}")
+        prev, b.group = b.group, g
+        _save_subject(subject)
+        return prev
+
+
+def update_version(vid: str, patch: dict) -> dict:
+    """Modifie une version : `name`, `num_copies`, `header` (patch partiel).
+
+    Le **groupe n'est pas modifiable** : c'est l'identité AMC de la version, et
+    le renommer désaffilierait d'un coup toutes ses questions — l'inverse de ce
+    que fait un renommage. Le libellé `name` est là pour ça.
+    """
+    with _io_lock:
+        subject = parse_subject()
+        _require_canonical(subject)
+        cfg: SubjectConfig = subject["config"]
+        v = next((x for x in cfg.versions if x.vid == vid), None)
+        if v is None:
+            raise KeyError(f"version inconnue : {vid}")
+        if "name" in patch:
+            v.name = str(patch["name"] or "").strip()
+        if "num_copies" in patch:
+            try:
+                v.num_copies = max(1, min(999, int(patch["num_copies"])))
+            except (TypeError, ValueError):
+                raise ValueError("num_copies doit être un entier ≥ 1")
+        if isinstance(patch.get("header"), dict):
+            for k, val in patch["header"].items():
+                if k in HeaderBlock.__dataclass_fields__:
+                    setattr(v.header, k, val)
+        cfg.num_copies = sum(x.num_copies for x in cfg.versions)
+        _save_subject(subject)
+        return _version_to_dict(v)
+
+
 def update_header(patch: dict) -> None:
     with _io_lock:
         subject = parse_subject()
@@ -2222,6 +3404,26 @@ def regenerate_seed() -> int:
 # Migration legacy → canonique (« danger zone »)
 # --------------------------------------------------------------------------
 
+def _migration_lost_questions(tex: str, blocks: list) -> str | None:
+    """Message d'erreur si la migration a perdu les questions du sujet.
+
+    Un sujet dont le `.tex` contient des `\\begin{question…}` mais dont la
+    migration ne sort aucun bloc QCM n'a pas été compris. Le sauver quand même
+    donnait un sujet « canonique » **vide** : l'éditeur n'affichait rien, le
+    barème valait 0 — donc toutes les copies notées 0 — et la première
+    modification faisait régénérer un `exam.tex` amputé. Mieux vaut refuser et
+    rester en legacy (lecture seule, `.tex` compilé tel quel).
+    """
+    n_qcm = sum(1 for b in blocks if b.kind == "question_qcm")
+    n_tex = len(_Q_BEGIN.findall(tex))
+    if n_tex and not n_qcm:
+        return (f"Migration refusée : le sujet contient {n_tex} question(s) "
+                f"LaTeX mais aucune n'a pu être analysée. Structure AMC non "
+                f"reconnue — le sujet reste en lecture seule (legacy), il "
+                f"compile et se corrige normalement.")
+    return None
+
+
 def migrate_to_canonical() -> dict:
     """Migre un sujet legacy (sans marqueurs `%%QCM-`) vers le format canonique.
 
@@ -2247,6 +3449,28 @@ def migrate_to_canonical() -> dict:
         # Backup avant toute modif (irréversible côté UI sans restore manuel).
         backup = EXAM_TEX.with_suffix(".tex.legacy-backup")
         backup.write_text(tex, encoding="utf-8")
+
+        # 0. Sujet à groupes : une version par `\exemplaire`, les questions
+        #    déclarées hors du `\exemplaire` dans des `\element{groupe}{…}`.
+        grouped = _split_grouped_tex(tex)
+        if grouped:
+            subject = _grouped_subject(tex, grouped, mode="canonical")
+            bad = _migration_lost_questions(tex, subject["blocks"])
+            if bad:
+                return {"ok": False, "log": bad}
+            _save_subject(subject)
+            nq = sum(1 for b in subject["blocks"] if b.kind == "question_qcm")
+            vs = subject["config"].versions
+            return {
+                "ok": True,
+                "log": (f"Migration réussie : {len(vs)} version(s) "
+                        f"({', '.join(v.group for v in vs)}), "
+                        f"{len(subject['blocks'])} blocs dont {nq} QCM. "
+                        f"Backup : {backup.name}"),
+                "n_blocks": len(subject["blocks"]),
+                "n_versions": len(vs),
+                "backup": backup.name,
+            }
 
         # 1-2. Découpe structurelle : préambule / corps / feuille de réponses.
         # Même helper que `_parse_legacy_subject` — migrer et bootstrapper le
@@ -2323,6 +3547,7 @@ def migrate_to_canonical() -> dict:
                         for a in info["answers"]
                     ],
                     "value": info["bareme"].get("value", "1"),
+                    "epilogue": info.get("epilogue", ""),
                 }
                 blocks.append(Block(bid=_gen_bid("question_qcm"),
                                      kind="question_qcm", data=data))
@@ -2348,6 +3573,9 @@ def migrate_to_canonical() -> dict:
             answer_sheet_tex=answer_sheet_tex,
         )
         subject = {"config": cfg, "blocks": blocks, "mode": "canonical"}
+        bad = _migration_lost_questions(tex, blocks)
+        if bad:
+            return {"ok": False, "log": bad}
         _save_subject(subject)
 
         return {
@@ -2421,6 +3649,24 @@ def parse_tex():
 # Spécification d'une question (lue par score.py et l'UI)
 # --------------------------------------------------------------------------
 
+def tex_to_amc(copy: int = 1) -> dict:
+    """`{q_tex → numéro AMC}` pour cette copie — l'inverse d'`amc_question_map`.
+
+    ⚠ Nécessaire dès que les deux numérotations divergent. `_tex_chars` est
+    indexé par **numéro AMC** (il vient du calage), alors qu'`effective_spec` et
+    `get_bareme` reçoivent un **indice d'ordre du document** (la clé de
+    `parse_tex`). Les interroger directement avec l'indice de document rendait
+    `charmap = None` sur un sujet à plusieurs versions : options et bonnes
+    réponses vides, donc une question à choix unique payée à toute copie qui
+    n'y répond pas (mesuré : copie vide notée 2/5).
+    """
+    try:
+        return {q_tex: num for num, q_tex
+                in (amc_question_map(copy=copy).get("qcm") or {}).items()}
+    except Exception:
+        return {}
+
+
 def effective_spec(q: int, copy: int = 1):
     """`{type, options, correct, tag, is_open?, open_values?}` pour la copie.
 
@@ -2444,7 +3690,7 @@ def effective_spec(q: int, copy: int = 1):
     spec["type"] = info["type"]
     spec["tag"] = info["tag"]
     answers = info["answers"]
-    charmap = _tex_chars(copy=copy).get(q)
+    charmap = _tex_chars(copy=copy).get(tex_to_amc(copy).get(q, q))
     if charmap and len(charmap) == len(answers):
         spec["options"] = "".join(sorted(charmap))
         spec["correct"] = "".join(sorted(c for a, c in zip(answers, charmap)
@@ -2467,7 +3713,7 @@ def get_bareme(copy: int = 1):
             v = _frac(info["bareme"].get("value"))
             out[q] = {"value": 1.0 if v is None else v}
             continue
-        charmap = _tex_chars(copy=copy).get(q)
+        charmap = _tex_chars(copy=copy).get(tex_to_amc(copy).get(q, q))
         chars, ok = {}, True
         if charmap and len(charmap) == len(info["answers"]):
             for a, ch in zip(info["answers"], charmap):
@@ -2506,9 +3752,61 @@ def max_score(q: int, copy: int = 1) -> float:
     return round(tot, 6)
 
 
+def version_total_max(subject: dict, group: str) -> float:
+    """Barème d'une version, calculé depuis **ses questions**.
+
+    ⚠ À ne pas confondre avec `total_max(copy)`, qui passe par le CALAGE pour
+    savoir quelles questions AMC porte une copie donnée. Les deux coïncident
+    tant que le calage est frais, mais le numéro de la première copie d'une
+    version n'a rien à voir avec son barème : le faire dépendre de lui faisait
+    disparaître le barème de l'après-midi dès qu'on changeait le nombre de
+    copies du matin — le décalage sortait sa première copie du calage compilé.
+
+    Les blocs sans groupe sont **communs**, donc imprimés sur chaque version :
+    ils comptent dans le total de toutes.
+    """
+    qcm = [b for b in subject["blocks"] if b.kind == "question_qcm"]
+    # `parse_tex()` (donc `max_score`) indexe les QCM par ordre du document,
+    # à partir de 1 — cf. le piège « numéro AMC ≠ indice d'ordre ».
+    return round(sum(max_score(i + 1) for i, b in enumerate(qcm)
+                     if not b.group or b.group == group), 6)
+
+
 def total_max(copy: int = 1) -> float:
-    """Total maximal du QCM (copie donnée)."""
-    return round(sum(max_score(q, copy=copy) for q in parse_tex()) or 0.0, 6)
+    """Total maximal du QCM **de cette copie**.
+
+    ⚠ Sur un sujet à plusieurs versions, ce n'est pas le total du sujet : une
+    copie du matin ne porte que les questions du groupe « matin ». Sommer tout
+    le sujet donnait un barème sur 10 à des copies qui valent 5, donc des notes
+    divisées par deux sur toute la promo.
+    """
+    qmap = amc_question_map(copy=copy).get("qcm") or {}
+    qs = set(qmap.values()) if qmap else set(parse_tex())
+    return round(sum(max_score(q, copy=copy) for q in qs) or 0.0, 6)
+
+
+def subject_total_max() -> float:
+    """Barème maximal du sujet — la plus grosse note atteignable sur une copie.
+
+    C'est l'échelle de la note d'un examen : celle qu'affiche l'évaluation,
+    celle qu'exportent les CSV, celle qu'annoncent les courriels. Il n'y a plus
+    de réglage au-dessus (« ramener sur 20 » appartient au niveau qui compare
+    plusieurs examens) — diviser par autre chose que le barème réel décalerait
+    toute la promo sans rien signaler.
+
+    ⚠ Une copie par **version** (`region_copies`), pas la seule copie 1 : deux
+    versions peuvent ne pas valoir le même nombre de points, et un unique
+    diviseur global ne peut alors être que le plus grand des deux — sous-noter
+    une version entière serait pire que sur-noter l'autre.
+
+    Rend `0.0` quand le sujet n'est pas lisible : c'est un « je ne sais pas »,
+    à l'appelant de décider quoi en faire, jamais un barème inventé.
+    """
+    try:
+        vals = [total_max(c) for c in (region_copies() or [1])]
+    except Exception:                                   # noqa: BLE001
+        return 0.0
+    return max([v for v in vals if v and v > 0], default=0.0)
 
 
 # --------------------------------------------------------------------------
@@ -2684,43 +3982,52 @@ def _statement_top(lines, body_size, y_boxes):
     return top
 
 
-def pdf_regions():
-    """{q: {page, x0, y0, x1, y1}} — région de chaque question dans le PDF du
-    sujet, en pixels 300 dpi.
+def region_copies() -> list[int]:
+    """Numéros de copie à parcourir pour couvrir le sujet **une fois**.
 
-    Base = les cases du calage (`layout_box`), affinée avec le texte du PDF :
-    - le haut d'une région est le haut de l'**énoncé** (cf. `_statement_top`),
-      pas la fin de la question précédente — sinon la 1re question d'une page
-      englobe l'en-tête et le titre ;
-    - le bas s'arrête avant l'énoncé de la question suivante ;
-    - pour un bloc `answerbox`, la région devient le **cadre de réponse inline**
-      (celui où l'étudiant écrit) et non la ligne de barème « Réservé
-      correcteur » de la feuille de réponses, qui est ce que désigne son
-      numéro AMC.
-
-    Note : les questions QCM/AMCOpen ont leurs cases sur les pages d'énoncé,
-    mais les barèmes des answerbox (`tag = bareme-<bid>`) ont leurs cases sur
-    la feuille de réponses. On INCLUT donc la feuille de réponses uniquement
-    pour les questions dont le tag commence par `bareme-` (sinon les cases du
-    code étudiant — `etu[i]` — pollueraient les régions).
+    ⚠ Une copie par **version**, pas toutes les copies. Avec `\\exemplaire{N}`
+    les copies 2..N portent les MÊMES questions aux MÊMES numéros AMC, sur
+    d'autres pages du PDF : les fusionner ferait pointer chaque question sur la
+    dernière copie imprimée. Avec plusieurs versions en revanche, ne prendre
+    que la copie 1 laisse toute la seconde moitié du sujet sans aperçu — c'est
+    ce qui se voyait comme « un seul groupe dans la preview ».
     """
-    global _regions
-    if _regions is not None:
-        return _regions
-    _regions = {}
     try:
-        lay = layout_store.get_layout()
+        cfg = parse_subject()["config"]
+        if cfg.versions:
+            return [a for a, _ in version_copy_ranges(cfg)]
     except Exception:
-        return _regions
+        pass
+    return [1]
+
+
+def _regions_from_layout(out: dict, lay, hints: dict, pages: dict) -> None:
+    """Régions des questions d'UN calage, ajoutées à `out` (indexé par n° AMC).
+
+    ⚠ Les pages écrites dans `out` sont celles du **PDF** (`lay.pdf_page`), pas
+    celles du calage, qui sont numérotées par copie : la page 1 de la copie 2
+    est la 3e page du PDF. Les indices `hints` et `pages` sont eux aussi des
+    pages de PDF.
+    """
+    pmap = lay.pdf_page_map()
     asp = lay.answer_sheet_page
 
     def _is_bareme(q: int) -> bool:
         return lay._question_name(q).startswith("bareme-")
 
+    # On garde les cases « imprimées avec l'énoncé » (ROLE_QUESTIONONLY), qui
+    # marquent la position de la question dans le questionnaire, et on écarte
+    # les cases à cocher de la feuille de réponses — sauf la ligne de barème
+    # d'un answerbox, qui n'existe que là.
+    #
+    # ⚠ Le filtre portait avant sur la PAGE (`b.page != asp`), ce qui perdait
+    # toute question imprimée sur la même page que la feuille de réponses. Sur
+    # un sujet où la dernière question déborde jusqu'à cette page, elle n'avait
+    # aucun cadre d'aperçu — constaté sur les deux versions d'un sujet à
+    # groupes, dont la 5e question tombe juste avant `\\AMCdebutFormulaire`.
     rows = [(b.question, b.page, b.ymin, b.ymax)
             for b in lay.boxes
-            if b.page != asp or _is_bareme(b.question)]
-    pages = {p: (pi.width, pi.height) for p, pi in lay.pages.items()}
+            if b.role != layout_store.ROLE_ANSWER or _is_bareme(b.question)]
     boxes = {}
     for q, page, ymin, ymax in rows:
         d = boxes.setdefault(q, {"page": page, "ymin": ymin, "ymax": ymax})
@@ -2730,13 +4037,13 @@ def pdf_regions():
     for q, d in boxes.items():
         by_page.setdefault(d["page"], []).append((q, d))
 
-    hints = _pdf_region_hints()
     TOP, PAD, LEAD = 240.0, 70.0, 14.0
     for page, items in by_page.items():
+        ppage = pmap.get(page, page)          # page du PDF
         items.sort(key=lambda it: it[1]["ymin"])
-        w, h = pages.get(page, (2480.0, 3508.0))
-        lines = hints.get("lines", {}).get(page, [])
-        body = hints.get("body", {}).get(page, 0.0)
+        w, h = pages.get(ppage, (2480.0, 3508.0))
+        lines = hints.get("lines", {}).get(ppage, [])
+        body = hints.get("body", {}).get(ppage, 0.0)
 
         # Haut de l'énoncé de chaque question de la page (None si indisponible).
         tops = {}
@@ -2746,6 +4053,25 @@ def pdf_regions():
             t = _statement_top(lines, body, d["ymin"])
             if t is not None and t < d["ymin"]:
                 tops[q] = t
+
+        # ⚠ L'énoncé d'une question ne commence JAMAIS au-dessus des CASES de
+        # la précédente. `_statement_top` ne remonte que sur du texte et ne
+        # voit pas les cases : quand deux questions sont serrées (pas de saut
+        # de paragraphe entre les réponses de l'une et l'énoncé de l'autre),
+        # il remontait jusqu'à l'énoncé précédent. Mesuré sur un sujet réel :
+        # les questions 11 et 12 partaient du même y, la région de la 11
+        # tombait à 20 px de haut (donc vide) et celle de la 12 affichait les
+        # DEUX questions. Le calage, lui, sait exactement où finissent les
+        # cases de la précédente — on s'en sert comme plancher.
+        prev_box_bottom = None
+        for q, d in items:
+            if _is_bareme(q):
+                continue
+            t = tops.get(q)
+            if (t is not None and prev_box_bottom is not None
+                    and t < prev_box_bottom < d["ymin"] - 6.0):
+                tops[q] = prev_box_bottom + 6.0
+            prev_box_bottom = d["ymax"]
 
         prev_bottom = TOP
         for idx, (q, d) in enumerate(items):
@@ -2766,20 +4092,67 @@ def pdf_regions():
                     if nq in tops:
                         y1 = min(y1, max(y0 + 20.0, tops[nq] - LEAD - 4.0))
                         break
-            _regions[q] = {"page": page, "x0": 110.0, "y0": y0,
-                           "x1": w - 110.0, "y1": y1}
+            out[q] = {"page": ppage, "x0": 110.0, "y0": y0,
+                      "x1": w - 110.0, "y1": y1}
             prev_bottom = d["ymax"] + PAD
 
-    _apply_answerbox_regions(_regions, lay, hints, pages)
+
+def pdf_regions():
+    """{q: {page, x0, y0, x1, y1}} — région de chaque question dans le PDF du
+    sujet, en pixels 300 dpi.
+
+    Base = les cases du calage (`layout_box`), affinée avec le texte du PDF :
+    - le haut d'une région est le haut de l'**énoncé** (cf. `_statement_top`),
+      pas la fin de la question précédente — sinon la 1re question d'une page
+      englobe l'en-tête et le titre ;
+    - le bas s'arrête avant l'énoncé de la question suivante ;
+    - pour un bloc `answerbox`, la région devient le **cadre de réponse inline**
+      (celui où l'étudiant écrit) et non la ligne de barème « Réservé
+      correcteur » de la feuille de réponses, qui est ce que désigne son
+      numéro AMC.
+
+    Note : les questions QCM/AMCOpen ont leurs cases sur les pages d'énoncé,
+    mais les barèmes des answerbox (`tag = bareme-<bid>`) ont leurs cases sur
+    la feuille de réponses. On INCLUT donc la feuille de réponses uniquement
+    pour les questions dont le tag commence par `bareme-` (sinon les cases du
+    code étudiant — `etu[i]` — pollueraient les régions).
+
+    Sujet à plusieurs versions : une passe par version (cf. `region_copies`),
+    les régions et les pages étant fusionnées. Les numéros AMC de deux versions
+    sont disjoints, la fusion est donc sans ambiguïté.
+    """
+    global _regions
+    if _regions is not None:
+        return _regions
+    _regions = {}
+    hints = _pdf_region_hints()
+    pages: dict = {}
+    layouts = []
+    for c in region_copies():
+        try:
+            lay = layout_store.get_layout(copy=c)
+        except Exception:
+            continue
+        layouts.append(lay)
+        pmap = lay.pdf_page_map()
+        pages.update({pmap.get(p, p): (pi.width, pi.height)
+                      for p, pi in lay.pages.items()})
+    for lay in layouts:
+        _regions_from_layout(_regions, lay, hints, pages)
+        _apply_answerbox_regions(_regions, lay, hints, pages)
 
     # Blocs `text` : aucune case dans le calage, on les retrouve dans le PDF
     # par le texte (cf. `_apply_text_block_regions`). Indexés par bid.
     try:
         blocks = parse_subject()["blocks"]
-        qmap = amc_question_map()
-        # bid → clé de région, pour les blocs déjà localisés.
-        qcm_num = {q_tex: num for num, q_tex in (qmap.get("qcm") or {}).items()}
-        open_num = {bid: num for num, bid in (qmap.get("open") or {}).items()}
+        # Carte fusionnée sur toutes les versions : sans ça, les questions de
+        # la seconde version n'ont pas de clé et ne bornent donc pas la
+        # recherche des blocs `text` qui les entourent.
+        qcm_num, open_num = {}, {}
+        for c in region_copies():
+            qmap = amc_question_map(copy=c)
+            qcm_num.update({q_tex: num for num, q_tex in (qmap.get("qcm") or {}).items()})
+            open_num.update({bid: num for num, bid in (qmap.get("open") or {}).items()})
         seq = {"n": 0}
 
         def key_of(b):
@@ -2790,11 +4163,11 @@ def pdf_regions():
                 return open_num.get(b.bid)
             return None
 
-        _apply_text_block_regions(_regions, lay, hints, pages, blocks, key_of)
+        _apply_text_block_regions(_regions, layouts[0] if layouts else None,
+                                  hints, pages, blocks, key_of)
     except Exception:
         pass
     return _regions
-
 
 def _plain_words(tex: str) -> list[str]:
     """Mots visibles d'un fragment LaTeX, pour le retrouver dans le PDF.
@@ -3022,6 +4395,190 @@ def _error_tail(log, n=50):
         if ln.startswith("!"):
             return "\n".join(lines[max(0, idx - 2):idx + 25])
     return "\n".join(lines[-n:])
+
+
+def _run_pdflatex(tmp: Path, passes: int = 2):
+    """Lance `pdflatex` dans `tmp`, qui contient déjà exam.tex, exam-config.tex
+    et le style vendorisé. Retourne `(rc, stdout)` ; laisse remonter
+    `FileNotFoundError` (pas de pdflatex) et `TimeoutExpired`.
+
+    On s'arrête à la première passe qui échoue : la seconde ne ferait que
+    rejouer la même erreur sur un fichier auxiliaire à moitié écrit.
+    """
+    rc, out = 1, ""
+    for _ in range(passes):
+        proc = subprocess.run(
+            ["pdflatex", "-interaction=nonstopmode",
+             "-halt-on-error", "exam.tex"],
+            cwd=str(tmp), capture_output=True, text=True, timeout=120)
+        rc, out = proc.returncode, proc.stdout
+        if rc != 0:
+            break
+    return rc, out
+
+
+# --------------------------------------------------------------------------
+# Documents de publication : le sujet vierge et son corrigé
+#
+# Ce que l'on donne aux étudiants après l'examen. Deux PDF **page pour page
+# identiques** — seules changent les cases noircies et le bandeau — pour qu'on
+# puisse les lire côte à côte.
+#
+# ⚠ Ce ne sont PAS des documents à imprimer et à scanner : ni mires, ni code
+# de copie, ni feuille de réponses. Ils ne remplacent jamais `DOC-sujet.pdf`,
+# qui reste le seul document dont le calage décrit les copies.
+# --------------------------------------------------------------------------
+
+PUBLICATION_KINDS = ("sujet", "corrige")
+
+PUBLICATION_PDF = {
+    "sujet": SUJET_DIR / "DOC-publication-sujet.pdf",
+    "corrige": SUJET_DIR / "DOC-publication-corrige.pdf",
+}
+
+PUBLICATION_LABEL = {"sujet": "sujet vierge", "corrige": "corrigé"}
+
+# ⚠ `_QCM_ANSWER_SHEET_START` est un PRÉFIXE de `_QCM_ANSWER_SHEET_END` :
+# sans le `(?!-END)`, la borne de gauche s'accrocherait à la fermeture du bloc
+# précédent et le découpage sauterait d'une version à l'autre.
+# Le `\newpage` optionnel qui précède est emporté avec le bloc — le laisser
+# ajoutait une page blanche en fin de document.
+_RE_PUB_ANSWER_SHEET = re.compile(
+    r"(?:^[ \t]*\\newpage[ \t]*\r?\n)?"
+    + re.escape(_QCM_ANSWER_SHEET_START) + r"(?!-END)"
+    + r".*?" + re.escape(_QCM_ANSWER_SHEET_END) + r"[ \t]*\r?\n?",
+    re.S | re.M)
+
+# Injecté juste avant `\begin{document}` pour le sujet VIERGE.
+#
+# `\CorrigeExterne` (cf. exam-config.tex) allume d'un coup ce qu'on veut :
+# une seule copie par `\exemplaire`, pas de mires ni de code imprimé, pas de
+# filigrane. Il allume aussi les réponses cochées et le bandeau « Correction »,
+# qu'on éteint ici — il n'existe pas de crochet AMC pour « comme le corrigé,
+# mais vierge ». Le préambule est le seul endroit possible : le fichier de
+# configuration est lu AVANT que ces drapeaux n'existent.
+#
+# Commentaires en ASCII : ce texte est injecté dans un préambule dont on ne
+# sait pas quel encodage d'entrée il déclare.
+_PUB_BLANK_PREAMBLE = (
+    "%% AMCx --- document de publication : sujet vierge.\n"
+    "\\makeatletter\n"
+    "\\AMC@correcfalse       %% pas de reponses cochees\n"
+    "\\def\\AMC@intituleHead{} %% pas de bandeau \"Correction\"\n"
+    "\\makeatother\n")
+
+
+def publication_tex(tex: str, kind: str):
+    """Transforme le tex du sujet en tex de publication. **Pure.**
+
+    Retourne `(tex, notes)` où `notes` dit ce qui a été retiré — rien n'est
+    enlevé en silence d'un document destiné à être publié.
+    """
+    if kind not in PUBLICATION_KINDS:
+        raise ValueError(f"type de publication inconnu : {kind!r}")
+    notes = []
+    tex, n = _RE_PUB_ANSWER_SHEET.subn("", tex)
+    if n:
+        notes.append(f"feuille de réponses retirée ({n} version(s))")
+    else:
+        # Sujet legacy : pas de marqueurs `%%QCM-…`, donc pas de découpage
+        # possible. Mieux vaut publier la feuille de réponses que de la
+        # deviner et couper au mauvais endroit.
+        notes.append("feuille de réponses conservée (sujet legacy, "
+                     "pas de marqueurs pour l'isoler)")
+    if kind == "sujet":
+        if "\\begin{document}" not in tex:
+            raise ValueError("préambule illisible : \\begin{document} introuvable")
+        tex = tex.replace("\\begin{document}",
+                          _PUB_BLANK_PREAMBLE + "\\begin{document}", 1)
+    return tex, notes
+
+
+def compile_publication(kind: str) -> dict:
+    """Produit `sujet/DOC-publication-<kind>.pdf`. Retourne {ok, log, n_pages}.
+
+    ⚠ La source est **`sujet/exam.tex`**, pas le store : ce document décrit
+    l'examen qui a eu lieu, donc celui de la dernière compilation. Des blocs
+    édités mais pas encore compilés ne doivent pas apparaître dans un corrigé
+    publié — ils ne sont sur la copie de personne.
+
+    N'écrit ni `exam.tex`, ni `exam.xy`, ni `DOC-sujet.pdf`, et n'invalide
+    aucun cache de calage : la correction des copies ne bouge pas.
+    """
+    if kind not in PUBLICATION_KINDS:
+        return {"ok": False, "log": f"Type de publication inconnu : {kind!r}."}
+    with _compile_lock:
+        if not EXAM_TEX.exists():
+            return {"ok": False,
+                    "log": "sujet/exam.tex introuvable — compilez d'abord le sujet."}
+        src = EXAM_TEX.read_text(encoding="utf-8")
+        # Même injection que `compile_pdf` : le document publié doit être celui
+        # qui a été imprimé, fourchettes de note comprises.
+        try:
+            import config as _config
+            _cfg = _config.load_config()
+            if _cfg.get("show_score_range"):
+                src = _inject_score_ranges(src,
+                                           g_floor=_cfg.get("question_floor"),
+                                           g_ceiling=_cfg.get("question_ceiling"))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            tex, notes = publication_tex(src, kind)
+        except ValueError as e:
+            return {"ok": False, "log": str(e)}
+        tmp = Path(tempfile.mkdtemp(prefix="amc_publi_"))
+        try:
+            (tmp / "exam.tex").write_text(tex, encoding="utf-8")
+            # `\CorrigeExterne` : le crochet AMC du corrigé (une copie par
+            # exemplaire, sans mires ni filigrane). Le sujet vierge repart du
+            # même, réponses éteintes — d'où deux PDF superposables.
+            (tmp / "exam-config.tex").write_text(
+                "\\def\\CorrigeExterne{1}\n", encoding="utf-8")
+            if AMC_STY.exists():
+                shutil.copy(AMC_STY, tmp / AMC_STY.name)
+            try:
+                rc, out = _run_pdflatex(tmp)
+            except FileNotFoundError:
+                return {"ok": False,
+                        "log": "pdflatex introuvable (TeX Live non installé ?)."}
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "log": "Délai de compilation dépassé (120 s)."}
+            pdf = tmp / "exam.pdf"
+            if rc != 0 or not pdf.exists():
+                logf = tmp / "exam.log"
+                full = logf.read_text(errors="replace") if logf.exists() else out
+                return {"ok": False, "log": _error_tail(full)}
+            dest = PUBLICATION_PDF[kind]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(pdf, dest)
+            n_pages = _pdf_page_count(dest)
+            # ⚠ Avec `shuffle_answers`, l'ordre des réponses change d'une copie
+            # à l'autre : le document publié en montre UN, pas celui qu'avait
+            # tel étudiant. Le taire ferait passer le corrigé pour faux aux yeux
+            # de qui le compare à sa propre feuille.
+            try:
+                if parse_subject()["config"].shuffle_answers:
+                    notes.append("⚠ réponses mélangées d'une copie à l'autre : "
+                                 "l'ordre publié est celui d'une copie type, "
+                                 "pas celui de la feuille de chaque étudiant")
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "n_pages": n_pages, "notes": notes,
+                    "log": f"{PUBLICATION_LABEL[kind].capitalize()} produit — "
+                           f"{n_pages} page(s)"
+                           + (" · " + " · ".join(notes) if notes else "") + "."}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _pdf_page_count(path: Path) -> int:
+    try:
+        import fitz
+        with fitz.open(path) as d:
+            return d.page_count
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _ffbid_slug(bid: str) -> str:
@@ -3373,21 +4930,13 @@ def compile_pdf():
             # le système a une installation AMC. Déterminisme du calage voulu.
             if AMC_STY.exists():
                 shutil.copy(AMC_STY, tmp / AMC_STY.name)
-            rc, out = 1, ""
-            for _ in range(2):
-                try:
-                    proc = subprocess.run(
-                        ["pdflatex", "-interaction=nonstopmode",
-                         "-halt-on-error", "exam.tex"],
-                        cwd=str(tmp), capture_output=True, text=True, timeout=120)
-                except FileNotFoundError:
-                    return {"ok": False,
-                            "log": "pdflatex introuvable (TeX Live non installé ?)."}
-                except subprocess.TimeoutExpired:
-                    return {"ok": False, "log": "Délai de compilation dépassé (120 s)."}
-                rc, out = proc.returncode, proc.stdout
-                if rc != 0:
-                    break
+            try:
+                rc, out = _run_pdflatex(tmp)
+            except FileNotFoundError:
+                return {"ok": False,
+                        "log": "pdflatex introuvable (TeX Live non installé ?)."}
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "log": "Délai de compilation dépassé (120 s)."}
             pdf = tmp / "exam.pdf"
             if rc == 0 and pdf.exists():
                 shutil.copy(pdf, SUJET_PDF)

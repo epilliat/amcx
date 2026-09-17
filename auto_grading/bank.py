@@ -43,15 +43,17 @@ from pathlib import Path
 from threading import RLock
 
 import bank_taxonomy as tx
+import bank_variants as vr
 import config
 from sujet_store import Block, _gen_bid
 
 DEFAULT_BANK_ROOT = Path.home() / "Documents" / "AMCx-banque"
 
 # Version du cache `index.json`. Incrémentée quand la forme d'une entrée
-# change (v2 = ajout de `categories`) : `_read_or_rebuild_index` reconstruit
-# alors tout seul, sans que l'utilisateur ait rien à supprimer à la main.
-INDEX_VERSION = 2
+# change (v2 = ajout de `categories`, v3 = `variant_of` + `created_at`) :
+# `_read_or_rebuild_index` reconstruit alors tout seul, sans que l'utilisateur
+# ait rien à supprimer à la main.
+INDEX_VERSION = 3
 
 # Version du fichier `categories.json`.
 CATEGORIES_VERSION = 1
@@ -181,12 +183,24 @@ def save(question: dict, *, reindex: bool = True) -> Path:
 
 
 def delete(bank_id: str) -> None:
-    """Supprime une question. Idempotent (no-op si absente)."""
+    """Supprime une question. Idempotent (no-op si absente).
+
+    ⚠ Supprimer le **chef** d'un groupe de variantes ne supprime pas ses
+    variantes : la plus ancienne est promue et les autres la suivent
+    (`bank_variants.promote_on_delete`). Sans ça, supprimer une question en
+    ferait disparaître silencieusement plusieurs de la liste — elles seraient
+    toujours sur le disque, mais repliées sous un chef qui n'existe plus.
+    """
     with _lock:
         p = _find_path(bank_id)
-        if p:
-            p.unlink(missing_ok=True)
-            rebuild_index()
+        if not p:
+            return
+        for b, ptr in vr.promote_on_delete(_variant_rows(), bank_id).items():
+            q = load(b)
+            q["variant_of"] = ptr
+            save(q, reindex=False)
+        p.unlink(missing_ok=True)
+        rebuild_index()
 
 
 # --------------------------------------------------------------------------
@@ -211,6 +225,11 @@ def _build_index_entries() -> list[dict]:
             "modified_at": q.get("modified_at", ""),
             "source_project": q.get("source_project", ""),
             "categories":  list(q.get("categories") or []),
+            # `variant_of` et `created_at` sont dans l'index parce que replier
+            # les variantes est fait à CHAQUE listing : les relire dans 300
+            # fichiers à chaque frappe de la recherche annulerait l'index.
+            "variant_of":  (q.get("variant_of") or "").strip(),
+            "created_at":  q.get("created_at", ""),
             "stats":       stats_summary(q),
         })
     return out
@@ -262,6 +281,15 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     - `category`      : str (uuid) — questions de ce nœud
     - `descendants`   : bool (défaut True) — inclure les sous-catégories
     - `uncategorized` : bool — questions sans aucune catégorie vivante
+    - `variants`      : `"heads"` (défaut) replie les variantes sous leur chef,
+                        annoté de `variants` / `n_variants` ; `"all"` rend la
+                        liste à plat.
+
+    ⚠ **Le filtre porte sur chaque question, le repli vient après.** Une
+    recherche qui ne touche qu'une variante ramène donc son groupe entier
+    (`bank_variants.expand_matches`) : sans ça la variante serait repliée sous
+    un chef que le filtre n'a pas retenu, et elle disparaîtrait de l'écran —
+    introuvable alors qu'elle correspond exactement à ce qu'on cherche.
     """
     filters = filters or {}
     idx = _read_or_rebuild_index()
@@ -310,9 +338,96 @@ def list_questions(filters: dict | None = None) -> list[dict]:
             items = [q for q in items
                      if not any(c in known for c in (q.get("categories") or []))]
 
-    # Tri : récents en premier (modified_at descendant).
-    items.sort(key=lambda q: q.get("modified_at", ""), reverse=True)
-    return items
+    if (filters.get("variants") or "heads") == "all":
+        items.sort(key=lambda q: q.get("modified_at", ""), reverse=True)
+        return items
+
+    all_items = idx.get("questions", [])
+    keep = vr.expand_matches(all_items, [q.get("bank_id", "") for q in items])
+    # `fold` a besoin de TOUTE la banque pour savoir qui est chef de qui ;
+    # on ne garde ensuite que les groupes retenus par le filtre.
+    folded = [g for g in vr.fold(all_items) if g.get("bank_id") in keep]
+    folded.sort(key=lambda q: q.get("modified_at", ""), reverse=True)
+    return folded
+
+
+# --------------------------------------------------------------------------
+# Variantes d'une même question
+# --------------------------------------------------------------------------
+
+def _variant_rows() -> list[dict]:
+    """Les `{bank_id, variant_of, created_at}` de toute la banque, depuis l'index."""
+    return [{"bank_id": q.get("bank_id", ""),
+             "variant_of": (q.get("variant_of") or "").strip(),
+             "created_at": q.get("created_at", "")}
+            for q in _read_or_rebuild_index().get("questions", [])]
+
+
+def variant_head(bank_id: str) -> str:
+    """Le `bank_id` du chef du groupe de `bank_id` (lui-même s'il est chef)."""
+    return vr.head_of(_variant_rows(), bank_id)
+
+
+def list_variants(bank_id: str) -> dict:
+    """Le groupe entier de `bank_id` : `{head, members:[entrée d'index…]}`.
+
+    Le chef est en tête, ses variantes suivent par ancienneté. On rend les
+    entrées d'index (titre, tags, stats) et pas les questions complètes : la
+    page n'a besoin que de quoi lister, et charger 6 fichiers pour afficher
+    6 lignes serait payer le `data` de chacune pour rien.
+    """
+    by_id = {q["bank_id"]: q for q in _read_or_rebuild_index().get("questions", [])}
+    if bank_id not in by_id:
+        raise KeyError(bank_id)
+    ids = vr.members(_variant_rows(), bank_id)
+    return {"head": ids[0], "members": [by_id[b] for b in ids if b in by_id]}
+
+
+def set_variant_of(bank_id: str, head_id: str | None) -> dict:
+    """Range `bank_id` dans le groupe de `head_id`, ou l'en sort (`None`).
+
+    Retourne l'état **réel** du groupe après écriture (`list_variants`) et non
+    ce qui a été demandé : attacher une question qui avait déjà des variantes
+    fusionne les deux groupes, et l'appelant doit voir ce qu'il a obtenu.
+
+    ⚠ Le lien ne touche **ni `modified_at` ni `version`** — pour la même raison
+    que les catégories : la liste est triée par date de modification, et
+    déclarer une variante n'est pas éditer la question. Sinon ranger de vieux
+    QCM les ferait tous remonter en tête.
+    """
+    with _lock:
+        rows = _variant_rows()
+        updates = (vr.detach(rows, bank_id) if head_id in (None, "")
+                   else vr.attach(rows, bank_id, head_id))
+        for b, ptr in updates.items():
+            q = load(b)
+            q["variant_of"] = ptr
+            save(q, reindex=False)
+        if updates:
+            rebuild_index()
+        return list_variants(bank_id)
+
+
+def repair_variants() -> dict:
+    """Réécrit les `variant_of` incohérents (pointeur mort, cycle, chaîne).
+
+    `bank_variants.normalize` répare déjà **à la lecture**, donc la banque est
+    utilisable sans ça ; cette fonction persiste la réparation pour qu'elle ne
+    soit pas refaite à chaque listing. Retourne ce qui a été corrigé.
+    """
+    with _lock:
+        rows = _variant_rows()
+        fixed = vr.normalize(rows)
+        changed = {r["bank_id"]: fixed[r["bank_id"]]
+                   for r in rows
+                   if fixed.get(r["bank_id"], "") != r["variant_of"]}
+        for b, ptr in changed.items():
+            q = load(b)
+            q["variant_of"] = ptr
+            save(q, reindex=False)
+        if changed:
+            rebuild_index()
+        return changed
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +470,9 @@ def from_block(block, project_name: str = "", title: str = "",
         "title":          (title or _auto_title_from_data(kind, data) or "").strip(),
         "tags":           [t.strip() for t in (tags or []) if t and t.strip()],
         "categories":     _dedup_cat_ids(categories),
+        # Toute question naît chef de son groupe : une variante se déclare
+        # après coup, par `set_variant_of`.
+        "variant_of":     "",
         "author":         (author or "").strip(),
         "created_at":     now,
         "modified_at":    now,

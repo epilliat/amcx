@@ -32,6 +32,7 @@ Q_MULTI_ANSWER = "multi_answer"  # `single` avec plusieurs réponses lues
 C_DIFF = "diff"            # CV ≠ AMC
 C_DISAGREE = "disagree"    # E1/E2/E3 divergent
 C_UNCERTAIN = "uncertain"  # GBM entre 0.30 et 0.70
+C_NO_MASKED = "no_masked"  # mesure masquée absente : décision rendue au seuil
 
 _STRUCTURAL = "structural"  # legacy : présent dans les JSON d'avant le recalcul
 
@@ -191,10 +192,22 @@ def copy_review(d: dict, spec_of, qcm_questions) -> dict:
         if reason is None and q_open == 0 and not any(c["flagged"] for c in cells):
             continue
         n_open += q_open
+        # ⚠ L'ambiguïté est calculée sur TOUTES les cases signalées de la
+        # question, traitées comprises : c'est une propriété de la mesure, pas
+        # de l'avancement de la relecture. Elle sert à ordonner la file — « la
+        # plus douteuse d'abord » — là où `risk` sert à savoir ce qu'il reste.
+        # Le MAXIMUM, pas la somme : cinq doutes tièdes ne passent pas devant
+        # un vrai doute.
+        amb = [_uncertainty(c["proba"]) for c in cells if c["flagged"]]
+        if reason is not None:
+            amb.append(0.5)          # signalement de structure : ni sûr, ni douteux
         items.append({"q": q, "tag": spec.get("tag", ""),
                       "type": spec.get("type", "mult"),
                       "correct": "".join(spec.get("correct") or []),
                       "reason": reason, "reviewed": q_reviewed,
-                      "n_open": q_open, "cells": cells})
+                      "n_open": q_open, "cells": cells,
+                      "ambiguity": round(max(amb), 4) if amb else 0.0})
+    items.sort(key=lambda it: (-it["ambiguity"], it["q"]))
     return {"items": items, "n_flagged": n_flagged, "n_open": n_open,
-            "risk": round(risk, 3)}
+            "risk": round(risk, 3),
+            "ambiguity": max((it["ambiguity"] for it in items), default=0.0)}

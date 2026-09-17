@@ -13,6 +13,10 @@ auto_grading/sujet/*.xy
 auto_grading/sujet/*.legacy-backup
 auto_grading/sujet/open_zones.json
 auto_grading/config.json
+# Gabarit de courriel : il vit DANS le projet, initialisé depuis le
+# `mail_results.txt` livré. Lancer le serveur depuis un clone en dépose une
+# copie ici ; la committer ferait de l'artefact d'un poste une source.
+auto_grading/mail_template.txt
 auto_grading/student_list*.xlsx
 projet/
 

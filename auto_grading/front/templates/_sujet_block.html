@@ -19,7 +19,9 @@
          {% if b.get('preview_q') %}data-preview-q="{{ b.preview_q }}"{% endif %}
          {% if b.data.get('readonly') %}data-readonly="1"{% endif %}
          {% if b.data.get('title') %}data-title="{{ b.data.title }}"{% endif %}
-         {% if b.data.get('level') %}data-level="{{ b.data.level }}"{% endif %}>
+         {% if b.data.get('level') %}data-level="{{ b.data.level }}"{% endif %}
+         data-group="{{ b.get('group') or '' }}"
+         {% if b.get('q_in_version') %}data-qv="{{ b.q_in_version }}"{% endif %}>
   <div class="block-toolbar">
     {% if mode == 'canonical' %}
     <span class="block-handle" draggable="true"
@@ -29,12 +31,35 @@
     {% endif %}
     <span class="block-kind-tag">
       {% if b.kind == 'text' %}TEXTE
-      {% elif b.kind == 'question_qcm' %}QCM{% if b.q %} Q{{ b.q }}{% endif %}
+      {# Rang DANS SA VERSION : c'est le numéro imprimé sur la copie. #}
+      {% elif b.kind == 'question_qcm' %}QCM{% if b.get('q_in_version') %} Q{{ b.q_in_version }}{% elif b.q %} Q{{ b.q }}{% endif %}
       {% elif b.kind == 'question_open' %}OPEN
       {% elif b.kind == 'question_freeform' %}LIBRE — DÉSACTIVÉ
       {% elif b.kind == 'answerbox' %}RÉPONSE{% if b.data.placement == 'end' %} ← fin{% endif %}
       {% endif %}
     </span>
+    {% if versions %}
+    {# Sujet à plusieurs versions : dire à quelle version appartient ce bloc.
+       Sans ça, deux questions voisines dans la liste peuvent partir sur deux
+       sujets différents sans que rien ne le montre. #}
+    {% set vname = version_names.get(b.get('group') or '') %}
+    {% if mode == 'canonical' %}
+    {# Le sélecteur EST l'affectation : sans lui, une version ajoutée resterait
+       vide et le groupe d'un bloc ne se changerait qu'en éditant le store. #}
+    <select class="block-group-sel {% if not vname %}is-common{% endif %}"
+            title="Version sur laquelle cette question est imprimée">
+      <option value="" {% if not vname %}selected{% endif %}>commun (toutes)</option>
+      {% for v in versions %}
+      <option value="{{ v.group }}" {% if b.get('group') == v.group %}selected{% endif %}>{{ v.name or v.group }}</option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <span class="block-group-tag {% if not vname %}is-common{% endif %}"
+          title="{% if vname %}Imprimée sur la version « {{ vname }} » seulement{% else %}Imprimée sur toutes les versions{% endif %}">
+      {{ vname or 'commun' }}
+    </span>
+    {% endif %}
+    {% endif %}
     <span class="q-dirty-dot" title="modifications non sauvegardées">●</span>
     <span class="block-toolbar-spacer"></span>
     {% if mode == 'canonical' %}

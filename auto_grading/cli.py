@@ -6,6 +6,8 @@
     amcx doctor          diagnostic d'installation
     amcx update          met à jour AMCx (détecte uv / pipx / clone git)
     amcx where           où vivent le code, les projets, la configuration
+    amcx results         notes de l'examen (--project P, --json)
+    amcx cohort          notes agrégées d'un ensemble (--dir D, --json)
 
 Sans sous-commande, tout argument est passé au serveur : `amcx --port 5051`
 équivaut à l'ancien `python auto_grading/front/server.py --port 5051`.
@@ -130,6 +132,25 @@ def cmd_doctor(_argv: list[str]) -> int:
     return doctor.main()
 
 
+def cmd_results(argv: list[str]) -> int:
+    """Notes d'un examen, sans passer par le serveur.
+
+    C'est le point d'entrée qu'un niveau supérieur (plusieurs examens d'un même
+    dossier) appelle en sous-processus : `config`, `sujet_store` et `server`
+    figent leurs chemins à l'import, donc un seul process ne peut pas lire deux
+    projets — un sous-processus par projet, lancés en parallèle, coûte ~0,5 s
+    chacun.
+    """
+    import exam_results
+    return exam_results.main(argv)
+
+
+def cmd_cohort(argv: list[str]) -> int:
+    """Notes agrégées d'un ensemble d'examens (cf. `cohort.py`)."""
+    import cohort
+    return cohort.main(argv)
+
+
 def cmd_where(_argv: list[str]) -> int:
     """Où vivent le code, les projets et la configuration."""
     import config
@@ -157,6 +178,8 @@ COMMANDS = {
     "doctor": cmd_doctor,
     "update": cmd_update,
     "where":  cmd_where,
+    "results": cmd_results,
+    "cohort":  cmd_cohort,
 }
 
 

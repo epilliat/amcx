@@ -206,6 +206,40 @@ def _one_answer_sheet() -> tuple[str, str, str]:
     return (WARN, "feuille de réponses", detail)
 
 
+def _subject_versions() -> tuple[str, str, str]:
+    """Le sujet a-t-il plusieurs versions (groupes AMC) ?
+
+    C'est la construction qui donne des questions toutes différentes à deux
+    populations. Elle repose entièrement sur le code imprimé : les copies sont
+    numérotées en continu d'une version à l'autre, et c'est ce numéro qui dit
+    avec quel jeu de questions noter une feuille. Sans code lisible, toutes les
+    copies seraient notées avec la version 1.
+    """
+    try:
+        import sujet_store
+        cfg = sujet_store.parse_subject()["config"]
+    except Exception as e:                              # noqa: BLE001
+        return (WARN, "versions du sujet", f"non vérifiable : {e}")
+    if not cfg.versions:
+        return (OK, "versions du sujet", "une seule version")
+    lines = []
+    for v, (a, z) in zip(cfg.versions, sujet_store.version_copy_ranges(cfg)):
+        rng = str(a) if a == z else f"{a}-{z}"
+        try:
+            mx = sujet_store.total_max(copy=a)
+        except Exception:                               # noqa: BLE001
+            mx = "?"
+        lines.append(f"« {v.name or v.group} » (groupe {v.group}) : "
+                     f"copies {rng}, barème {mx}")
+    detail = (f"{len(cfg.versions)} versions — "
+              + " ; ".join(lines)
+              + "\n    Chaque copie est notée avec les questions de SA version, "
+                "reconnue par le n° imprimé.\n"
+                "    ⚠ Vérifier quelques copies de chaque version avant de "
+                "corriger le lot.")
+    return (WARN, "versions du sujet", detail)
+
+
 def _printed_code() -> tuple[str, str, str]:
     """Le calage décrit-il le code imprimé en haut de page (copie/page/checksum) ?
 
@@ -258,6 +292,25 @@ def _student_roster() -> tuple[str, str, str]:
         pass
     warns = m.warnings(width)
     detail = f"{len(m.students)} étudiants"
+    # ⚠ L'onglet fait partie de l'identité de la liste : deux onglets d'un même
+    # classeur sont deux promotions différentes. Le taire laisserait croire
+    # qu'un classeur n'en décrit qu'une.
+    cfg = config.load_config()
+    sheet = (cfg.get("xlsx_sheet") or "").strip()
+    if sheet:
+        detail += f" · onglet « {sheet} »"
+    else:
+        try:
+            from grade_imports import list_sheets
+            from config import resolve_path
+            names = list_sheets(resolve_path(cfg.get("student_xlsx") or ""))
+        except Exception:                               # noqa: BLE001
+            names = []
+        if len(names) > 1:
+            warns = list(warns) + [
+                f"ce classeur a {len(names)} onglets et aucun n'est choisi : "
+                f"c'est l'onglet ACTIF qui est lu ({', '.join(names)}). "
+                "Recharger la liste pour désigner le bon."]
     if width:
         detail += f" · grille du numéro : {width} chiffres"
     if not m.students:
@@ -271,7 +324,7 @@ def _student_roster() -> tuple[str, str, str]:
 
 CHECKS = (_system, _python, _deps, _pdflatex, _amc_sty, _sklearn_vs_model,
           _paths, _project, _layout_consistency, _printed_code,
-          _one_answer_sheet, _student_roster)
+          _one_answer_sheet, _subject_versions, _student_roster)
 
 
 def run_checks() -> list[dict]:

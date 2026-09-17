@@ -1,0 +1,11 @@
+Dear $name,
+
+Your multiple-choice assessment of $date has been marked.
+
+    Score: $score / $max_score
+
+This is an automated message. If you think there is a mistake, reply to
+this address and I will look into it.
+
+Best regards,
+$sender

@@ -43,10 +43,12 @@
 
   <a href="/banque" class="topbar-link {% if active == 'banque' %}active{% endif %}">Banque</a>
   <a href="/sujet" class="topbar-link {% if active == 'sujet' %}active{% endif %}">Sujet</a>
-  <a href="/" class="topbar-link {% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+  <a href="/" class="topbar-link {% if active == 'evaluation' %}active{% endif %}">Évaluation</a>
   <a href="/questions" class="topbar-link {% if active == 'questions' %}active{% endif %}">Questions</a>
+  <a href="/cohorte" class="topbar-link {% if active == 'cohorte' %}active{% endif %}">Ensemble</a>
   <a href="/flagged" class="topbar-link {% if active == 'flagged' %}active{% endif %}">Review rapide</a>
   <a href="/identites" class="topbar-link {% if active == 'identites' %}active{% endif %}">Identités</a>
+  <a href="/mail" class="topbar-link {% if active == 'mail' %}active{% endif %}">Courriels</a>
   <span class="topbar-spacer"></span>
   <a href="/export.csv" class="topbar-link topbar-export">⤓ Export CSV</a>
 </nav>
@@ -86,7 +88,38 @@
     <div class="pm-modal-field">
       <label for="createProjectName">Nom du projet</label>
       <input type="text" id="createProjectName" placeholder="examen_jan_2026" autocomplete="off">
-      <div class="pm-modal-hint" id="createProjectDest">Sera créé dans <code>~/Documents/AMCx/</code>…</div>
+    </div>
+    <div class="pm-modal-field">
+      <label for="createProjectParent">Dossier parent</label>
+      <div class="pm-path-row">
+        <input type="text" id="createProjectParent" autocomplete="off" spellcheck="false">
+        <button type="button" class="pm-btn-secondary" id="createProjectBrowse"
+                title="choisir un dossier">📁 Parcourir</button>
+      </div>
+      {# Sélecteur borné au dossier personnel (cf. `project_state.browse_root`) ;
+         le champ texte, lui, accepte n'importe quel chemin absolu. #}
+      <div class="pm-browser" id="createProjectBrowser" hidden>
+        <div class="pm-browser-head">
+          <button type="button" class="pm-browser-up" id="createProjectUp"
+                  title="dossier parent">↑</button>
+          <code id="createProjectBrowserPath"></code>
+        </div>
+        <ul class="pm-browser-list" id="createProjectBrowserList"></ul>
+        <div class="pm-browser-new" id="createProjectNewRow" hidden>
+          <input type="text" id="createProjectNewName" placeholder="nom du nouveau dossier"
+                 autocomplete="off" spellcheck="false">
+          <button type="button" class="pm-btn-primary" id="createProjectNewGo">Créer</button>
+          <button type="button" class="pm-btn-secondary" id="createProjectNewCancel">Annuler</button>
+        </div>
+        <div class="pm-browser-err" id="createProjectBrowseErr" hidden></div>
+        <div class="pm-browser-actions">
+          <button type="button" class="pm-btn-secondary" id="createProjectNewDir">＋ Nouveau dossier</button>
+          <span class="pm-browser-spacer"></span>
+          <button type="button" class="pm-btn-secondary" id="createProjectBrowseCancel">Fermer</button>
+          <button type="button" class="pm-btn-primary" id="createProjectBrowsePick">Choisir ce dossier</button>
+        </div>
+      </div>
+      <div class="pm-modal-hint" id="createProjectDest"></div>
     </div>
     <div class="pm-modal-field">
       <div class="pm-modal-radios" id="createProjectTemplate">
@@ -133,6 +166,11 @@
       <button type="button" class="pm-btn-primary" id="importTexSubmit">Importer</button>
     </div>
   </div>
+</div>
+
+<div id="startupNotice" class="startup-notice" hidden>
+  <span id="startupNoticeText"></span>
+  <button type="button" id="startupNoticeClose" aria-label="Fermer">✕</button>
 </div>
 
 {% block content %}{% endblock %}
@@ -306,16 +344,147 @@
   const amcInput    = document.getElementById('createProjectAmcFile');
   const createSubmit= document.getElementById('createProjectSubmit');
   const createError = document.getElementById('createProjectError');
-  let defaultRoot = '~/Documents/AMCx/';
-  fetch('/api/projects').then(r => r.json()).then(j => { if (j.default_root) defaultRoot = j.default_root + '/'; updateDest(); });
+  const parentInput = document.getElementById('createProjectParent');
+  const browseBtn   = document.getElementById('createProjectBrowse');
+  const browser     = document.getElementById('createProjectBrowser');
+  const browserPath = document.getElementById('createProjectBrowserPath');
+  const browserList = document.getElementById('createProjectBrowserList');
+  const browserUp   = document.getElementById('createProjectUp');
+  let defaultRoot = '~/Documents/AMCx';
+  if (parentInput) parentInput.value = defaultRoot;
+  fetch('/api/projects').then(r => r.json()).then(j => {
+    if (j.default_root) {
+      defaultRoot = j.default_root;
+      // Ne pas écraser ce que l'utilisateur a déjà tapé pendant la requête.
+      if (parentInput && parentInput.value === '~/Documents/AMCx') parentInput.value = defaultRoot;
+    }
+    updateDest();
+  });
+
+  // ⚠ textContent partout : le nom et le chemin viennent de l'utilisateur.
   function updateDest() {
+    if (!destHint) return;
     const n = (nameInput?.value || '').trim() || '<nom>';
-    if (destHint) destHint.innerHTML = 'Sera créé dans <code>' + defaultRoot + n + '/</code>';
+    const par = (parentInput?.value || defaultRoot).replace(/\/+$/, '');
+    destHint.textContent = 'Sera créé dans ' + par + '/' + n + '/';
   }
   nameInput?.addEventListener('input', updateDest);
-  document.querySelectorAll('input[name="cpt"]').forEach(r => {
-    r.addEventListener('change', () => { amcRow.hidden = (r.value === 'blank' || !r.checked); });
+  parentInput?.addEventListener('input', updateDest);
+
+  // --- Sélecteur de dossier ---------------------------------------------
+  // Borné au dossier personnel côté serveur ; le champ texte reste libre pour
+  // poser un projet ailleurs (disque externe).
+  let browseCwd = null;
+  async function browseTo(path) {
+    let j;
+    try {
+      const r = await fetch('/api/projects/browse?path=' + encodeURIComponent(path || ''));
+      j = await r.json();
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    } catch (err) {
+      browserList.replaceChildren();
+      const li = document.createElement('li');
+      li.className = 'pm-browser-empty';
+      li.textContent = String(err.message || err);
+      browserList.appendChild(li);
+      return;
+    }
+    browseCwd = j.path;
+    // Tronqué à gauche pour garder visible le dossier courant, en JS et non par
+    // `direction: rtl` : les « / » sont des caractères neutres que le rendu
+    // bidi remonte en tête, et le chemin s'affichait à l'envers.
+    browserPath.textContent = j.display.length > 44
+      ? '…' + j.display.slice(-43) : j.display;
+    browserPath.title = j.path;
+    browserUp.disabled = !j.parent;
+    browserUp.dataset.parent = j.parent || '';
+    browserList.replaceChildren();
+    if (!j.dirs.length) {
+      const li = document.createElement('li');
+      li.className = 'pm-browser-empty';
+      li.textContent = 'Aucun sous-dossier.';
+      browserList.appendChild(li);
+      return;
+    }
+    j.dirs.forEach(d => {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pm-browser-item' + (d.is_project ? ' is-project' : '');
+      b.textContent = d.name;
+      if (d.is_project) {
+        const tag = document.createElement('span');
+        tag.className = 'pm-browser-tag';
+        tag.textContent = 'projet';
+        b.appendChild(tag);
+      }
+      b.addEventListener('click', () => browseTo(d.path));
+      li.appendChild(b);
+      browserList.appendChild(li);
+    });
+  }
+  browseBtn?.addEventListener('click', () => {
+    browser.hidden = !browser.hidden;
+    if (!browser.hidden) { browseTo(parentInput.value); openNewRow(false); }
   });
+  browserUp?.addEventListener('click', () => browseTo(browserUp.dataset.parent));
+  document.getElementById('createProjectBrowseCancel')
+          ?.addEventListener('click', () => { browser.hidden = true; });
+  document.getElementById('createProjectBrowsePick')?.addEventListener('click', () => {
+    if (browseCwd) parentInput.value = browseCwd;
+    browser.hidden = true;
+    updateDest();
+  });
+
+  // --- Créer un dossier depuis le sélecteur -----------------------------
+  const newRow    = document.getElementById('createProjectNewRow');
+  const newName   = document.getElementById('createProjectNewName');
+  const browseErr = document.getElementById('createProjectBrowseErr');
+  function showBrowseErr(msg) {
+    browseErr.hidden = !msg;
+    browseErr.textContent = msg || '';   // textContent : message serveur
+  }
+  function openNewRow(open) {
+    newRow.hidden = !open;
+    showBrowseErr('');
+    if (open) { newName.value = ''; newName.focus(); }
+  }
+  document.getElementById('createProjectNewDir')?.addEventListener('click', () => openNewRow(true));
+  document.getElementById('createProjectNewCancel')?.addEventListener('click', () => openNewRow(false));
+  async function createDir() {
+    const name = (newName.value || '').trim();
+    if (!name) { showBrowseErr('Donne un nom au dossier.'); return; }
+    let j;
+    try {
+      const r = await fetch('/api/projects/mkdir', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({parent: browseCwd || parentInput.value, name})
+      });
+      j = await r.json();
+      if (!r.ok) { showBrowseErr(j.error || ('HTTP ' + r.status)); return; }
+    } catch (err) { showBrowseErr(String(err)); return; }
+    openNewRow(false);
+    // On entre dans le dossier qu'on vient de créer : c'est presque toujours
+    // celui qu'on voulait choisir.
+    await browseTo(j.path);
+  }
+  document.getElementById('createProjectNewGo')?.addEventListener('click', createDir);
+  newName?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); createDir(); }
+    if (e.key === 'Escape') { e.preventDefault(); openNewRow(false); }
+  });
+  function syncAmcRow() {
+    // Le champ ne concerne QUE l'import : tester sur la valeur cochée, et pas
+    // sur celle du bouton qui vient de changer. L'ancien test comparait à
+    // `blank`, une valeur renommée depuis en `examen_minimal` — le champ
+    // apparaissait donc sur le template fourni, qui n'en a aucun usage.
+    const v = document.querySelector('input[name="cpt"]:checked')?.value;
+    amcRow.hidden = (v !== 'from_amc');
+  }
+  document.querySelectorAll('input[name="cpt"]').forEach(r => {
+    r.addEventListener('change', syncAmcRow);
+  });
+  syncAmcRow();
   createSubmit?.addEventListener('click', () => createProject(createError));
 
   // --- Importer un .tex dans le projet ouvert ----------------------------
@@ -374,8 +543,17 @@
   async function createProject(errorEl) {
     errorEl.hidden = true;
     const name = (nameInput.value || '').trim();
-    if (!/^[a-zA-Z0-9_\-. ]+$/.test(name)) {
-      errorEl.hidden = false; errorEl.textContent = 'Nom invalide (lettres, chiffres, _ - . espace).';
+    // Retour immédiat sur les cas courants seulement. La règle qui fait foi est
+    // `_project_name_error()` côté serveur (noms réservés Windows, longueur…) :
+    // dupliquer toute la règle ici garantirait qu'elles finissent par diverger.
+    if (!name) {
+      errorEl.hidden = false; errorEl.textContent = 'Donne un nom au projet.';
+      return;
+    }
+    const bad = [...new Set([...name].filter(c => '/\\:*?"<>|'.includes(c)))];
+    if (bad.length) {
+      errorEl.hidden = false;
+      errorEl.textContent = 'Caractère interdit dans un nom de dossier : ' + bad.join(' ') + '.';
       return;
     }
     const tpl = document.querySelector('input[name="cpt"]:checked')?.value || 'examen_minimal';
@@ -387,10 +565,11 @@
       const fd = new FormData();
       fd.append('name', name);
       fd.append('template', 'from_amc');
+      fd.append('parent', parentInput?.value || '');
       fd.append('file', f);
       body = fd;
     } else {
-      body = JSON.stringify({name, template: tpl});
+      body = JSON.stringify({name, template: tpl, parent: parentInput?.value || ''});
     }
 
     let r;
@@ -401,6 +580,10 @@
         body
       });
     } catch (err) {
+      // Le serveur se tue lui-même juste après avoir répondu : la connexion
+      // peut être coupée avant que le corps n'arrive, alors que le projet a
+      // bien été créé. On ne conclut donc à l'échec qu'après avoir VÉRIFIÉ.
+      if (await createdDespiteError(name)) { window.location.href = '/'; return; }
       errorEl.hidden = false; errorEl.textContent = 'Erreur réseau : ' + err;
       return;
     }
@@ -411,6 +594,9 @@
     }
     const j = await r.json();
     if (j.path) {
+      // Un avertissement d'import doit survivre au redémarrage du serveur :
+      // la page est rechargée juste après, il serait perdu sinon.
+      if (j.warning) { try { sessionStorage.setItem('amcx-notice', j.warning); } catch (e) {} }
       // Le serveur va redémarrer (dans un thread daemon) — on attend.
       await waitUntilServerReady('/api/projects');
       window.location.href = '/';
@@ -449,6 +635,17 @@
     if (r.ok) window.location.reload();
   }
 
+  /** Le projet `name` est-il devenu le projet actif malgré l'erreur réseau ?
+   *  Une création se termine par un suicide du serveur ; l'échec de transport
+   *  ne dit donc rien du résultat. */
+  async function createdDespiteError(name) {
+    if (!await waitUntilServerReady('/api/projects')) return false;
+    try {
+      const j = await (await fetch('/api/projects', {cache: 'no-store'})).json();
+      return j.active_name === name;
+    } catch { return false; }
+  }
+
   async function waitUntilServerReady(url, maxTries = 40) {
     for (let i = 0; i < maxTries; i++) {
       await new Promise(rs => setTimeout(rs, 250));
@@ -459,6 +656,21 @@
     }
     return false;
   }
+
+  // Avertissement déposé avant un redémarrage (création de projet) : affiché
+  // une seule fois, puis effacé.
+  try {
+    const msg = sessionStorage.getItem('amcx-notice');
+    if (msg) {
+      sessionStorage.removeItem('amcx-notice');
+      const box = document.getElementById('startupNotice');
+      // textContent : le message peut citer le contenu d'un fichier importé.
+      document.getElementById('startupNoticeText').textContent = msg;
+      box.hidden = false;
+      document.getElementById('startupNoticeClose')
+              .addEventListener('click', () => { box.hidden = true; });
+    }
+  } catch (e) {}
 })();
 </script>
 

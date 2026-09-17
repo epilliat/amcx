@@ -67,22 +67,129 @@
         </label>
       </fieldset>
 
+      {# ----- Barème : plancher / plafond ---------------------------------
+         Ces trois valeurs changent le SCORE, pas son affichage : `score.py`
+         les applique à chaque calcul. Elles vivaient dans les réglages du
+         tableau de bord, qui ne règle plus rien — mais les retirer sans les
+         remettre ici aurait laissé un projet avec un plancher actif et aucune
+         commande pour le voir. Leur place est auprès du barème. #}
+      <fieldset class="bd-group">
+        <legend>Barème</legend>
+        <label class="bd-field" title="Aucune question ne descend sous cette valeur (points de barème). Surchargeable question par question ci-dessous.">
+          Plancher / question
+          <input type="number" id="cfg-question-floor" step="0.25" placeholder="aucun"
+                 value="{{ '' if score_defaults.floor is none else '%g'|format(score_defaults.floor) }}">
+        </label>
+        <label class="bd-field" title="Aucune question ne dépasse cette valeur (points de barème). Surchargeable question par question ci-dessous.">
+          Plafond / question
+          <input type="number" id="cfg-question-ceiling" step="0.25" placeholder="aucun"
+                 value="{{ '' if score_defaults.ceiling is none else '%g'|format(score_defaults.ceiling) }}">
+        </label>
+        <label class="bd-field" title="Le total brut d'une copie ne descend pas sous cette valeur (points de barème).">
+          Plancher global
+          <input type="number" id="cfg-total-floor" step="0.5" placeholder="aucun"
+                 value="{{ '' if score_defaults.total_floor is none else '%g'|format(score_defaults.total_floor) }}">
+        </label>
+        <label class="bd-field bd-check" title="Imprime sous chaque QCM une ligne italique « entre LO et HI pt ». Recompiler le sujet pour l'appliquer.">
+          <input type="checkbox" id="cfg-show-score-range"
+                 {% if score_defaults.show_range %}checked{% endif %}>
+          afficher la fourchette sur le sujet
+        </label>
+        <div class="bd-field bd-field-full field-note">
+          Un champ vide = désactivé. Ces valeurs s'appliquent au calcul des
+          notes ; recompiler le sujet n'est nécessaire que pour la fourchette
+          imprimée.
+        </div>
+      </fieldset>
+
+      {% if versions or mode == 'canonical' %}
+      {# ----- Versions (sujet à groupes) -----
+         Chaque version est un `\exemplaire` qui ne restitue que son groupe :
+         c'est ce qui garantit que deux versions n'ont AUCUNE question commune.
+         AMC numérote les copies en continu, d'où la plage affichée : elle dit
+         quel numéro imprimé correspond à quelle version au moment du scan. #}
+      <fieldset class="bd-group bd-group-versions">
+        <legend>Versions du sujet</legend>
+        <p class="field-note">
+          Chaque version imprime ses propres questions. Les copies sont
+          numérotées en continu : le numéro imprimé en haut de chaque feuille
+          dit de quelle version elle vient, donc les deux peuvent être scannées
+          dans le même lot.
+        </p>
+        {% if versions %}
+        <table class="ver-table">
+          <thead>
+            <tr><th>Version</th><th>Groupe AMC</th><th>Copies</th>
+                <th>N&deg; imprimés</th><th>QCM</th><th>Barème</th><th></th></tr>
+          </thead>
+          <tbody>
+          {% for v in versions %}
+            <tr data-vid="{{ v.vid }}">
+              <td><input type="text" class="ver-name" value="{{ v.name }}"
+                         {% if mode != 'canonical' %}disabled{% endif %}
+                         placeholder="{{ v.group }}"></td>
+              <td><code>{{ v.group }}</code></td>
+              <td><input type="number" class="ver-copies" min="1" max="999" step="1"
+                         value="{{ v.num_copies }}"
+                         {% if mode != 'canonical' %}disabled{% endif %}></td>
+              <td class="ver-range">{% if v.first_copy == v.last_copy %}{{ v.first_copy }}{% else %}{{ v.first_copy }}–{{ v.last_copy }}{% endif %}</td>
+              <td class="ver-n">{{ v.n_qcm }}</td>
+              <td class="ver-max">{{ v.total_max }}</td>
+              <td class="ver-del-cell">
+                {% if mode == 'canonical' %}
+                <button type="button" class="block-btn ver-del" title="supprimer cette version">✕</button>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="field-note ver-none">
+          <strong>Sujet à une seule version</strong> — toutes les copies portent
+          les mêmes questions. Ajouter une version crée un second jeu de
+          questions, <em>disjoint</em> du premier : c'est la construction AMC
+          qui garantit que deux demi-journées n'ont aucune question commune.
+        </p>
+        {% endif %}
+        {% if mode == 'canonical' %}
+        <div class="ver-actions">
+          <button type="button" class="btn btn-small" id="ver-add-btn">
+            + Ajouter une version</button>
+        </div>
+        {% endif %}
+        <div class="ver-status" id="ver-status"></div>
+      </fieldset>
+      {% endif %}
+
       {# ----- En-tête du sujet ----- #}
       <fieldset class="bd-group">
         <legend>En-tête du sujet
-          {% if header.raw_tex %}
-          <span class="bd-mode-raw" title="L'en-tête est édité en LaTeX brut ;
+          <span class="bd-mode-raw" id="hdr-raw-badge" {% if not header.raw_tex %}hidden{% endif %}
+                title="L'en-tête est édité en LaTeX brut ;
               les champs structurés ci-dessous sont ignorés tant que le brut est rempli.">
             mode LaTeX brut</span>
-          {% endif %}
         </legend>
+        {% if versions %}
+        {# ⚠ Chaque version imprime SON en-tête : `cfg.header` n'apparaît sur
+           aucune copie. Sans ce sélecteur, le formulaire éditait un en-tête
+           que personne ne verrait jamais. #}
+        <label class="bd-field bd-field-full bd-hdr-version">
+          <span>En-tête de la version</span>
+          <select id="hdr-version" {% if mode != 'canonical' %}disabled{% endif %}>
+            {% for v in versions %}
+            <option value="{{ v.vid }}">{{ v.name or v.group }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
 
         {# --- Champs structurés (utilisés si raw_tex est vide) --- #}
-        <details class="bd-subgroup" {% if not header.raw_tex %}open{% endif %}>
+        <details class="bd-subgroup" id="hdr-struct-details" {% if not header.raw_tex %}open{% endif %}>
           <summary>Champs structurés
-            {% if header.raw_tex %}<em>(désactivés — le LaTeX brut prime)</em>{% endif %}
+            <em id="hdr-struct-off" {% if not header.raw_tex %}hidden{% endif %}>(désactivés — le LaTeX brut prime)</em>
           </summary>
-          <div class="bd-fields" {% if mode != 'canonical' or header.raw_tex %}data-disabled="1"{% endif %}>
+          <div class="bd-fields" id="hdr-struct-fields" {% if mode != 'canonical' or header.raw_tex %}data-disabled="1"{% endif %}>
             <label class="bd-field"><span>Établissement</span>
               <input type="text" id="hdr-establishment" value="{{ header.establishment }}"
                 spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
@@ -92,6 +199,10 @@
             <label class="bd-field"><span>Auteur</span>
               <input type="text" id="hdr-author" value="{{ header.author }}"
                 spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field"><span>Date de l'épreuve</span>
+              <input type="text" id="hdr-date" value="{{ header.date }}"
+                placeholder="8/9/2026" spellcheck="false"
+                {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
             <label class="bd-field bd-field-wide"><span>Titre</span>
               <input type="text" id="hdr-title" value="{{ header.title }}"
                 spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
@@ -101,13 +212,26 @@
             <label class="bd-field bd-field-wide"><span>Sous-titre</span>
               <input type="text" id="hdr-subtitle" value="{{ header.subtitle }}"
                 spellcheck="false" {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}></label>
+            <label class="bd-field bd-check">
+              <input type="checkbox" id="hdr-rules" {% if header.rules %}checked{% endif %}
+                {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}>
+              filets au-dessus et au-dessous des instructions
+            </label>
             <label class="bd-field bd-field-full"><span>Instructions (LaTeX)</span>
               <textarea id="hdr-instructions" rows="3" spellcheck="false"
                 {% if mode != 'canonical' or header.raw_tex %}disabled{% endif %}>{{ header.instructions }}</textarea></label>
+            {% if mode == 'canonical' %}
+            <div class="bd-field bd-field-full bd-mode-switch" id="hdr-to-raw-row">
+              <button type="button" class="btn btn-small" id="hdr-to-raw-btn"
+                title="Fige le rendu de ces champs en LaTeX éditable. Le PDF ne change pas : c'est exactement ce qui aurait été imprimé.">⇅ Passer au LaTeX brut</button>
+              <span class="field-note">Le brut prendra la main ; le PDF reste
+                identique. Annulable par Ctrl+Z.</span>
+            </div>
+            {% endif %}
             {% if mode == 'canonical' and not header.raw_tex %}
             <div class="bd-field bd-field-full">
               <button type="button" id="gen-bareme-ex" class="btn btn-small"
-                title="Génère le bloc « Barème » (explication + exemples chiffrés) depuis les questions du sujet, clampé au plancher/plafond définis dans les Réglages (dashboard). Insère du LaTeX éditable dans les Instructions ci-dessus.">📊 Générer les exemples de barème</button>
+                title="Génère le bloc « Barème » (explication + exemples chiffrés) depuis les questions du sujet, clampé au plancher/plafond définis ci-dessus (Réglages globaux → Barème). Insère du LaTeX éditable dans les Instructions ci-dessus.">📊 Générer les exemples de barème</button>
               <span id="gen-bareme-status" class="settings-hint"></span>
             </div>
             {% endif %}
@@ -124,6 +248,14 @@
             <textarea id="hdr-raw-tex" rows="8" spellcheck="false"
               class="bd-raw-tex">{{ header.raw_tex }}</textarea>
           </label>
+          <div class="bd-field bd-field-full bd-mode-switch">
+            <button type="button" class="btn btn-small" id="hdr-detect-btn"
+              title="Analyse le LaTeX ci-dessus et propose de le répartir dans les champs structurés. Rien n'est appliqué sans confirmation.">🔎 Détecter les champs</button>
+            <button type="button" class="btn btn-small" id="hdr-to-fields-btn"
+              title="Vide le LaTeX brut : les champs structurés reprennent la main. Le LaTeX est perdu (Ctrl+Z le rend).">⇅ Revenir aux champs</button>
+            <span class="field-note">« Détecter » remplit les champs depuis ce
+              LaTeX ; « Revenir aux champs » le vide sans rien en reprendre.</span>
+          </div>
           {% else %}
           <div class="bd-field bd-field-full">
             <span>Lecture seule (mode legacy — migrer vers canonique pour éditer)</span>
@@ -136,19 +268,18 @@
       {# ----- Feuille de réponses ----- #}
       <fieldset class="bd-group" {% if mode != 'canonical' %}disabled{% endif %}>
         <legend>Feuille de réponses
-          {% if answer_sheet_tex %}
-          <span class="bd-mode-raw" title="La feuille de réponses est en LaTeX brut ;
+          <span class="bd-mode-raw" id="as-raw-badge" {% if not answer_sheet_tex %}hidden{% endif %}
+                title="La feuille de réponses est en LaTeX brut ;
               les champs structurés sont ignorés tant que le brut est rempli.">
             mode LaTeX brut</span>
-          {% endif %}
         </legend>
 
         {# --- Champs structurés (ignorés si answer_sheet_tex est rempli) --- #}
         <details class="bd-subgroup" {% if not answer_sheet_tex %}open{% endif %}>
           <summary>Champs structurés
-            {% if answer_sheet_tex %}<em>(désactivés — le LaTeX brut prime)</em>{% endif %}
+            <em id="as-struct-off" {% if not answer_sheet_tex %}hidden{% endif %}>(désactivés — le LaTeX brut prime)</em>
           </summary>
-          <div class="bd-fields" {% if mode != 'canonical' or answer_sheet_tex %}data-disabled="1"{% endif %}>
+          <div class="bd-fields" id="as-struct-fields" {% if mode != 'canonical' or answer_sheet_tex %}data-disabled="1"{% endif %}>
             <label class="bd-field">
               Chiffres ID étudiant
               <input type="number" id="as-id-grid-digits" min="1" max="9" step="1"
@@ -171,6 +302,14 @@
             <span class="bd-hint">
               Grille « copie » imprimée automatiquement quand N&gt;1.
             </span>
+            {% if mode == 'canonical' %}
+            <div class="bd-field bd-field-full bd-mode-switch">
+              <button type="button" class="btn btn-small" id="as-to-raw-btn"
+                title="Fige la feuille canonique en LaTeX éditable. Le PDF ne change pas.">⇅ Passer au LaTeX brut</button>
+              <span class="field-note">Le brut prendra la main ; le PDF reste
+                identique. Annulable par Ctrl+Z.</span>
+            </div>
+            {% endif %}
           </div>
         </details>
 
@@ -184,6 +323,13 @@
             <textarea id="as-raw-tex" rows="10" spellcheck="false"
               class="bd-raw-tex">{{ answer_sheet_tex }}</textarea>
           </label>
+          <div class="bd-field bd-field-full bd-mode-switch">
+            <button type="button" class="btn btn-small" id="as-to-fields-btn"
+              title="Vide ce LaTeX : la feuille canonique est régénérée depuis les champs. La mise en page CHANGE, donc le calage aussi.">⇅ Revenir aux champs</button>
+            <span class="field-note">⚠ La feuille canonique n'a pas la même mise
+              en page que celle-ci : le <strong>calage</strong> changera.
+              Annulable par Ctrl+Z.</span>
+          </div>
           {% else %}
           <div class="bd-field bd-field-full">
             <span>Lecture seule (mode legacy — migrer vers canonique pour éditer)</span>
@@ -229,17 +375,60 @@
   {# ----- Toolbar : sauvegarder / compiler + insertion blocs ----- #}
   <div class="sujet-toolbar">
     <div class="sujet-toolbar-left">
+      {# Avec plusieurs versions, un total unique est trompeur : une copie ne
+         porte que les questions de SA version. On affiche donc le total par
+         version, et on ne le réduit à un seul chiffre que s'ils coïncident. #}
+      {% if versions %}
+      {% set known = versions %}
+      {% set totals = known | map(attribute='total_max') | list %}
+      <span class="sujet-total">Total barème :
+        {% if totals | unique | list | length == 1 %}
+        <strong id="total-max">{{ "%.2f"|format(totals[0]) }}</strong>
+        <span class="sujet-total-note">par version</span>
+        {% else %}
+        <strong id="total-max">{% for v in known %}{{ v.name or v.group }}&nbsp;{{ "%.2f"|format(v.total_max) }}{% if not loop.last %} · {% endif %}{% endfor %}</strong>
+        {% endif %}
+      </span>
+      {% else %}
       <span class="sujet-total">Total barème :
         <strong id="total-max">{{ "%.2f"|format(total_max) }}</strong></span>
+      {% endif %}
       <span class="sujet-hint">
         Entrée (champs) ou Ctrl+Entrée : sauvegarder ·
-        Alt+Entrée : compiler · clic sur une question : la cadrer en magenta
+        Alt+Entrée : compiler · Ctrl+Z : annuler la dernière action ·
+        clic sur une question : la cadrer en magenta
         dans l'aperçu PDF (et inversement).
       </span>
     </div>
     <div class="sujet-toolbar-right">
       {% if has_pdf %}
       <a class="btn" href="/sujet/pdf" target="_blank" rel="noopener">📄 Voir le PDF</a>
+      {% endif %}
+      {# Documents à diffuser APRÈS l'examen. Dans un menu et non en boutons
+         permanents : on les produit une fois par examen, la barre sert
+         d'abord à éditer. #}
+      {% if mode != 'empty' %}
+      <div class="pub-menu" id="pubMenu">
+        <button type="button" class="btn" id="pubMenuBtn"
+                aria-haspopup="true" aria-expanded="false"
+                title="Documents à publier pour les étudiants">📤 Publier ▾</button>
+        <div class="pub-dropdown" id="pubDropdown" hidden>
+          <div class="pub-head">À donner aux étudiants</div>
+          <button type="button" class="pub-item" data-pub="sujet">
+            <span class="pub-item-t">📄 Sujet vierge</span>
+            <span class="pub-item-d">Le questionnaire seul : ni mires, ni code
+              de copie, ni feuille de réponses.</span>
+          </button>
+          <button type="button" class="pub-item" data-pub="corrige">
+            <span class="pub-item-t">✅ Corrigé</span>
+            <span class="pub-item-d">Le même document, page pour page, bonnes
+              réponses noircies.</span>
+          </button>
+          <div class="pub-note">Produit depuis la dernière compilation — pas
+            depuis les éditions en cours. À ne pas imprimer pour l'examen :
+            ces PDF ne portent pas de calage.</div>
+        </div>
+      </div>
       {% endif %}
       {% if mode == 'canonical' %}
       <button class="btn" id="openBankBtn" type="button" title="Importer une question depuis la banque">📚 Banque</button>
@@ -295,11 +484,20 @@
 
   </div><!-- /sujet-left -->
 
+  {# Poignée de redimensionnement : glisser pour élargir/rétrécir l'aperçu,
+     double-clic pour le replier. Repliée = même état que le bouton 👁. #}
+  <div class="sujet-gutter" id="sujetGutter" role="separator"
+       aria-orientation="vertical" tabindex="0"
+       title="glisser pour redimensionner l'aperçu · double-clic pour le replier"></div>
+
   <aside class="sujet-right">
     <div class="preview-panel">
-      <div class="preview-title" id="preview-title">Aperçu PDF</div>
-      <div class="preview-hint-small">Clic sur une question = sélection (magenta)
-        des deux côtés · clic hors question = PDF en grand.</div>
+      {# Bandeau du panneau : il ne sert plus qu'à SIGNALER — un bloc absent du
+         PDF compilé. Le titre « Aperçu PDF — Q1 · Morning — tag » répétait ce
+         que la sélection magenta montre déjà des deux côtés, et le mode
+         d'emploi du clic occupait une ligne à demeure. Vide, la ligne
+         disparaît (`:empty`). #}
+      <div class="preview-title" id="preview-title"></div>
       <div class="preview-body" id="preview-body">
         <p class="preview-hint">Chargement de l'aperçu…</p>
       </div>
@@ -307,14 +505,22 @@
   </aside>
   </div><!-- /sujet-split -->
 
-{# Lightbox plein écran pour zoomer sur l'aperçu PDF (clic sur l'image du panel droit) #}
+{# Vue agrandie du sujet : une FENÊTRE, pas une lightbox. Sans fond opaque et
+   sans capture des clics, on continue d'éditer pendant qu'elle est ouverte —
+   c'est tout l'intérêt de pouvoir la déplacer et la réduire. #}
 <div class="preview-zoom" id="previewZoom" hidden role="dialog" aria-labelledby="previewZoomTitle">
   <div class="preview-zoom-card">
-    <div class="preview-zoom-head">
+    <div class="preview-zoom-head" id="previewZoomHead">
       <span class="preview-zoom-title" id="previewZoomTitle">Aperçu</span>
-      <button type="button" class="preview-zoom-close" id="previewZoomClose">Fermer (Esc)</button>
+      <button type="button" class="preview-zoom-btn" id="previewZoomMin"
+              title="réduire au bandeau" aria-label="réduire">–</button>
+      <button type="button" class="preview-zoom-btn" id="previewZoomMax"
+              title="plein écran" aria-label="plein écran">⛶</button>
+      <button type="button" class="preview-zoom-btn preview-zoom-close" id="previewZoomClose"
+              title="fermer (Esc)" aria-label="fermer">✕</button>
     </div>
     <div class="preview-zoom-body" id="previewZoomBody"></div>
+    <div class="preview-zoom-grip" id="previewZoomGrip" title="redimensionner"></div>
   </div>
 </div>
 
@@ -513,6 +719,85 @@
   </div>
 </div>
 
+{# Modale « Détecter les champs » : proposition de décomposition d'un en-tête
+   brut. ⚠ Elle CHANGE la mise en page, donc le calage — d'où l'avertissement,
+   et le fait que rien ne s'applique sans confirmation. #}
+<div id="hdrDetectModal" class="pm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="hdrDetectTitle">
+  <div class="pm-modal-backdrop" data-close-hdr-detect="1"></div>
+  <div class="pm-modal-card hdr-detect-card" role="document">
+    <h2 id="hdrDetectTitle">🔎 Champs détectés dans l'en-tête</h2>
+    <p class="pm-modal-help" id="hdr-detect-verdict"></p>
+    <div class="pm-modal-error" id="hdr-detect-error" hidden></div>
+    <div id="hdr-detect-left" class="hdr-detect-left" hidden>
+      <div class="hdr-detect-left-title">Non reconnu — ne sera <strong>pas</strong> repris :</div>
+      <ul id="hdr-detect-left-list"></ul>
+    </div>
+    <table class="hdr-detect-table"><tbody id="hdr-detect-rows"></tbody></table>
+    <p class="pm-modal-hint">
+      ⚠ Les champs structurés produisent leur propre mise en page : le PDF et le
+      <strong>calage</strong> changeront. À ne pas faire sur un sujet déjà imprimé.
+      Annulable par Ctrl+Z tant que la page n'est pas rechargée.
+    </p>
+    <div class="bank-modal-actions">
+      <button type="button" class="btn" data-close-hdr-detect="1">Annuler</button>
+      <button type="button" class="btn btn-primary" id="hdr-detect-apply">Appliquer</button>
+    </div>
+  </div>
+</div>
+
+{# Modale « Ajouter une version ». Le nom est demandé AVANT la création parce
+   qu'il sert à construire le groupe AMC, qui n'est plus renommable ensuite
+   (renommer un groupe désaffilierait toutes ses questions d'un coup). #}
+<div id="verAddModal" class="pm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="verAddModalTitle">
+  <div class="pm-modal-backdrop" data-close-ver-add="1"></div>
+  <div class="pm-modal-card" role="document">
+    <h2 id="verAddModalTitle">Ajouter une version</h2>
+    <p class="pm-modal-help" id="ver-add-help"></p>
+    <div class="pm-modal-error" id="ver-add-error" hidden></div>
+    <div class="pm-modal-field">
+      <label for="ver-add-name">Nom de la version</label>
+      <input type="text" id="ver-add-name" autocomplete="off" placeholder="Après-midi">
+      <span class="pm-modal-hint">Sert d'étiquette dans l'éditeur, et de base au
+        nom de groupe AMC (qui, lui, ne sera plus modifiable).</span>
+    </div>
+    <div class="pm-modal-field">
+      <label for="ver-add-copies">Nombre de copies</label>
+      <input type="number" id="ver-add-copies" min="1" max="999" step="1" value="1">
+    </div>
+    <div class="bank-modal-actions">
+      <button type="button" class="btn" data-close-ver-add="1">Annuler</button>
+      <button type="button" class="btn btn-primary" id="ver-add-confirm">Ajouter</button>
+    </div>
+  </div>
+</div>
+
+{# Modale « Supprimer une version ». Le sort des questions de la version est
+   une décision, pas un détail : elle est posée ici, jamais devinée. #}
+<div id="verDelModal" class="pm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="verDelModalTitle">
+  <div class="pm-modal-backdrop" data-close-ver-del="1"></div>
+  <div class="pm-modal-card" role="document">
+    <h2 id="verDelModalTitle">Supprimer une version</h2>
+    <p class="pm-modal-help" id="ver-del-what"></p>
+    <div class="pm-modal-error" id="ver-del-error" hidden></div>
+    <div class="pm-modal-field" id="ver-del-modes">
+      <label class="ver-del-mode">
+        <input type="radio" name="ver-del-mode" value="reparent" checked>
+        <span><strong>Conserver les questions</strong> — elles deviennent
+          communes, donc imprimées sur <em>toutes</em> les versions restantes.</span>
+      </label>
+      <label class="ver-del-mode">
+        <input type="radio" name="ver-del-mode" value="delete_blocks">
+        <span><strong>Supprimer aussi les questions</strong> de cette version.</span>
+      </label>
+    </div>
+    <p class="pm-modal-hint" id="ver-del-undo-hint"></p>
+    <div class="bank-modal-actions">
+      <button type="button" class="btn" data-close-ver-del="1">Annuler</button>
+      <button type="button" class="btn btn-danger" id="ver-del-confirm">Supprimer</button>
+    </div>
+  </div>
+</div>
+
 {# Modale "Sauver dans la banque" (titre + tags). #}
 <div id="bankSaveModal" class="pm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="bankSaveModalTitle">
   <div class="pm-modal-backdrop" data-close-bank-save="1"></div>
@@ -560,6 +845,23 @@
 let PDF_V = '{{ pdf_mtime }}';
 const SUJET_MODE = '{{ mode }}';
 const IS_CANONICAL = SUJET_MODE === 'canonical';
+// Groupe AMC → libellé de version. Vide s'il n'y a qu'une version : on ne
+// suffixe alors aucun numéro de question.
+const VERSION_NAMES = {{ version_names|default({})|tojson }};
+const N_VERSIONS = {{ versions|default([])|length }};
+
+/** Numéro d'une question tel qu'il est imprimé sur la copie, suffixé du nom de
+ *  la version quand il y en a plusieurs. Le rang global (`data-q`) reste la clé
+ *  du barème, mais il ne veut rien dire pour l'étudiant : la 6e question du
+ *  document est la « Question 1 » du sujet de l'après-midi. */
+function qLabelOf(blk, opts) {
+  if (!blk) return '';
+  const n = blk.dataset.qv || blk.dataset.q || '';
+  const base = 'Q' + n;
+  if (N_VERSIONS < 2 || !(opts && opts.withVersion)) return base;
+  const v = VERSION_NAMES[blk.dataset.group || ''];
+  return v ? base + ' · ' + v : base;
+}
 
 // === Toggle aperçu PDF (état persisté dans localStorage) ===================
 // Désactivé par défaut → édition plein écran. L'utilisateur réactive via
@@ -595,6 +897,61 @@ const IS_CANONICAL = SUJET_MODE === 'canonical';
     localStorage.setItem(KEY, next);
     apply(next);
   });
+
+  // --- Poignée de redimensionnement entre l'éditeur et l'aperçu ----------
+  // La largeur pilote `--pv-w` (flex-basis de `.sujet-right`). Sous un seuil,
+  // on replie complètement : c'est le MÊME état que le bouton 👁, sinon
+  // « replié à 0 px » et « masqué » seraient deux états distincts qui se
+  // contrediraient au rechargement.
+  const gutter = document.getElementById('sujetGutter');
+  const WKEY = 'sujet_preview_w';
+  const MINW = 260, SNAP = 150;
+  function setPreviewWidth(px) {
+    const max = Math.max(MINW, split.clientWidth - 420);
+    const w = Math.min(Math.max(px, MINW), max);
+    split.style.setProperty('--pv-w', w + 'px');
+    localStorage.setItem(WKEY, String(w));
+  }
+  const savedW = parseInt(localStorage.getItem(WKEY) || '', 10);
+  if (savedW > 0) split.style.setProperty('--pv-w', savedW + 'px');
+
+  if (gutter) {
+    let dragging = false;
+    const onMove = (e) => {
+      if (!dragging) return;
+      const right = split.getBoundingClientRect().right;
+      const w = right - e.clientX;
+      if (w < SNAP) {                       // replier
+        localStorage.setItem(KEY, 'off'); apply('off'); stop(); return;
+      }
+      setPreviewWidth(w);
+    };
+    function stop() {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('pv-resizing');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', stop);
+      // Les rects ont changé : le cadre courant doit suivre.
+      requestAnimationFrame(() => pvScrollSpy(previewBody));
+    }
+    gutter.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      document.body.classList.add('pv-resizing');
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', stop);
+    });
+    gutter.addEventListener('dblclick', () => {
+      localStorage.setItem(KEY, 'off'); apply('off');
+    });
+    // Clavier : la poignée est focusable, les flèches la déplacent.
+    gutter.addEventListener('keydown', (e) => {
+      const cur = parseInt(getComputedStyle(split).getPropertyValue('--pv-w'), 10) || 420;
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); setPreviewWidth(cur + 24); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); setPreviewWidth(cur - 24); }
+    });
+  }
 })();
 
 // === Renderer LaTeX → MD → KaTeX : fourni par static/render.js =============
@@ -672,9 +1029,49 @@ function refreshScores(qEl) {
   }
   const el = qEl.querySelector('.q-max-val');
   if (el) el.textContent = (Math.round(mx * 100) / 100).toFixed(2);
-  let tot = 0;
-  document.querySelectorAll('.q-max-val').forEach(function (e) { tot += parseFloat(e.textContent) || 0; });
-  document.getElementById('total-max').textContent = tot.toFixed(2);
+  refreshTotalMax();
+}
+
+/** Total du barème affiché dans la toolbar.
+ *
+ *  ⚠ Sommer TOUTES les questions de la page est faux dès qu'il y a plusieurs
+ *  versions : une copie ne porte que les questions de la sienne. Le serveur le
+ *  calculait déjà par version, mais ce recalcul client écrasait la valeur au
+ *  premier rendu — le bandeau annonçait « 10.00 par version » sur deux
+ *  versions à 5 points. */
+function refreshTotalMax() {
+  const el = document.getElementById('total-max');
+  if (!el) return;
+  const note = document.querySelector('.sujet-total-note');
+  const byGroup = new Map();
+  document.querySelectorAll('.sujet-block[data-kind="question_qcm"]').forEach(function (blk) {
+    const v = blk.querySelector('.q-max-val');
+    const g = blk.dataset.group || '';
+    byGroup.set(g, (byGroup.get(g) || 0) + (parseFloat(v && v.textContent) || 0));
+  });
+  const fmt = (x) => (Math.round(x * 100) / 100).toFixed(2);
+  if (N_VERSIONS < 2) {
+    let tot = 0;
+    byGroup.forEach(function (v) { tot += v; });
+    el.textContent = fmt(tot);
+    return;
+  }
+  // ⚠ Un bloc « commun » est imprimé sur CHAQUE version : il compte dans le
+  // total de toutes, pas dans un total à lui. Compté à part, il apparaissait
+  // comme une pseudo-version au barème propre.
+  const common = byGroup.get('') || 0;
+  const totals = [...byGroup.entries()]
+    .filter(([g]) => g !== '')
+    .map(([g, v]) => [VERSION_NAMES[g] || g, v + common]);
+  if (!totals.length) { el.textContent = fmt(common); if (note) note.hidden = false; return; }
+  const distinct = new Set(totals.map(([, v]) => fmt(v)));
+  if (distinct.size === 1) {
+    el.textContent = fmt(totals[0][1]);
+    if (note) note.hidden = false;
+  } else {
+    el.textContent = totals.map(([n, v]) => n + '\u00a0' + fmt(v)).join(' · ');
+    if (note) note.hidden = true;   // « par version » deviendrait faux
+  }
 }
 
 // === état dirty =============================================================
@@ -960,7 +1357,7 @@ function pvHasZone(q) {
 function pvLabel(q) {
   const blk = pvBlockForQ(q);
   const kind = blk && blk.dataset.kind;
-  if (kind === 'question_qcm')  return 'Q' + ((blk && blk.dataset.q) || q);
+  if (kind === 'question_qcm')  return blk ? qLabelOf(blk, {withVersion: true}) : ('Q' + q);
   if (kind === 'answerbox')     return 'Zone de réponse';
   if (kind === 'question_open') return 'Question ouverte';
   if (kind === 'question_freeform') return 'Question libre';
@@ -1110,17 +1507,12 @@ function pvApply() {
     z.classList.toggle('is-selected', !!sel && q === sel);
   });
   if (previewTitle) {
-    const shown = sel || cur;
-    if (!shown) {
-      previewTitle.textContent = 'Aperçu PDF';
-    } else if (pvHasZone(shown)) {
-      previewTitle.textContent = 'Aperçu PDF — ' + pvLongLabel(shown);
-    } else {
-      // Bloc sélectionnable mais absent du PDF compilé (ajouté depuis, ou
-      // texte que la recherche n'a pas su localiser).
-      previewTitle.textContent = 'Aperçu PDF — ' + pvLongLabel(shown)
-                               + ' · pas dans le PDF compilé';
-    }
+    // Un bloc SÉLECTIONNÉ mais absent du PDF compilé (ajouté depuis la dernière
+    // compilation, ou texte que la recherche n'a pas su localiser) : c'est la
+    // seule chose que le bandeau a à dire — sans lui, rien n'expliquerait
+    // pourquoi le cadre magenta n'apparaît nulle part dans l'aperçu.
+    previewTitle.textContent = (sel && !pvHasZone(sel))
+      ? pvLongLabel(sel) + ' · pas dans le PDF compilé' : '';
   }
 }
 
@@ -1275,6 +1667,10 @@ let openPreviewZoom = function () {};
     titleEl.textContent = 'Sujet — ' + n + (n > 1 ? ' pages' : ' page')
                         + ' · cliquez une question pour la sélectionner';
     overlay.hidden = false;
+    // Rouvrir une fenêtre laissée réduite ne montrerait rien.
+    if (rect.min) { rect.min = false; saveRect(rect); }
+    rect = clampToViewport(rect);
+    applyRect(rect);
     pvApply();
     // Ouvre sur la question sélectionnée, sinon sur la page cliquée.
     requestAnimationFrame(function () {
@@ -1294,9 +1690,108 @@ let openPreviewZoom = function () {};
   }
 
   closeBtn.addEventListener('click', closeZoom);
-  overlay.addEventListener('click', function (e) {
-    if (e.target === overlay) closeZoom();
+  // Plus de clic « sur le fond » pour fermer : il n'y a plus de fond, et un
+  // clic à côté doit atteindre l'éditeur.
+
+  // --- Fenêtre : déplacement, redimensionnement, réduction ---------------
+  const head = document.getElementById('previewZoomHead');
+  const grip = document.getElementById('previewZoomGrip');
+  const minBtn = document.getElementById('previewZoomMin');
+  const maxBtn = document.getElementById('previewZoomMax');
+  const WKEY = 'sujet_zoom_win';
+
+  function clampToViewport(r) {
+    const w = Math.max(320, Math.min(r.w, window.innerWidth - 20));
+    const h = Math.max(120, Math.min(r.h, window.innerHeight - 20));
+    return {
+      // Au moins 80 px de bandeau restent attrapables : une fenêtre poussée
+      // hors écran serait irrécupérable sans vider le localStorage.
+      x: Math.max(-w + 80, Math.min(r.x, window.innerWidth - 80)),
+      y: Math.max(0, Math.min(r.y, window.innerHeight - 32)),
+      w: w, h: h, min: !!r.min,
+    };
+  }
+  function applyRect(r) {
+    overlay.style.left = r.x + 'px';
+    overlay.style.top = r.y + 'px';
+    overlay.style.width = r.w + 'px';
+    overlay.style.height = r.h + 'px';
+    overlay.classList.toggle('is-min', !!r.min);
+    minBtn.textContent = r.min ? '▢' : '–';
+    minBtn.title = r.min ? 'restaurer' : 'réduire au bandeau';
+  }
+  function readRect() {
+    try {
+      const j = JSON.parse(localStorage.getItem(WKEY) || 'null');
+      if (j && typeof j.x === 'number') return clampToViewport(j);
+    } catch (e) {}
+    const w = Math.min(900, Math.round(window.innerWidth * 0.58));
+    const h = Math.round(window.innerHeight * 0.78);
+    return {x: 40, y: 70, w: w, h: h, min: false};
+  }
+  function saveRect(r) {
+    try { localStorage.setItem(WKEY, JSON.stringify(r)); } catch (e) {}
+  }
+  let rect = readRect();
+
+  function startDrag(e, mode) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const x0 = e.clientX, y0 = e.clientY;
+    const r0 = Object.assign({}, rect);
+    document.body.classList.add('pv-winmove');
+    const move = (ev) => {
+      const dx = ev.clientX - x0, dy = ev.clientY - y0;
+      rect = clampToViewport(mode === 'move'
+        ? {x: r0.x + dx, y: r0.y + dy, w: r0.w, h: r0.h, min: r0.min}
+        : {x: r0.x, y: r0.y, w: r0.w + dx, h: r0.h + dy, min: r0.min});
+      applyRect(rect);
+    };
+    const up = () => {
+      document.body.classList.remove('pv-winmove');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      saveRect(rect);
+      // La hauteur a changé : le cadre courant du scroll-spy aussi.
+      requestAnimationFrame(function () { pvScrollSpy(pvActiveHost()); });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  }
+  head.addEventListener('mousedown', function (e) {
+    if (e.target.closest('.preview-zoom-btn')) return;   // les boutons d'abord
+    startDrag(e, 'move');
   });
+  grip.addEventListener('mousedown', function (e) { startDrag(e, 'resize'); });
+  head.addEventListener('dblclick', function (e) {
+    if (e.target.closest('.preview-zoom-btn')) return;
+    minBtn.click();
+  });
+  minBtn.addEventListener('click', function () {
+    rect.min = !rect.min;
+    applyRect(rect); saveRect(rect);
+    if (!rect.min) requestAnimationFrame(function () { pvScrollSpy(zoomBody); });
+  });
+  maxBtn.addEventListener('click', function () {
+    const full = {x: 10, y: 56, w: window.innerWidth - 20,
+                  h: window.innerHeight - 66, min: false};
+    // Bascule : un second clic revient à la taille d'avant.
+    if (rect.w >= full.w - 4 && rect.h >= full.h - 4) rect = readRectDefault();
+    else { rect._prev = Object.assign({}, rect); rect = full; }
+    rect = clampToViewport(rect);
+    applyRect(rect); saveRect(rect);
+    requestAnimationFrame(function () { pvScrollSpy(zoomBody); });
+  });
+  function readRectDefault() {
+    return clampToViewport({x: 40, y: 70,
+                            w: Math.min(900, Math.round(window.innerWidth * 0.58)),
+                            h: Math.round(window.innerHeight * 0.78), min: false});
+  }
+  window.addEventListener('resize', function () {
+    if (overlay.hidden) return;
+    rect = clampToViewport(rect); applyRect(rect);
+  });
+  applyRect(rect);
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     if (!overlay.hidden) { closeZoom(); return; }
@@ -1308,22 +1803,253 @@ let openPreviewZoom = function () {};
   });
 })();
 
-// === toggle bonne / mauvaise ================================================
-function toggleCorrect(qEl, row) {
-  const nowCorrect = row.dataset.correct !== '1';
-  row.dataset.correct = nowCorrect ? '1' : '0';
-  row.classList.toggle('is-correct', nowCorrect);
-  row.classList.toggle('is-wrong', !nowCorrect);
-  row.querySelector('.ans-badge').textContent = nowCorrect ? '✔ bonne' : '✗ mauvaise';
-  if (nowCorrect && qType(qEl) === 'single') {
-    qEl.querySelectorAll('.md-answer').forEach(function (other) {
-      if (other !== row && other.dataset.correct === '1') {
-        other.dataset.correct = '0';
-        other.classList.remove('is-correct'); other.classList.add('is-wrong');
-        other.querySelector('.ans-badge').textContent = '✗ mauvaise';
-      }
+// === Annulation (Ctrl+Z) ====================================================
+// Les champs de saisie ont déjà l'annulation native du navigateur ; ce qui n'en
+// avait AUCUNE, ce sont les actions par clic — basculer une réponse en
+// mauvaise, ajouter ou supprimer une réponse, déplacer un bloc. Elles étaient
+// irréversibles sans refaire le geste inverse à la main, et pour un
+// basculement en « choix unique » c'est impossible : la bonne réponse
+// précédente a été décochée au passage, il faut se souvenir de laquelle.
+//
+// Chaque entrée porte une fonction d'annulation qui REMET l'état capturé
+// avant l'action, plutôt que de tenter l'action inverse — c'est ce qui rend
+// correct le cas du choix unique.
+const UNDO = {
+  stack: [],
+  MAX: 60,
+  push: function (label, fn) {
+    this.stack.push({label: label, undo: fn, at: Date.now()});
+    if (this.stack.length > this.MAX) this.stack.shift();
+  },
+  lastPushAt: function () {
+    const e = this.stack[this.stack.length - 1];
+    return e ? e.at : 0;
+  },
+  /** Retire une entrée déjà traitée autrement (bouton « ↩ Annuler »), pour
+   *  qu'un Ctrl+Z ultérieur ne la rejoue pas. */
+  drop: function (fn) {
+    const i = this.stack.findIndex(e => e.undo === fn);
+    if (i >= 0) this.stack.splice(i, 1);
+  },
+  /** ⚠ `async` et remise en pile sur échec. La version précédente dépilait
+   *  AVANT le `try`, et annonçait « Annulé ✓ » de façon synchrone : une
+   *  annulation asynchrone qui échouait (déplacement refusé par le serveur)
+   *  était perdue de la pile ET annoncée comme réussie. */
+  run: async function () {
+    const e = this.stack[this.stack.length - 1];
+    if (!e) { setStatus('Rien à annuler.', ''); return false; }
+    this.stack.pop();
+    try {
+      await e.undo();
+    } catch (err) {
+      this.stack.push(e);                    // l'action reste annulable
+      setStatus('Annulation impossible : ' + (err && err.message || err), 'err');
+      return false;
+    }
+    setStatus('Annulé : ' + e.label + ' ✓'
+              + (document.querySelector('.sujet-block.dirty, .sujet-block .dirty')
+                 ? ' — pensez à enregistrer' : ''), 'ok');
+    return true;
+  },
+};
+
+// --- Annulation qui survit à un rechargement --------------------------------
+// ⚠ La pile ci-dessus vit en MÉMOIRE. Les actions sur les versions rechargent
+// la page — la table des versions, les sélecteurs de chaque bloc et la
+// numérotation par version en dépendent — ce qui la vide : sans ce relais,
+// Ctrl+Z après « supprimer une version » n'aurait rien fait, et l'action la
+// plus lourde de l'éditeur serait la seule à ne pas être annulable.
+//
+// Seules les actions dont l'annulation est un appel serveur PARAMÉTRABLE
+// peuvent passer par ici (une fermeture ne se sérialise pas) : on persiste le
+// nom de l'action et sa charge utile, jamais du code.
+const UNDO_PERSIST_KEY = 'amcx-sujet-undo-pending';
+
+async function _postJSON(url, body) {
+  const r = await fetch(url, {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+  return j;
+}
+
+const UNDO_KINDS = {
+  // Remettre une version supprimée : le serveur a rendu de quoi tout rétablir
+  // (identité, position, état exact des blocs touchés), on le lui renvoie.
+  'version-restore': e => _postJSON('/api/sujet/versions/restore', {undo: e.payload}),
+  // Retirer ce qu'un ajout a créé. Plusieurs vid quand l'ajout a dû
+  // matérialiser la version courante en même temps que la nouvelle.
+  'version-remove': async e => {
+    for (const vid of e.payload) {
+      await _postJSON('/api/sujet/versions/delete', {vid: vid, mode: 'reparent'});
+    }
+  },
+};
+
+// ⚠ C'est une PILE, pas une case unique. Enchaîner deux actions de version
+// (supprimer l'une, puis l'autre) était courant, et une case unique n'aurait
+// gardé que la seconde : le Ctrl+Z suivant n'aurait plus rien eu à défaire,
+// sans un mot. Chaque entrée porte un `id` pour être retirée par identité.
+const UNDO_PERSIST_MAX = 20;
+const UNDO_PERSIST_TTL = 15 * 60 * 1000;
+
+function _readPendingUndos() {
+  try {
+    const raw = sessionStorage.getItem(UNDO_PERSIST_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    // Passé un délai, on ne remonte plus une action qui n'est plus dans la tête
+    // de l'utilisateur : elle resterait annulable par un Ctrl+Z distrait.
+    const now = Date.now();
+    return list.filter(e => e && UNDO_KINDS[e.kind] && now - (e.at || 0) < UNDO_PERSIST_TTL);
+  } catch (err) { return []; }
+}
+
+function _writePendingUndos(list) {
+  try {
+    if (list.length) sessionStorage.setItem(UNDO_PERSIST_KEY, JSON.stringify(list));
+    else sessionStorage.removeItem(UNDO_PERSIST_KEY);
+  } catch (err) {}
+}
+
+function _dropPendingUndo(id) {
+  _writePendingUndos(_readPendingUndos().filter(e => e.id !== id));
+}
+
+/** Empile une annulation sérialisable et la met de côté pour le rechargement
+ *  qui suit. `entry` = `{kind, label, payload, announce?}`. */
+function pushPersistentUndo(entry) {
+  entry.at = Date.now();
+  entry.id = 'u' + entry.at + Math.random().toString(36).slice(2, 8);
+  const list = _readPendingUndos();
+  list.push(entry);
+  _writePendingUndos(list.slice(-UNDO_PERSIST_MAX));
+  UNDO.push(entry.label, _runPersistentUndo.bind(null, entry));
+}
+
+async function _runPersistentUndo(entry) {
+  await UNDO_KINDS[entry.kind](entry);
+  // Retirée seulement une fois l'appel serveur passé : un échec doit laisser
+  // l'action annulable, ici comme dans `UNDO.run`.
+  _dropPendingUndo(entry.id);
+  await ensureSavedBeforeReload();
+  reloadPage(120);
+}
+
+// Au chargement : remettre en pile les actions qui ont provoqué les
+// rechargements, dans l'ordre, et réafficher le bouton « ↩ Annuler » de la
+// dernière — sans lui, le filet disparaît au moment précis où on en a besoin.
+(function () {
+  const list = _readPendingUndos();
+  _writePendingUndos(list);                 // purge les entrées périmées
+  if (!list.length) return;
+  let last = null;
+  list.forEach(function (e) {
+    const run = _runPersistentUndo.bind(null, e);
+    UNDO.push(e.label, run);
+    last = {entry: e, run: run};
+  });
+  if (last && last.entry.announce) {
+    setStatusAction(last.entry.announce, 'ok', '↩ Annuler', function () {
+      UNDO.drop(last.run);
+      last.run().catch(err => setStatus('Annulation impossible : '
+                                        + (err && err.message || err), 'err'));
     });
   }
+})();
+
+// Date de la dernière frappe dans un champ de saisie, tous champs confondus.
+// Sert à départager Ctrl+Z entre l'annulation native et la nôtre (cf. plus bas).
+let LAST_TEXT_EDIT = 0;
+// Dernière fois qu'on a laissé la main à l'annulation native, avec la valeur du
+// champ à ce moment-là (cf. la porte de sortie du gestionnaire Ctrl+Z).
+let LAST_DEFER = null;
+document.addEventListener('input', function (e) {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+    LAST_TEXT_EDIT = Date.now();
+    if (e.inputType && e.inputType.indexOf('history') !== 0) LAST_DEFER = null;
+  }
+}, true);
+
+/** État « bonne/mauvaise » de toutes les réponses d'un bloc. */
+function snapCorrect(qEl) {
+  return [].map.call(qEl.querySelectorAll('.md-answer'), r => r.dataset.correct === '1');
+}
+function setCorrectFlag(row, correct) {
+  row.dataset.correct = correct ? '1' : '0';
+  row.classList.toggle('is-correct', correct);
+  row.classList.toggle('is-wrong', !correct);
+  const b = row.querySelector('.ans-badge');
+  if (b) b.textContent = correct ? '✔ bonne' : '✗ mauvaise';
+}
+function restoreCorrect(qEl, snap) {
+  const rows = qEl.querySelectorAll('.md-answer');
+  snap.forEach(function (v, i) { if (rows[i]) setCorrectFlag(rows[i], v); });
+  markDirty(qEl); refreshOverrides(qEl); refreshScores(qEl);
+}
+
+document.addEventListener('keydown', function (e) {
+  const z = (e.key === 'z' || e.key === 'Z');
+  const redo = (e.ctrlKey || e.metaKey) && !e.altKey
+               && ((z && e.shiftKey) || e.key === 'y' || e.key === 'Y');
+  if (redo) {
+    // Pas de rétablissement. Le dire : muet, rien ne distinguait « pas
+    // implémenté » de « raccourci non reçu ».
+    if (!aModalIsOpen()) setStatus('Pas de rétablissement (Ctrl+Z seulement).', '');
+    return;
+  }
+  if (!z || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+  if (aModalIsOpen()) return;
+  const t = e.target;
+  const inField = !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable));
+  // ⚠ Ce qui départage, c'est la DERNIÈRE action, pas l'endroit où se trouve le
+  // curseur. Se contenter de « dans un champ → annulation native » ne marchait
+  // que tant que le focus restait sur le bouton cliqué : il suffisait de
+  // cliquer ensuite dans un énoncé pour que Ctrl+Z ne fasse plus rien du tout
+  // — la native n'avait aucune frappe à défaire, et la nôtre était court-
+  // circuitée. On ne cède donc à la native que si l'utilisateur a réellement
+  // tapé DEPUIS la dernière action empilée.
+  if (inField && LAST_TEXT_EDIT > UNDO.lastPushAt()) {
+    // ⚠ Porte de sortie. Céder à la native tant qu'elle a de l'historique
+    // enfermait Ctrl+Z dans le champ : elle finit par n'avoir plus rien à
+    // défaire, et on ne revenait jamais à la pile applicative. On compare donc
+    // la valeur du champ à celle de la cession précédente : inchangée = la
+    // native est à court, on reprend la main.
+    const stuck = LAST_DEFER && LAST_DEFER.el === t && LAST_DEFER.value === t.value;
+    if (!stuck) { LAST_DEFER = {el: t, value: t.value}; return; }
+  }
+  LAST_DEFER = null;
+  if (!UNDO.stack.length) return;      // rien à offrir : laisser passer
+  e.preventDefault();
+  // ⚠ Une fois la main reprise, on la garde jusqu'à la prochaine frappe. Sans
+  // cette remise à zéro, `LAST_TEXT_EDIT` restait supérieur au `at` du nouveau
+  // sommet (plus ancien) : on retombait dans la branche « céder à la native »
+  // une fois sur deux, indéfiniment — une frappe Ctrl+Z sur deux ne faisait
+  // rien, en silence.
+  UNDO.run().then(function (ok) { if (ok) LAST_TEXT_EDIT = 0; });
+});
+
+/** Une modale ouverte capte le contexte : Ctrl+Z y mutait l'éditeur DERRIÈRE
+ *  elle, la confirmation s'affichant dans une barre de statut masquée. */
+function aModalIsOpen() {
+  return !!document.querySelector(
+    '.pm-modal:not([hidden]), .bank-modal-bg:not([hidden]), .ai-modal:not([hidden])');
+}
+
+// === toggle bonne / mauvaise ================================================
+function toggleCorrect(qEl, row) {
+  const before = snapCorrect(qEl);
+  const nowCorrect = row.dataset.correct !== '1';
+  setCorrectFlag(row, nowCorrect);
+  if (nowCorrect && qType(qEl) === 'single') {
+    qEl.querySelectorAll('.md-answer').forEach(function (other) {
+      if (other !== row && other.dataset.correct === '1') setCorrectFlag(other, false);
+    });
+  }
+  UNDO.push(nowCorrect ? 'réponse repassée en mauvaise' : 'réponse repassée en bonne',
+            function () { restoreCorrect(qEl, before); });
   markDirty(qEl); refreshOverrides(qEl); refreshScores(qEl);
 }
 
@@ -1343,7 +2069,13 @@ function initBlock(blk) {
   });
 
   // marquage dirty sur les inputs
-  blk.querySelectorAll('input, select').forEach(function (el) {
+  // ⚠ Le sélecteur de version est exclu : la version d'un bloc vit sur le
+  // Block, pas dans son `data` (`data` part dans la banque, où « matin » n'a
+  // aucun sens). Elle est enregistrée seule, tout de suite, par
+  // `/api/sujet/blocks/set-group` — la marquer « non enregistrée » réclamait
+  // une sauvegarde qui n'aurait rien eu à écrire, et faisait surgir la
+  // confirmation « blocs modifiés » au milieu d'une annulation.
+  blk.querySelectorAll('input, select:not(.block-group-sel)').forEach(function (el) {
     el.addEventListener('input', function () { markDirty(blk); });
     el.addEventListener('change', function () { markDirty(blk); });
   });
@@ -1470,43 +2202,117 @@ async function addBlock(kind, qtype) {
   reloadPage();
 }
 
+/** Désignation lisible d'un bloc, pour la confirmation de suppression.
+ *  Nommer ce qu'on s'apprête à perdre est ce qui distingue une confirmation
+ *  utile d'un réflexe « OK ». */
+function describeBlock(blk) {
+  const k = blk.dataset.kind;
+  const vn = N_VERSIONS > 1 ? VERSION_NAMES[blk.dataset.group || ''] : null;
+  const suffix = vn ? ' (' + vn + ')' : '';
+  if (k === 'question_qcm') {
+    const tag = (blk.querySelector('.q-tag-input') || {}).value || '';
+    const n = blk.querySelectorAll('.md-answer').length;
+    return 'la question ' + qLabelOf(blk) + (tag ? ' « ' + tag + ' »' : '')
+           + suffix + ' et ses ' + n + ' réponse' + (n > 1 ? 's' : '');
+  }
+  if (k === 'question_open') return 'la question ouverte' + suffix;
+  if (k === 'question_freeform') return 'la question libre' + suffix;
+  if (k === 'answerbox') return 'la zone de réponse' + suffix;
+  const t = ((blk.querySelector('.text-src') || {}).value || '').trim();
+  return 'le bloc de texte' + (t ? ' « ' + t.slice(0, 40).replace(/\s+/g, ' ') + '… »' : '') + suffix;
+}
+
 async function deleteBlock(blk) {
-  // On capture le contenu et la position AVANT de supprimer : c'est ce qui
-  // rend l'annulation possible. Elle remplace la confirmation modale — le ✕
-  // est à 8 px du bouton « dupliquer », et une boîte de dialogue de plus ne
-  // protège personne, alors qu'un retour arrière, si.
+  // ⚠ Confirmation AVANT la suppression. Le projet s'en passait, en pariant
+  // sur le seul bouton « ↩ Annuler » de 12 s — le pari a été perdu : deux
+  // questions ont été supprimées et le retour arrière n'a pas été vu à temps.
+  // Le ✕ est à 8 px du bouton « dupliquer », et la suppression part sur le
+  // serveur immédiatement. Les deux filets sont gardés.
+  if (!window.confirm('Supprimer ' + describeBlock(blk) + ' ?\n\n'
+                      + 'Cette action part sur le serveur immédiatement.')) return;
   const kind = blk.dataset.kind;
   const bid = blk.dataset.bid;
+  const group = blk.dataset.group || '';
   let data = {};
   try { data = collectBlockData(blk); } catch (e) { data = {}; }
+  // ⚠ `collectBlockData` ne rend que ce que l'éditeur AFFICHE. Les clés qu'il
+  // n'édite pas — `epilogue` (le `\end{multicols}` d'un sujet importé),
+  // `_bank_id` — seraient perdues par le couple supprimer → annuler, et le
+  // sujet ne compilerait plus : `\begin{multicols}` sans fermeture. On relit
+  // donc l'état stocké et on ne laisse le DOM primer que sur ses propres
+  // champs (l'utilisateur peut avoir des modifications non enregistrées).
+  //
+  // ⚠ Si cette lecture échoue, on N'EFFACE PAS : restaurer ensuite depuis le
+  // seul DOM produisait un bloc amputé, annoncé « restauré ✓ », et un sujet
+  // qui ne compile plus. On ne supprime que ce qu'on saura remettre.
+  try {
+    const all = await (await fetch('/api/sujet')).json();
+    const stored = (all.blocks || []).find(b => b.bid === bid);
+    if (!stored || !stored.data) throw new Error('bloc introuvable côté serveur');
+    data = Object.assign({}, stored.data, data);
+  } catch (e) {
+    setStatus('Suppression abandonnée : impossible de lire l\'état enregistré ('
+              + (e.message || e) + '). Rien n\'a été supprimé.', 'err');
+    return;
+  }
+  // Position d'origine. `after_bid = null` veut dire « à la fin » pour
+  // l'ajout : sans `at_start`, restaurer le PREMIER bloc le renvoyait en queue
+  // de document (et changeait donc la numérotation de toute sa version).
   const prev = blk.previousElementSibling;
   const afterBid = (prev && prev.classList.contains('sujet-block'))
                  ? prev.dataset.bid : null;
+  const atStart = !afterBid;
 
   const r = await fetch('/api/sujet/blocks/delete', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({bid: blk.dataset.bid})
+    body: JSON.stringify({bid: bid})
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { setStatus('Échec : ' + (j.error || 'erreur'), 'err'); return; }
   blk.remove();
   buildOutline();
-  setStatusAction('Bloc supprimé ✓', 'ok', '↩ Annuler', async function () {
+
+  const label = describeBlock(blk);
+  async function restore() {
     const r2 = await fetch('/api/sujet/blocks/add', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       // On réutilise le bid d'origine : il est gravé dans le calage compilé
       // (`bareme-<bid>` d'un answerbox, marqueur `ffz<bid>` d'une question
       // libre). Un identifiant neuf romprait le lien avec l'aperçu et le HTR
-      // jusqu'à la recompilation suivante.
-      body: JSON.stringify({kind: kind, after_bid: afterBid, data: data, bid: bid})
+      // jusqu'à la recompilation suivante. `restore` autorise en plus les kinds
+      // désactivés à la création (question libre), sans quoi la suppression
+      // serait définitive.
+      body: JSON.stringify({kind: kind, after_bid: afterBid, at_start: atStart,
+                            data: data, bid: bid, group: group, restore: true})
     });
     const j2 = await r2.json().catch(() => ({}));
     if (!r2.ok || !j2.ok) {
       setStatus('Échec de l\'annulation : ' + (j2.error || 'erreur'), 'err');
-      return;
+      throw new Error(j2.error || 'échec de la restauration');
     }
-    setStatus('Bloc restauré ✓', 'ok');
-    reloadPage(350);          // le bloc restauré doit être rendu par le serveur
+    // Le bloc restauré doit être rendu par le serveur. Les éditions non
+    // enregistrées des AUTRES blocs seraient jetées par ce rechargement, d'où
+    // l'invite. Si l'utilisateur la refuse, on ne recharge pas : le bloc est
+    // bien revenu côté serveur mais reste invisible tant qu'on n'a pas
+    // rechargé — le dire, sinon « restauré ✓ » sur une liste inchangée est
+    // incompréhensible.
+    if (await ensureSavedBeforeReload()) {
+      setStatus('Bloc restauré ✓', 'ok');
+      reloadPage(350);
+    } else {
+      setStatus('Bloc restauré ✓ — rechargez la page pour le voir '
+                + '(vos modifications non enregistrées sont conservées).', 'ok');
+    }
+  }
+  // ⚠ La suppression doit être dans la pile Ctrl+Z. Sans ça, le Ctrl+Z qui
+  // suit une suppression dépilait l'entrée PRÉCÉDENTE — sur un nœud détaché,
+  // donc sans effet — annonçait « Annulé ✓ », et son `setStatus` effaçait le
+  // bouton « ↩ Annuler » avant la fin des 12 s : le réflexe naturel après une
+  // suppression accidentelle était le geste qui rendait le bloc irrécupérable.
+  UNDO.push('suppression de ' + label, restore);
+  setStatusAction('Bloc supprimé ✓', 'ok', '↩ Annuler', function () {
+    UNDO.drop(restore);
+    restore().catch(function () {});
   });
 }
 
@@ -1615,12 +2421,54 @@ function refreshMoveButtons() {
   });
 }
 
-async function moveBlock(blk, direction) {
+/** Bid du bloc qui PRÉCÈDE `blk` (null s'il est en tête) — la position d'un
+ *  bloc exprimée comme l'attend `/api/sujet/blocks/move`. */
+function prevBidOf(blk) {
+  const prev = blk.previousElementSibling;
+  return (prev && prev.classList.contains('sujet-block')) ? prev.dataset.bid : null;
+}
+
+/** Déplace `blk` juste après `afterBid` (null = en tête).
+ *
+ *  ⚠ Une POSITION, pas un déplacement de ±1. L'annulation d'un déplacement
+ *  rejouait « une case dans l'autre sens » : après un glisser-déposer entre
+ *  deux clics ▲▼, elle produisait un ordre que l'utilisateur n'avait jamais vu.
+ *  Restaurer la position capturée est exact quoi qu'il se soit passé entre les
+ *  deux. */
+async function moveBlockTo(blk, afterBid, opts) {
+  const origAfter = prevBidOf(blk);
+  if (origAfter === afterBid) return;                 // déjà en place
+  const r = await fetch('/api/sujet/blocks/move', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({bid: blk.dataset.bid, after_bid: afterBid})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) {
+    setStatus('Échec déplacement : ' + (j.error || 'erreur'), 'err');
+    throw new Error(j.error || 'déplacement refusé');
+  }
+  const ref = afterBid
+    ? document.querySelector('.sujet-block[data-bid="' + afterBid + '"]') : null;
+  const list = document.getElementById('blocks-list');
+  if (ref) ref.after(blk); else if (list) list.prepend(blk);
+  flashMoved(blk);
+  buildOutline();
+  refreshMoveButtons();
+  if (!(opts && opts.noUndo)) {
+    UNDO.push('déplacement du bloc',
+              function () { return moveBlockTo(blk, origAfter, {noUndo: true}); });
+  }
+}
+
+async function moveBlock(blk, direction, opts) {
   // direction = -1 (monter) ou +1 (descendre)
+  // `opts.noUndo` : le déplacement inverse déclenché par Ctrl+Z ne doit
+  // pas s'empiler à son tour, sinon deux Ctrl+Z se neutralisent en boucle.
   const blocks = [].slice.call(document.querySelectorAll('.sujet-block'));
   const idx = blocks.indexOf(blk);
   const newIdx = idx + direction;
   if (newIdx < 0 || newIdx >= blocks.length) return;
+  const origAfter = prevBidOf(blk);       // position AVANT le déplacement
   // after_bid = bid du bloc devant lequel on veut être ; null = en première position
   let afterBid = null;
   if (direction < 0) {
@@ -1650,6 +2498,10 @@ async function moveBlock(blk, direction) {
   // `preventScroll` sinon le focus annule le recentrage qu'on vient de faire.
   const again = blk.querySelector(direction < 0 ? '.block-move-up' : '.block-move-down');
   if (again && !again.disabled) { try { again.focus({preventScroll: true}); } catch (e) {} }
+  if (!(opts && opts.noUndo)) {
+    UNDO.push('déplacement du bloc',
+              function () { return moveBlockTo(blk, origAfter, {noUndo: true}); });
+  }
   setStatus('Bloc déplacé ✓', 'ok');
 }
 
@@ -1688,11 +2540,27 @@ function addAnswer(blk) {
   if (bar) bar.addEventListener('input', function () {
     markDirty(blk); refreshOverrides(blk); refreshScores(blk);
   });
+  UNDO.push('réponse ajoutée', function () {
+    div.remove();
+    markDirty(blk);
+    if (qType(blk) === 'mult') { deriveGlobals(blk); refreshOverrides(blk); }
+    refreshScores(blk);
+  });
   markDirty(blk); refreshScores(blk);
 }
 
 function removeAnswer(blk, row) {
+  // Le nœud détaché garde ses écouteurs : le réinsérer suffit à le rendre de
+  // nouveau éditable, sans avoir à reconstruire le markup.
+  const next = row.nextElementSibling;
+  const parent = row.parentNode;
   row.remove();
+  UNDO.push('réponse supprimée', function () {
+    parent.insertBefore(row, next);
+    markDirty(blk);
+    if (qType(blk) === 'mult') { deriveGlobals(blk); refreshOverrides(blk); }
+    refreshScores(blk);
+  });
   markDirty(blk);
   if (qType(blk) === 'mult') { deriveGlobals(blk); refreshOverrides(blk); refreshScores(blk); }
   else refreshScores(blk);
@@ -1761,6 +2629,7 @@ document.querySelectorAll('.sujet-block').forEach(function (blk) {
       ? (targetIdx > 0 ? blocks[targetIdx - 1].dataset.bid : null)
       : blk.dataset.bid;
     // Édge case : si le bloc déplacé est juste avant la cible et qu'on drop au-dessus, no-op
+    const srcOrigAfter = prevBidOf(src);       // position AVANT le dépôt
     const r = await fetch('/api/sujet/blocks/move', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({bid: src.dataset.bid, after_bid: afterBid})
@@ -1773,6 +2642,11 @@ document.querySelectorAll('.sujet-block').forEach(function (blk) {
     else blk.parentNode.appendChild(src);
     flashMoved(src);
     buildOutline();
+    // Le glisser-déposer n'empilait rien : c'est pourtant LA façon annoncée de
+    // réordonner, et son absence rendait fausse l'annulation du déplacement
+    // précédent.
+    UNDO.push('déplacement du bloc',
+              function () { return moveBlockTo(src, srcOrigAfter, {noUndo: true}); });
     setStatus('Bloc déplacé ✓', 'ok');
   });
 });
@@ -1790,14 +2664,51 @@ async function patchConfig(patch) {
   if (!r.ok || !j.ok) setStatus('Échec config : ' + (j.error || 'erreur'), 'err');
   else setStatus('Config mise à jour ✓', 'ok');
 }
-async function patchHeader(patch) {
-  const r = await fetch('/api/sujet/header', {
+// En-têtes par version. Vide = sujet à une version, dont l'en-tête vit dans
+// `config.header`. ⚠ Avec des versions, `config.header` n'est imprimé nulle
+// part : c'est celui de la version sélectionnée qu'on édite.
+const VERSION_HEADERS = {{ version_headers|default({})|tojson }};
+
+function hdrVersionId() {
+  const sel = document.getElementById('hdr-version');
+  return sel ? sel.value : '';
+}
+
+async function patchHeader(patch, forVid) {
+  const vid = (forVid === undefined) ? hdrVersionId() : forVid;
+  const url = vid ? '/api/sujet/versions/update' : '/api/sujet/header';
+  const body = vid ? {vid: vid, header: patch} : patch;
+  const r = await fetch(url, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(patch)
+    body: JSON.stringify(body)
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok) setStatus('Échec en-tête : ' + (j.error || 'erreur'), 'err');
-  else setStatus('En-tête mis à jour ✓', 'ok');
+  // Rend un booléen : un appelant qui enchaîne (décomposition de l'en-tête,
+  // annulation) doit savoir si l'écriture a eu lieu.
+  if (!r.ok || !j.ok) { setStatus('Échec en-tête : ' + (j.error || 'erreur'), 'err'); return false; }
+  if (vid && VERSION_HEADERS[vid]) Object.assign(VERSION_HEADERS[vid], patch);
+  const opt = vid ? [...document.getElementById('hdr-version').options]
+                      .find(o => o.value === vid) : null;
+  setStatus('En-tête mis à jour ✓' + (opt ? ' (' + opt.text + ')' : ''), 'ok');
+  return true;
+}
+
+/** Le LaTeX brut prime sur les champs structurés : l'état grisé le suit
+ *  maintenant à la frappe, au lieu d'attendre un rechargement — vider le champ
+ *  brut pour « revenir aux champs » laissait tout désactivé jusqu'au F5. */
+function syncHeaderRawMode() {
+  const raw = document.getElementById('hdr-raw-tex');
+  if (!raw) return;                       // legacy : lecture seule
+  const on = !!raw.value.trim();
+  const badge = document.getElementById('hdr-raw-badge');
+  if (badge) badge.hidden = !on;
+  const off = document.getElementById('hdr-struct-off');
+  if (off) off.hidden = !on;
+  const box = document.getElementById('hdr-struct-fields');
+  if (box) {
+    if (on) box.setAttribute('data-disabled', '1'); else box.removeAttribute('data-disabled');
+    box.querySelectorAll('input, textarea, select, button').forEach(el => { el.disabled = on; });
+  }
 }
 async function patchAnswerSheet(patch) {
   const r = await fetch('/api/sujet/answer-sheet', {
@@ -1805,8 +2716,14 @@ async function patchAnswerSheet(patch) {
     body: JSON.stringify(patch)
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok) setStatus('Échec feuille rép. : ' + (j.error || 'erreur'), 'err');
-  else setStatus('Feuille de réponses mise à jour ✓', 'ok');
+  // Rend un booléen, comme `patchHeader` : les bascules champs ⇄ brut doivent
+  // savoir si l'écriture a eu lieu avant d'empiler leur annulation.
+  if (!r.ok || !j.ok) {
+    setStatus('Échec feuille rép. : ' + (j.error || 'erreur'), 'err');
+    return false;
+  }
+  setStatus('Feuille de réponses mise à jour ✓', 'ok');
+  return true;
 }
 
 // Cfg
@@ -1823,6 +2740,301 @@ const _cfgSave = debounce(function () {
     const el = document.getElementById(id);
     if (el) el.addEventListener('change', _cfgSave);
   });
+
+// Barème : plancher / plafond / fourchette imprimée.
+// ⚠ Ces réglages vivent dans le config.json du PROJET (`/api/config`), pas
+// dans le store du sujet (`/api/sujet/config`) : `score.py` les relit à chaque
+// calcul, et son cache s'invalide sur le mtime du fichier. Un champ vide vaut
+// `null` = désactivé — pas 0, qui serait un plancher bien réel.
+const _baremeSave = debounce(async function () {
+  const num = id => {
+    const el = document.getElementById(id);
+    if (!el) return undefined;
+    const v = el.value.trim();
+    if (v === '') return null;
+    const f = parseFloat(v);
+    return Number.isFinite(f) ? f : null;
+  };
+  const body = {
+    question_floor:   num('cfg-question-floor'),
+    question_ceiling: num('cfg-question-ceiling'),
+    total_floor:      num('cfg-total-floor'),
+    show_score_range: document.getElementById('cfg-show-score-range').checked,
+  };
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    setStatus(r.ok ? 'Barème enregistré ✓' : ('✘ ' + (j.error || 'erreur')),
+              r.ok ? 'ok' : 'err');
+  } catch (e) {
+    setStatus('✘ Réseau : ' + e, 'err');
+  }
+}, 400);
+['cfg-question-floor', 'cfg-question-ceiling', 'cfg-total-floor',
+ 'cfg-show-score-range'].forEach(id => {
+   const el = document.getElementById(id);
+   if (el) el.addEventListener('change', _baremeSave);
+ });
+
+/** Réapplique au tableau ce que le serveur vient de recalculer POUR TOUTES les
+ *  versions : plage de numéros, nombre de QCM, barème. Une seule fonction — une
+ *  mise à jour partielle laissait des cellules périmées (le barème d'une
+ *  version restait affiché après un changement qui le concernait). */
+function applyVersionsPayload(rows) {
+  (rows || []).forEach(function (v) {
+    const row = document.querySelector('.ver-table tr[data-vid="' + v.vid + '"]');
+    if (!row) return;
+    const rg = row.querySelector('.ver-range');
+    if (rg) rg.textContent = (v.first_copy === v.last_copy)
+      ? v.first_copy : (v.first_copy + '\u2013' + v.last_copy);
+    const n = row.querySelector('.ver-n');
+    if (n && v.n_qcm !== undefined) n.textContent = v.n_qcm;
+    const mx = row.querySelector('.ver-max');
+    if (mx && v.total_max !== undefined) mx.textContent = v.total_max;
+  });
+}
+
+// Versions (sujet à groupes) : nom + nombre de copies par version.
+// Le nombre de copies déplace les plages de numéros de TOUTES les versions
+// suivantes (AMC numérote en continu) : le serveur renvoie donc les plages
+// recalculées plutôt que de laisser le front les deviner.
+document.querySelectorAll('.ver-table tr[data-vid]').forEach(function (tr) {
+  const vid = tr.dataset.vid;
+  const nameEl = tr.querySelector('.ver-name');
+  const copiesEl = tr.querySelector('.ver-copies');
+  const statusEl = document.getElementById('ver-status');
+  const save = debounce(async function () {
+    const body = {vid: vid};
+    if (nameEl) body.name = nameEl.value;
+    if (copiesEl) body.num_copies = parseInt(copiesEl.value) || 1;
+    const r = await fetch('/api/sujet/versions/update', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { statusEl.textContent = 'Échec : ' + (j.error || 'erreur'); return; }
+    applyVersionsPayload(j.versions);
+    statusEl.textContent = 'Versions enregistrées \u2713';
+    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+  }, 400);
+  [nameEl, copiesEl].forEach(el => { if (el) el.addEventListener('change', save); });
+});
+
+// --- Ajouter / supprimer une version ---------------------------------------
+// Les deux mutent la structure du sujet : elles rechargent la page (comme
+// l'ajout d'un bloc) et empilent leur annulation sur la pile Ctrl+Z. La
+// suppression demande confirmation AVANT d'agir, et nomme ce qu'on va perdre.
+
+function verStatus(msg, cls) {
+  const el = document.getElementById('ver-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'ver-status ' + (cls || '');
+  if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 4000);
+}
+
+function verRowInfo(vid) {
+  const tr = document.querySelector('.ver-table tr[data-vid="' + vid + '"]');
+  if (!tr) return null;
+  const nameEl = tr.querySelector('.ver-name');
+  const nEl = tr.querySelector('.ver-n');
+  return {
+    tr: tr,
+    name: (nameEl && nameEl.value.trim()) || (nameEl && nameEl.placeholder) || vid,
+    nQcm: parseInt(nEl && nEl.textContent, 10) || 0,
+  };
+}
+
+// --- modale « Ajouter » ---
+(function () {
+  const modal = document.getElementById('verAddModal');
+  const btn = document.getElementById('ver-add-btn');
+  if (!modal || !btn) return;
+  const nameEl = document.getElementById('ver-add-name');
+  const copiesEl = document.getElementById('ver-add-copies');
+  const errEl = document.getElementById('ver-add-error');
+  const helpEl = document.getElementById('ver-add-help');
+
+  function close() { modal.hidden = true; }
+  modal.querySelectorAll('[data-close-ver-add]').forEach(
+    el => el.addEventListener('click', close));
+
+  btn.addEventListener('click', function () {
+    errEl.hidden = true;
+    nameEl.value = '';
+    copiesEl.value = '1';
+    // ⚠ Sur un sujet à une seule version, l'ajout en crée DEUX : la version
+    // courante (jusque-là implicite) et la nouvelle. Il faut le dire ici —
+    // sinon la surprise est un sujet dont toutes les questions sont soudain
+    // « communes », c'est-à-dire imprimées des deux côtés.
+    helpEl.textContent = N_VERSIONS >= 1
+      ? 'La nouvelle version part sans aucune question : affectez-lui ensuite '
+        + 'des questions avec le sélecteur de version de chaque bloc.'
+      : 'Ce sujet n’a pas encore de versions : l’ajout en crée deux — '
+        + 'la version actuelle et la nouvelle. Les questions existantes restent '
+        + '« communes » (imprimées sur les deux) tant que vous ne les affectez '
+        + 'pas à l’une d’elles.';
+    modal.hidden = false;
+    nameEl.focus();
+  });
+
+  document.getElementById('ver-add-confirm').addEventListener('click', async function () {
+    const name = nameEl.value.trim();
+    if (!name) { errEl.textContent = 'Donnez un nom à la version.'; errEl.hidden = false; return; }
+    errEl.hidden = true;
+    if (!(await ensureSavedBeforeReload())) return;
+    let j;
+    try {
+      const r = await fetch('/api/sujet/versions/add', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, num_copies: parseInt(copiesEl.value, 10) || 1}),
+      });
+      j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+    } catch (e) {
+      errEl.textContent = 'Échec : ' + (e.message || e); errEl.hidden = false; return;
+    }
+    const added = j.version || {};
+    // L'annulation retire ce qui a été créé : la version demandée, et — si
+    // l'ajout a dû matérialiser la version courante — celle-là aussi, ce qui
+    // rend au sujet son en-tête et son nombre de copies d'origine. Elle est
+    // empilée en SÉRIALISÉ : le rechargement qui suit viderait la pile.
+    // La nouvelle est retirée d'abord : supprimer la dernière version restante
+    // est ce qui rend au sujet son état « sans versions ».
+    const vids = [added.vid];
+    if (added.bootstrapped) {
+      (j.versions || []).forEach(v => { if (v.vid !== added.vid) vids.push(v.vid); });
+    }
+    const label = 'ajout de la version « ' + (added.name || name) + ' »';
+    pushPersistentUndo({kind: 'version-remove', payload: vids, label: label,
+                        announce: 'Version « ' + (added.name || name) + ' » ajoutée ✓'});
+    close();
+    reloadPage(250);
+  });
+})();
+
+// --- modale « Supprimer » ---
+(function () {
+  const modal = document.getElementById('verDelModal');
+  if (!modal) return;
+  const whatEl = document.getElementById('ver-del-what');
+  const modesEl = document.getElementById('ver-del-modes');
+  const hintEl = document.getElementById('ver-del-undo-hint');
+  const errEl = document.getElementById('ver-del-error');
+  let target = null;
+
+  function close() { modal.hidden = true; target = null; }
+  modal.querySelectorAll('[data-close-ver-del]').forEach(
+    el => el.addEventListener('click', close));
+
+  document.querySelectorAll('.ver-table .ver-del').forEach(function (b) {
+    b.addEventListener('click', function () {
+      const tr = b.closest('tr[data-vid]');
+      if (!tr) return;
+      const info = verRowInfo(tr.dataset.vid);
+      target = tr.dataset.vid;
+      errEl.hidden = true;
+      const n = info.nQcm;
+      whatEl.textContent = 'Version « ' + info.name + ' » — '
+        + (n ? (n + (n > 1 ? ' questions lui appartiennent.' : ' question lui appartient.'))
+             : 'aucune question ne lui appartient.');
+      // Sans question propre, il n'y a rien à décider : la question du sort
+      // des blocs ne se pose pas.
+      modesEl.hidden = !n;
+      const last = document.querySelectorAll('.ver-table tr[data-vid]').length <= 1;
+      hintEl.textContent = (last
+        ? 'C’est la dernière version : le sujet redeviendra un sujet à une '
+          + 'seule version, qui reprendra l’en-tête et le nombre de copies '
+          + 'de celle-ci. '
+        : '') + 'Annulable par Ctrl+Z.';
+      const first = modesEl.querySelector('input[value="reparent"]');
+      if (first) first.checked = true;
+      modal.hidden = false;
+    });
+  });
+
+  document.getElementById('ver-del-confirm').addEventListener('click', async function () {
+    if (!target) return;
+    const info = verRowInfo(target) || {name: target};
+    const checked = modesEl.querySelector('input[name="ver-del-mode"]:checked');
+    const mode = (!modesEl.hidden && checked) ? checked.value : 'reparent';
+    errEl.hidden = true;
+    if (!(await ensureSavedBeforeReload())) return;
+    let j;
+    try {
+      const r = await fetch('/api/sujet/versions/delete', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({vid: target, mode: mode}),
+      });
+      j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+    } catch (e) {
+      errEl.textContent = 'Échec : ' + (e.message || e); errEl.hidden = false; return;
+    }
+    // Le serveur rend de quoi tout remettre — version, position, et l'état
+    // exact des blocs touchés. On le renvoie tel quel : reconstruire ce
+    // payload côté client, c'est le risque de restaurer une version amputée.
+    // Empilé en sérialisé, sinon le rechargement qui suit viderait la pile —
+    // et le bouton « ↩ Annuler » disparaîtrait avec elle.
+    pushPersistentUndo({
+      kind: 'version-restore', payload: j.undo,
+      label: 'suppression de la version « ' + info.name + ' »',
+      announce: 'Version « ' + info.name + ' » supprimée ✓',
+    });
+    close();
+    reloadPage(400);
+  });
+})();
+
+// --- affectation d'un bloc à une version ------------------------------------
+// Pas de rechargement : le seul effet visible est la renumérotation par version
+// et le total de barème, tous deux recalculés côté client.
+function applyBlockGroup(blk, group) {
+  blk.dataset.group = group || '';
+  const sel = blk.querySelector('.block-group-sel');
+  if (sel) { sel.value = group || ''; sel.classList.toggle('is-common', !group); }
+  // Le compte de QCM et le barème du tableau viennent du serveur
+  // (`applyVersionsPayload`, appelé par l'écriture) : les recalculer ici en
+  // parallèle, c'est deux vérités qui finissent par diverger.
+  buildOutline();          // → renumberBlocks() : le rang est PAR version
+  refreshTotalMax();
+}
+
+document.querySelectorAll('.block-group-sel').forEach(function (sel) {
+  sel.addEventListener('change', async function () {
+    const blk = sel.closest('.sujet-block');
+    if (!blk) return;
+    const before = blk.dataset.group || '';
+    const after = sel.value;
+    const send = async function (g) {
+      const r = await fetch('/api/sujet/blocks/set-group', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({bid: blk.dataset.bid, group: g}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+      // Déplacer une question change le barème ET le compte de QCM des deux
+      // versions concernées : c'est le serveur qui les recalcule.
+      applyVersionsPayload(j.versions);
+    };
+    try { await send(after); }
+    catch (e) {
+      sel.value = before;
+      setStatus('Échec du changement de version : ' + (e.message || e), 'err');
+      return;
+    }
+    applyBlockGroup(blk, after);
+    UNDO.push('changement de version', async function () {
+      await send(before);
+      applyBlockGroup(blk, before);
+    });
+    const vn = after ? (VERSION_NAMES[after] || after) : 'commun (toutes les versions)';
+    setStatus('Question déplacée vers ' + vn + ' ✓', 'ok');
+  });
+});
 
 // Régénération seed
 const seedBtn = document.getElementById('seed-regen-btn');
@@ -1869,19 +3081,235 @@ if (IS_CANONICAL) {
       establishment: get('hdr-establishment'),
       year: get('hdr-year'),
       author: get('hdr-author'),
+      date: get('hdr-date'),
       title: get('hdr-title'),
       duration: get('hdr-duration'),
       subtitle: get('hdr-subtitle'),
+      rules: !!(document.getElementById('hdr-rules') || {}).checked,
       instructions: get('hdr-instructions'),
       raw_tex: get('hdr-raw-tex'),
     };
   }
-  const _hdrSave = debounce(function () { patchHeader(_readHdrFields()); }, 500);
-  ['hdr-establishment', 'hdr-year', 'hdr-author', 'hdr-title',
-   'hdr-duration', 'hdr-subtitle', 'hdr-instructions', 'hdr-raw-tex'].forEach(id => {
+  // ⚠ La version à qui appartient la saisie est capturée au moment de la
+  // FRAPPE, pas au moment de l'envoi : sans ça, changer de version pendant les
+  // 500 ms d'attente écrivait la fin de l'en-tête du matin sur celui de
+  // l'après-midi.
+  let _hdrTimer = null, _hdrVidAtEdit = null;
+  function _hdrFlush() {
+    clearTimeout(_hdrTimer); _hdrTimer = null;
+    if (_hdrVidAtEdit === null) return;
+    const vid = _hdrVidAtEdit;
+    _hdrVidAtEdit = null;
+    patchHeader(_readHdrFields(), vid);
+  }
+  function _hdrSave() {
+    _hdrVidAtEdit = hdrVersionId();
+    clearTimeout(_hdrTimer);
+    _hdrTimer = setTimeout(_hdrFlush, 500);
+  }
+  ['hdr-establishment', 'hdr-year', 'hdr-author', 'hdr-date', 'hdr-title',
+   'hdr-duration', 'hdr-subtitle', 'hdr-rules', 'hdr-instructions',
+   'hdr-raw-tex'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('input', _hdrSave);
+    // Une case à cocher n'émet pas `input` partout : on écoute les deux.
+    if (el) { el.addEventListener('input', _hdrSave); el.addEventListener('change', _hdrSave); }
   });
+  const _rawEl = document.getElementById('hdr-raw-tex');
+  if (_rawEl) _rawEl.addEventListener('input', syncHeaderRawMode);
+
+  // --- Bascule champs ⇄ LaTeX brut (en-tête) -------------------------------
+  // ⚠ Les deux sens ne se valent pas. « Passer au brut » fige EXACTEMENT ce
+  // que les champs produisaient : le PDF, donc le calage, ne bouge pas.
+  // « Revenir aux champs » jette le LaTeX et laisse les champs regénérer autre
+  // chose : la mise en page change. D'où une confirmation d'un seul côté.
+  const _hdrToRaw = document.getElementById('hdr-to-raw-btn');
+  if (_hdrToRaw) _hdrToRaw.addEventListener('click', async function () {
+    const before = _readHdrFields();
+    const vid = hdrVersionId();
+    if (before.raw_tex.trim()) {
+      setStatus('L’en-tête est déjà en LaTeX brut.', ''); return;
+    }
+    let raw;
+    try {
+      const r = await fetch('/api/sujet/header/to-raw', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({fields: before}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+      raw = j.raw_tex;
+    } catch (e) { setStatus('Échec : ' + (e.message || e), 'err'); return; }
+    if (!raw.trim()) {
+      setStatus('Rien à figer : les champs de l’en-tête sont vides.', 'err'); return;
+    }
+    const after = Object.assign({}, before, {raw_tex: raw});
+    if (!(await patchHeader(after, vid))) return;
+    _fillHdrFields(after);
+    UNDO.push('passage de l’en-tête au LaTeX brut', async function () {
+      if (!(await patchHeader(before, vid))) throw new Error('écriture refusée');
+      if (VERSION_HEADERS[vid]) Object.assign(VERSION_HEADERS[vid], before);
+      if (hdrVersionId() === vid) _fillHdrFields(before);
+    });
+    setStatus('En-tête figé en LaTeX brut ✓ — le PDF est inchangé', 'ok');
+  });
+
+  const _hdrToFields = document.getElementById('hdr-to-fields-btn');
+  if (_hdrToFields) _hdrToFields.addEventListener('click', async function () {
+    const before = _readHdrFields();
+    const vid = hdrVersionId();
+    if (!before.raw_tex.trim()) {
+      setStatus('Les champs structurés ont déjà la main.', ''); return;
+    }
+    const filled = Object.keys(before).filter(
+      k => k !== 'raw_tex' && k !== 'rules' && before[k]).length;
+    if (!confirm('Vider le LaTeX brut de l’en-tête ?\n\n'
+                 + (filled ? 'Les ' + filled + ' champ(s) structuré(s) déjà '
+                             + 'remplis reprendront la main.'
+                           : 'Aucun champ structuré n’est rempli : l’en-tête '
+                             + 'sera VIDE.')
+                 + '\n\nCe LaTeX n’est repris nulle part — utilisez plutôt '
+                 + '« 🔎 Détecter les champs » pour en récupérer le contenu.\n'
+                 + 'Annulable par Ctrl+Z.')) return;
+    const after = Object.assign({}, before, {raw_tex: ''});
+    if (!(await patchHeader(after, vid))) return;
+    _fillHdrFields(after);
+    UNDO.push('retour de l’en-tête aux champs', async function () {
+      if (!(await patchHeader(before, vid))) throw new Error('écriture refusée');
+      if (VERSION_HEADERS[vid]) Object.assign(VERSION_HEADERS[vid], before);
+      if (hdrVersionId() === vid) _fillHdrFields(before);
+    });
+    setStatus('LaTeX brut vidé — les champs reprennent la main ✓', 'ok');
+  });
+
+  // --- « Détecter les champs » : décomposer l'en-tête brut -----------------
+  // ⚠ Rien n'est appliqué sans confirmation. La décomposition change la mise en
+  // page (les `\vspace` d'origine disparaissent), donc le calage : l'appliquer
+  // sur un sujet déjà imprimé désaligne les copies. La modale le dit.
+  (function () {
+    const btn = document.getElementById('hdr-detect-btn');
+    const modal = document.getElementById('hdrDetectModal');
+    if (!btn || !modal) return;
+    const LABELS = {
+      establishment: 'Établissement', year: 'Année', author: 'Auteur',
+      date: 'Date de l’épreuve', title: 'Titre', duration: 'Durée',
+      subtitle: 'Sous-titre', rules: 'Filets', instructions: 'Instructions',
+    };
+    let proposed = null;
+
+    function close() { modal.hidden = true; }
+    modal.querySelectorAll('[data-close-hdr-detect]')
+         .forEach(el => el.addEventListener('click', close));
+
+    btn.addEventListener('click', async function () {
+      const raw = document.getElementById('hdr-raw-tex').value;
+      if (!raw.trim()) { setStatus('Aucun LaTeX brut à analyser.', 'err'); return; }
+      let j;
+      try {
+        const r = await fetch('/api/sujet/header/analyze', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({raw_tex: raw}),
+        });
+        j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+      } catch (e) {
+        setStatus('Analyse impossible : ' + (e.message || e), 'err'); return;
+      }
+      proposed = j.fields || {};
+      const rows = document.getElementById('hdr-detect-rows');
+      rows.textContent = '';
+      let n = 0;
+      Object.keys(LABELS).forEach(function (k) {
+        const v = proposed[k];
+        if (!v) return;
+        n += 1;
+        const tr = document.createElement('tr');
+        const th = document.createElement('th');
+        th.textContent = LABELS[k];
+        const td = document.createElement('td');
+        // ⚠ `textContent` : ce LaTeX vient d'un fichier importé, donc d'une
+        // source qu'on ne contrôle pas.
+        td.textContent = (k === 'rules') ? 'oui' : String(v);
+        tr.appendChild(th); tr.appendChild(td); rows.appendChild(tr);
+      });
+      const left = j.leftovers || [];
+      const leftBox = document.getElementById('hdr-detect-left');
+      const leftList = document.getElementById('hdr-detect-left-list');
+      leftList.textContent = '';
+      left.forEach(function (frag) {
+        const li = document.createElement('li');
+        li.textContent = frag;
+        leftList.appendChild(li);
+      });
+      leftBox.hidden = !left.length;
+      const verdict = document.getElementById('hdr-detect-verdict');
+      const apply = document.getElementById('hdr-detect-apply');
+      if (!n) {
+        verdict.textContent = 'Rien n’a pu être reconnu : gardez le LaTeX brut.';
+        apply.disabled = true;
+      } else if (j.complete) {
+        verdict.textContent = 'Tout ce qui portait de l’information a trouvé un '
+          + 'champ (' + n + '). Le LaTeX brut sera vidé.';
+        apply.disabled = false;
+      } else {
+        verdict.textContent = n + ' champ(s) reconnu(s), mais pas tout : ce qui '
+          + 'suit serait PERDU si vous appliquez. Recopiez-le d’abord si vous y tenez.';
+        apply.disabled = false;
+      }
+      document.getElementById('hdr-detect-error').hidden = true;
+      modal.hidden = false;
+    });
+
+    document.getElementById('hdr-detect-apply').addEventListener('click', async function () {
+      if (!proposed) return;
+      const before = _readHdrFields();          // de quoi tout remettre
+      const vid = hdrVersionId();
+      const after = Object.assign({}, before, proposed, {raw_tex: ''});
+      const errEl = document.getElementById('hdr-detect-error');
+      let saved = false;
+      try { saved = await patchHeader(after, vid); }
+      catch (e) { saved = false; }
+      if (!saved) {
+        errEl.textContent = 'Échec de l’enregistrement — rien n’a été modifié.';
+        errEl.hidden = false; return;
+      }
+      _fillHdrFields(after);
+      UNDO.push('décomposition de l’en-tête', async function () {
+        // ⚠ Lever si l'écriture échoue : `UNDO.run` remet alors l'entrée en
+        // pile au lieu d'annoncer une annulation qui n'a pas eu lieu.
+        if (!(await patchHeader(before, vid))) throw new Error('écriture refusée');
+        if (VERSION_HEADERS[vid]) Object.assign(VERSION_HEADERS[vid], before);
+        // Si l'utilisateur a changé de version entre-temps, on ne réécrit pas
+        // par-dessus les champs d'une autre version.
+        if (hdrVersionId() === vid) _fillHdrFields(before);
+      });
+      close();
+      setStatus('En-tête décomposé en champs ✓ — Ctrl+Z pour revenir au LaTeX brut', 'ok');
+    });
+  })();
+
+  // Passage d'une version à l'autre : on remplit le formulaire avec SON
+  // en-tête. ⚠ La sauvegarde est différée de 500 ms — sans purge, une frappe
+  // en attente partirait sur la version qu'on vient de quitter.
+  function _fillHdrFields(h) {
+    h = h || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    set('hdr-establishment', h.establishment); set('hdr-year', h.year);
+    set('hdr-author', h.author); set('hdr-date', h.date);
+    set('hdr-title', h.title); set('hdr-duration', h.duration);
+    set('hdr-subtitle', h.subtitle); set('hdr-instructions', h.instructions);
+    set('hdr-raw-tex', h.raw_tex);
+    const r = document.getElementById('hdr-rules');
+    if (r) r.checked = !!h.rules;
+    syncHeaderRawMode();
+  }
+  const _hdrVer = document.getElementById('hdr-version');
+  if (_hdrVer) {
+    _hdrVer.addEventListener('change', function () {
+      _hdrFlush();          // les champs portent encore la version quittée
+      _fillHdrFields(VERSION_HEADERS[_hdrVer.value]);
+    });
+  }
+  syncHeaderRawMode();
 
   // Génération des exemples de barème → insérés (éditables) dans les Instructions.
   const _genBaremeBtn = document.getElementById('gen-bareme-ex');
@@ -1927,22 +3355,117 @@ if (IS_CANONICAL) {
     if (el) el.addEventListener('change', _asSave);
   });
 
-  // LaTeX brut de la feuille de réponses : sauvegardé en debounce 600ms.
-  // Recharge la page si on passe de "rempli" à "vide" (ou inversement) pour
-  // que les `disabled` des champs structurés se mettent à jour.
+  // LaTeX brut de la feuille de réponses : sauvegardé en debounce 600 ms.
+  // ⚠ Plus de `location.reload()` au passage rempli ⇄ vide : il abandonnait
+  // sans prévenir la pile Ctrl+Z (et les éditions de blocs en cours). L'état
+  // grisé suit désormais la frappe, comme pour l'en-tête.
   const asRaw = document.getElementById('as-raw-tex');
+
+  function _asReadFields() {
+    const num = id => parseInt((document.getElementById(id) || {}).value, 10);
+    return {
+      id_grid_digits: num('as-id-grid-digits') || 4,
+      name_field: !!(document.getElementById('as-name-field') || {}).checked,
+      columns: num('as-columns') || 2,
+      answer_sheet_tex: asRaw ? asRaw.value : '',
+    };
+  }
+
+  function _asFill(f) {
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+    set('as-id-grid-digits', f.id_grid_digits);
+    set('as-columns', f.columns);
+    const nf = document.getElementById('as-name-field');
+    if (nf) nf.checked = !!f.name_field;
+    if (asRaw) asRaw.value = f.answer_sheet_tex || '';
+    syncAnswerSheetRawMode();
+  }
+
+  /** Même règle que pour l'en-tête : le brut prime, et l'état grisé le suit à
+   *  la frappe plutôt qu'au rechargement suivant. */
+  function syncAnswerSheetRawMode() {
+    if (!asRaw) return;
+    const on = !!asRaw.value.trim();
+    const badge = document.getElementById('as-raw-badge');
+    if (badge) badge.hidden = !on;
+    const off = document.getElementById('as-struct-off');
+    if (off) off.hidden = !on;
+    const box = document.getElementById('as-struct-fields');
+    if (box) {
+      if (on) box.setAttribute('data-disabled', '1'); else box.removeAttribute('data-disabled');
+      box.querySelectorAll('input, textarea, select').forEach(el => { el.disabled = on; });
+      // Le bouton « passer au brut » n'a plus rien à faire une fois en brut.
+      const b = document.getElementById('as-to-raw-btn');
+      if (b) b.disabled = on;
+    }
+  }
+
   if (asRaw) {
-    const wasFilled = !!asRaw.value.trim();
     const _asRawSave = debounce(async function () {
       await patchAnswerSheet({answer_sheet_tex: asRaw.value});
-      const nowFilled = !!asRaw.value.trim();
-      // Rechargement non routé par `reloadPage()` volontairement : il n'est pas
-      // précédé d'une sauvegarde des blocs, donc `beforeunload` doit prévenir
-      // si des éditions sont en cours.
-      if (wasFilled !== nowFilled) location.reload();
+      syncAnswerSheetRawMode();
     }, 600);
-    asRaw.addEventListener('input', _asRawSave);
+    asRaw.addEventListener('input', function () {
+      syncAnswerSheetRawMode();          // immédiat : l'écriture peut attendre
+      _asRawSave();
+    });
   }
+  syncAnswerSheetRawMode();
+
+  // --- Bascule champs ⇄ LaTeX brut (feuille de réponses) -------------------
+  const _asToRaw = document.getElementById('as-to-raw-btn');
+  if (_asToRaw) _asToRaw.addEventListener('click', async function () {
+    const before = _asReadFields();
+    if (before.answer_sheet_tex.trim()) {
+      setStatus('La feuille de réponses est déjà en LaTeX brut.', ''); return;
+    }
+    let tex;
+    try {
+      const r = await fetch('/api/sujet/answer-sheet/to-raw', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({fields: before}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || 'erreur serveur');
+      tex = j.tex;
+    } catch (e) { setStatus('Échec : ' + (e.message || e), 'err'); return; }
+    const after = Object.assign({}, before, {answer_sheet_tex: tex});
+    if (!(await patchAnswerSheet(after))) return;
+    _asFill(after);
+    UNDO.push('passage de la feuille de réponses au LaTeX brut', async function () {
+      if (!(await patchAnswerSheet(before))) throw new Error('écriture refusée');
+      _asFill(before);
+    });
+    setStatus('Feuille de réponses figée en LaTeX brut ✓ — le PDF est inchangé', 'ok');
+  });
+
+  const _asToFields = document.getElementById('as-to-fields-btn');
+  if (_asToFields) _asToFields.addEventListener('click', async function () {
+    const before = _asReadFields();
+    if (!before.answer_sheet_tex.trim()) {
+      setStatus('Les champs structurés ont déjà la main.', ''); return;
+    }
+    // ⚠ Bien plus lourd que pour l'en-tête : la feuille de réponses porte les
+    // CASES. Régénérer la version canonique les déplace, donc invalide le
+    // calage — et des copies déjà imprimées avec l'ancienne feuille ne se
+    // lisent plus.
+    if (!confirm('Revenir à la feuille de réponses canonique ?\n\n'
+                 + 'Le LaTeX actuel (' + before.answer_sheet_tex.length
+                 + ' caractères) sera remplacé par la feuille générée depuis '
+                 + 'les champs.\n\n'
+                 + '⚠ La mise en page n’est PAS la même : les cases changent '
+                 + 'de place, donc le CALAGE aussi. À ne pas faire si des '
+                 + 'copies ont déjà été imprimées.\n\nAnnulable par Ctrl+Z.')) return;
+    const after = Object.assign({}, before, {answer_sheet_tex: ''});
+    if (!(await patchAnswerSheet(after))) return;
+    _asFill(after);
+    UNDO.push('retour de la feuille de réponses aux champs', async function () {
+      if (!(await patchAnswerSheet(before))) throw new Error('écriture refusée');
+      _asFill(before);
+    });
+    setStatus('Feuille de réponses régénérée depuis les champs ✓ '
+              + '— recompilez, le calage a changé', 'ok');
+  });
 
   // Toolbar : ajout de blocs
   document.querySelectorAll('.btn-add').forEach(function (btn) {
@@ -2004,7 +3527,7 @@ function _blockTitle(blk) {
 function _iconFor(blk) {
   const k = blk.dataset.kind;
   if (k === 'text') return ['§', 'outline-icon-text'];
-  if (k === 'question_qcm') return ['Q' + (blk.dataset.q || ''), 'outline-icon-qcm'];
+  if (k === 'question_qcm') return [qLabelOf(blk), 'outline-icon-qcm'];
   if (k === 'question_open') return ['◰', 'outline-icon-open'];
   if (k === 'answerbox') return ['✎', 'outline-icon-answer'];
   return ['?', ''];
@@ -2027,8 +3550,17 @@ function _outlineItem(blk) {
   lbl.className = 'outline-label';
   lbl.textContent = _blockTitle(blk);
   li.appendChild(lbl);
+  // Sujet à plusieurs versions : sans ce repère, la Structure affiche deux
+  // fois « Q1 … Q5 » et rien ne dit laquelle appartient à quelle demi-journée.
+  const vname = N_VERSIONS > 1 ? VERSION_NAMES[blk.dataset.group || ''] : null;
+  if (vname) {
+    const chip = document.createElement('span');
+    chip.className = 'outline-version';
+    chip.textContent = vname;
+    li.appendChild(chip);
+  }
   li.title = (IS_CANONICAL ? 'Clic : aller au bloc · double-clic : renommer · drag : déplacer\n\n' : '')
-             + lbl.textContent;
+             + lbl.textContent + (vname ? ' — ' + vname : '');
   li.addEventListener('click', function (e) {
     // Évite la navigation si on est en train d'éditer le label inline.
     if (e.target.classList.contains('outline-rename-input')) return;
@@ -2085,6 +3617,7 @@ function _outlineDragSetup(li, blk) {
     const afterBid = above
       ? (targetIdx > 0 ? list[targetIdx - 1].dataset.bid : null)
       : blk.dataset.bid;
+    const srcOrigAfter = prevBidOf(src);       // position AVANT le dépôt
     const r = await fetch('/api/sujet/blocks/move', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({bid: src.dataset.bid, after_bid: afterBid})
@@ -2096,6 +3629,11 @@ function _outlineDragSetup(li, blk) {
     else blk.parentNode.appendChild(src);
     flashMoved(src);
     buildOutline();
+    // Le glisser-déposer n'empilait rien : c'est pourtant LA façon annoncée de
+    // réordonner, et son absence rendait fausse l'annulation du déplacement
+    // précédent.
+    UNDO.push('déplacement du bloc',
+              function () { return moveBlockTo(src, srcOrigAfter, {noUndo: true}); });
     setStatus('Bloc déplacé ✓', 'ok');
   });
 }
@@ -2189,11 +3727,34 @@ async function _renameBlock(blk, newLabel) {
   }
   buildOutline();
 }
+/** Renumérote les QCM : rang global (`data-q`) et rang dans la version
+ *  (`data-qv`), plus la pastille du bloc.
+ *
+ *  ⚠ Ces numéros venaient du rendu serveur et n'étaient jamais recalculés :
+ *  après un déplacement, la pastille et surtout la confirmation de suppression
+ *  (« Supprimer la question Q2 “test1” ») nommaient une question qui n'était
+ *  plus à ce rang. `describeBlock` existe pour nommer ce qu'on va perdre — un
+ *  numéro faux y est pire que pas de numéro. */
+function renumberBlocks() {
+  let q = 0;
+  const perGroup = {};
+  document.querySelectorAll('.sujet-block[data-kind="question_qcm"]').forEach(function (blk) {
+    q += 1;
+    const g = blk.dataset.group || '';
+    perGroup[g] = (perGroup[g] || 0) + 1;
+    blk.dataset.q = String(q);
+    blk.dataset.qv = String(perGroup[g]);
+    const tag = blk.querySelector('.block-kind-tag');
+    if (tag) tag.textContent = 'QCM ' + qLabelOf(blk);
+  });
+}
+
 function buildOutline() {
   // L'état des flèches ▲/▼ dépend de la position des blocs : on le rafraîchit
   // ici plutôt qu'à chaque site d'appel, pour qu'un futur appelant ne puisse
   // pas l'oublier (buildOutline tourne après tout changement de structure).
   refreshMoveButtons();
+  renumberBlocks();
   const nav = document.getElementById('outline-nav');
   if (!nav) return;
   // Préserver l'état (sections ouvertes ou fermées) avant rebuild.
@@ -2462,6 +4023,68 @@ if (firstQ) pvSelect(pvQOf(firstQ), {scrollPreview: false});
 document.getElementById('save-btn').addEventListener('click', function () {
   saveBlocks(dirtyBlocks());
 });
+// === Documents de publication (sujet vierge / corrigé) =====================
+// Recompilés à chaque demande : servir le dernier fichier produit ferait
+// partir un corrigé périmé chez les étudiants sans que rien ne le signale.
+(function () {
+  const btn = document.getElementById('pubMenuBtn');
+  const dd = document.getElementById('pubDropdown');
+  if (!btn || !dd) return;
+
+  function close() { dd.hidden = true; btn.setAttribute('aria-expanded', 'false'); }
+
+  // Le panneau est bien plus large que son bouton et la toolbar se replie :
+  // on l'ouvre aligné à gauche, puis on le ramène dans la fenêtre. Un ancrage
+  // fixe sortait de l'écran d'un côté ou de l'autre selon la largeur.
+  function open() {
+    dd.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    dd.style.left = '0px';
+    const r = dd.getBoundingClientRect();
+    let shift = Math.min(0, (window.innerWidth - 8) - r.right);
+    if (r.left + shift < 8) shift = 8 - r.left;
+    dd.style.left = Math.round(shift) + 'px';
+  }
+
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    dd.hidden ? open() : close();
+  });
+  document.addEventListener('click', function (e) {
+    if (!dd.hidden && !dd.contains(e.target) && e.target !== btn) close();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !dd.hidden) close();
+  });
+
+  dd.addEventListener('click', async function (e) {
+    const kind = e.target.closest('[data-pub]')?.dataset.pub;
+    if (!kind) return;
+    close();
+    const label = kind === 'corrige' ? 'corrigé' : 'sujet vierge';
+    setStatus('Production du ' + label + '…', 'pending');
+    let j = {};
+    try {
+      const r = await fetch('/api/sujet/publication', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kind: kind})
+      });
+      j = await r.json().catch(() => ({}));
+    } catch (err) {
+      setStatus('Production impossible (erreur réseau).', 'err');
+      return;
+    }
+    if (!j.ok) {
+      setStatus('Échec : ' + label + ' non produit.', 'err', j.log || j.error || '(pas de log)');
+      return;
+    }
+    // Les avertissements (feuille conservée, réponses mélangées) sont affichés,
+    // pas avalés : ce document part chez les étudiants.
+    setStatus(j.log || (label + ' produit ✓'), 'ok');
+    window.open(j.url, '_blank', 'noopener');
+  });
+})();
+
 document.getElementById('compile-btn').addEventListener('click', compileWithGuard);
 updateSaveBtn();
 
@@ -2823,10 +4446,42 @@ let AMCxBankSave = null;
       ins.type = 'button';
       ins.className = 'btn btn-add bank-card-insert';
       ins.textContent = '+ Insérer';
-      ins.addEventListener('click', (e) => { e.stopPropagation(); importFromBank(it.bank_id); });
+      // ⚠ C'est la variante CHOISIE qu'on insère, pas la question de la carte.
+      // La banque ne montre qu'un représentant par groupe ; sans ce choix, on
+      // insérerait toujours celui-là et les autres formulations seraient
+      // stockées pour rien.
+      ins.addEventListener('click', (e) => {
+        e.stopPropagation(); importFromBank(card.dataset.pickId || it.bank_id);
+      });
       head.appendChild(ins);
 
       card.appendChild(head);
+
+      const group = [it].concat(it.variants || []);
+      if (group.length > 1) {
+        const vbar = document.createElement('div');
+        vbar.className = 'bank-card-variants';
+        const lab = document.createElement('span');
+        lab.className = 'bank-card-vlabel';
+        lab.textContent = '\u{1F500} ' + group.length + ' variantes :';
+        vbar.appendChild(lab);
+        group.forEach((m, i) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'bank-var-chip' + (i === 0 ? ' is-picked' : '');
+          b.textContent = m.title || '(sans titre)';   // titre non fiable → textContent
+          b.title = m.title || '';
+          b.addEventListener('click', (e) => {
+            e.stopPropagation();
+            card.dataset.pickId = m.bank_id;
+            vbar.querySelectorAll('.bank-var-chip').forEach(x => x.classList.remove('is-picked'));
+            b.classList.add('is-picked');
+            previewBankCard(m.bank_id);
+          });
+          vbar.appendChild(b);
+        });
+        card.appendChild(vbar);
+      }
 
       const meta = document.createElement('div');
       meta.className = 'bank-card-meta';
@@ -2876,8 +4531,8 @@ let AMCxBankSave = null;
       del.addEventListener('click', (e) => { e.stopPropagation(); deleteFromBank(it.bank_id, it.title); });
       card.appendChild(del);
 
-      card.addEventListener('mouseenter', () => previewBankCard(it.bank_id));
-      card.addEventListener('focus', () => previewBankCard(it.bank_id));
+      card.addEventListener('mouseenter', () => previewBankCard(card.dataset.pickId || it.bank_id));
+      card.addEventListener('focus', () => previewBankCard(card.dataset.pickId || it.bank_id));
 
       host.appendChild(card);
     });
@@ -3150,7 +4805,9 @@ let AMCxBankSave = null;
       if (!r.ok || !j.ok) { setStatus('Échec import : ' + (j.error || 'erreur'), 'err'); return; }
       closeBankModal();
       setStatus('Question importée ✓ — rechargement…', 'ok');
-      reloadPage();
+      // `reloadPage` lève le garde-fou `beforeunload` : sans cette invite, les
+      // blocs modifiés non enregistrés seraient jetés en silence.
+      if (await ensureSavedBeforeReload()) reloadPage();
     } catch (e) {
       setStatus('Erreur réseau : ' + e, 'err');
     }
@@ -3546,7 +5203,7 @@ let AMCxBankSave = null;
         }
         _closeAi();
         setStatus(blocks.length + ' question(s) ajoutée(s) ✓ — rechargement…', 'ok');
-        reloadPage(250);
+        if (await ensureSavedBeforeReload()) reloadPage(250);
       } else {
         // action=edit : remplace via /api/sujet/blocks/update
         const r = await fetch('/api/sujet/blocks/update', {
@@ -3561,7 +5218,7 @@ let AMCxBankSave = null;
         }
         _closeAi();
         setStatus('Modification appliquée ✓ — rechargement…', 'ok');
-        reloadPage(250);
+        if (await ensureSavedBeforeReload()) reloadPage(250);
       }
     } catch (e) {
       errEl.textContent = '✘ ' + e;

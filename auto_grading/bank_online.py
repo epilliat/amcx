@@ -412,7 +412,12 @@ def _question_to_row(question: dict) -> dict:
             "author", "author_institution", "author_profile",
             # Affectations : table de jonction `question_categories`, pas une
             # colonne. Les laisser passer ferait échouer l'insert en PGRST204.
-            "categories", "question_categories"}
+            "categories", "question_categories",
+            # ⚠ Les variantes ne sont pas encore au schéma en ligne (les
+            # routes y répondent 501). `bank.from_block` pose pourtant
+            # `variant_of` sur TOUTE question locale : sans ce filtre, migrer
+            # une banque locale échouerait en PGRST204 sur la 1re question.
+            "variant_of"}
     return {k: v for k, v in question.items() if k not in skip}
 
 

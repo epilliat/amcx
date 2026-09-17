@@ -1290,6 +1290,30 @@ def compute_copy_baseline(ratios_all: list[float]) -> float:
     return s[len(s) // 2]
 
 
+def decide_cell(proba, e2: bool, masked_ratio: float):
+    """Décision finale d'une case → `(cochée, proba_publiée, mesure_masquée_absente)`.
+
+    `proba` = sortie du GBM (None s'il n'y a pas de modèle), `e2` = verdict du
+    seuil adaptatif sur la mesure relative au papier, `masked_ratio` =
+    `masked_ratio_e5` (NaN si la mesure masquée n'a pas abouti).
+
+    ⚠ **Sans mesure masquée, le GBM est hors de son domaine.** Il a été
+    entraîné avec ces 5 features toujours présentes ; sur une ligne où elles
+    manquent, sa probabilité s'effondre vers une constante (~0,42 mesuré) —
+    donc « non cochée », quelle que soit la noirceur de la case. La panne est
+    silencieuse : une case noircie à 97 % était lue vide sans le moindre
+    signalement. On rend alors la main au seuil, qui ne dépend que de la mesure
+    brute, et la case n'est signalée que si le verdict en change — signaler les
+    autres remplirait la file de relecture pour rien.
+    """
+    if proba is None:
+        return e2, None, False                    # pas de modèle : seuil seul
+    e3 = proba >= 0.5
+    if masked_ratio != masked_ratio:              # NaN
+        return e2, None, e3 != e2
+    return e3, proba, False
+
+
 def grade_image(image_path: Path | None = None, debug: bool = False,
                 shrink: float = 0.18, adaptive: bool = True, refine: bool = True,
                 *, gray: "np.ndarray | None" = None,
@@ -1404,6 +1428,13 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
                       f"(disponibles={available}) → repli sur copie 1")
             copy_id = 1
             copy_src = "default"
+    # ⚠ La référence masquée dépend de la COPIE : sa page dans le PDF compilé
+    # (`pdf_page`) et, avec plusieurs versions, la géométrie même de la feuille.
+    # Chargée avant l'identification de la copie, elle décrivait la feuille de la
+    # copie 1 — masque d'encre à côté des cases, mesure masquée en bruit. Le
+    # cache est indexé par la géométrie : les copies d'une même version se
+    # partagent le rendu, il n'y a donc pas un rendu de PDF par copie scannée.
+    ref_img, ref_frames = _reference(sheet_page)
     if debug and page_code is not None:
         print(f"  code imprimé : copie {page_code[0]}, page {page_code[1]}")
 
@@ -1486,7 +1517,7 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
         for b, _r in q_boxes:
             if ref_img is not None:
                 mfeats[b.char] = masked_detect.masked_features(
-                    warped, ref_img, b, ref_frames.get((q, b.answer)), off_q)
+                    warped, ref_img, b, ref_frames.get((q, b.char)), off_q)
             else:
                 mfeats[b.char] = {k: float("nan") for k in MASKED_FEATURE_COLS}
         q_data[q] = {"q_boxes": q_boxes, "ratios": ratios, "t_q": t_q,
@@ -1526,22 +1557,18 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
             # → repère les marques pâles que E2/E3 ratent ensemble.
             e1 = (mr > MASKED_INK_ABS) if mr == mr else None
             e2 = ratios_rel[k] > t_q_rel                  # estimateur seuil brut (relatif papier)
-            if clf_bundle is not None:
-                proba = proba_by_cell[(q, b.char)]
-                e3 = proba >= 0.5                         # décision GBM (finale)
-            else:
-                proba = None
-                e3 = e2                                   # repli pur seuil
+            proba = proba_by_cell.get((q, b.char)) if clf_bundle is not None else None
+            e3, proba, no_masked = decide_cell(proba, e2, mr)
             if e3 != e2:
                 ml_overrides += 1
             if e3:
                 sel.append(b.char)
-            cells.append((b, r, mf, e1, e2, e3, proba))
+            cells.append((b, r, mf, e1, e2, e3, proba, no_masked))
         answers[q] = sel
         confidences[q] = {b.char: round(r, 3) for b, r in q_boxes}
 
         # --- flagging : on signale toute case où les estimateurs divergent ---
-        for b, r, mf, e1, e2, e3, proba in cells:
+        for b, r, mf, e1, e2, e3, proba, no_masked in cells:
             n_cells += 1
             if mf["frame_detected"] == 0.0:
                 n_frame_fail += 1
@@ -1551,6 +1578,8 @@ def grade_image(image_path: Path | None = None, debug: bool = False,
                 reasons.append("disagree")          # E1/E2/E3 divergent
             if proba is not None and 0.30 <= proba <= 0.70:
                 reasons.append("uncertain")         # GBM peu sûr (E4)
+            if no_masked:
+                reasons.append("no_masked")         # mesure masquée indisponible
             if reasons:
                 mr = mf["masked_ratio_e5"]
                 ambiguous.append({

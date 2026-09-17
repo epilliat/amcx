@@ -73,6 +73,8 @@ besoin** — c'est ce qui rend l'installation possible sur un Windows nu — pui
 | `amcx doctor` | délègue à [doctor.py](auto_grading/doctor.py) |
 | `amcx update` | détecte le mode d'installation et lance la bonne commande |
 | `amcx where` | chemins du code, des projets, de la config |
+| `amcx results` | notes de l'examen (`--project P`, `--json`) — cf. *exam_results.py* |
+| `amcx cohort` | notes agrégées d'un ensemble (`--dir D`, `--json`) — cf. *Vue d'ensemble* |
 
 **Détection du mode d'installation** (`cli.install_kind()`) : par
 **fichier-marqueur** à la racine de l'environnement — `uv-receipt.toml` (uv),
@@ -171,6 +173,10 @@ un échange de mails. Routes : `GET /diagnostic` (page), `GET /api/doctor` (JSON
      single + 1 QCM mult + 1 ouverte).
    - **Importer un fichier AMC** : upload d'un `.tex` existant → copié dans
      `sujet/exam.tex` → migration auto vers le mode canonique (best-effort).
+     Gère les sujets **à groupes** (une version par `\exemplaire`, cf.
+     *Versions du sujet*). Une migration qui ne comprend pas le sujet est
+     **refusée** : le projet est créé, le sujet reste en lecture seule et
+     l'écran affiche pourquoi — plutôt qu'un sujet vide au barème nul.
 4. Le nom du projet → dossier créé sous `~/Documents/AMCx/<nom>/`.
 5. Le serveur **redémarre** pour basculer sur le nouveau projet.
 
@@ -223,7 +229,46 @@ actif + actions (Ouvrir, Créer, Récents, Oublier). Routes API :
 - `GET /api/projects` → `{active, active_name, recent, default_root}`
 - `POST /api/projects/open` → `{path}` → restart sur le nouveau projet
 - `POST /api/projects/forget` → `{path}` → retire des récents (ne touche pas le disque)
-- `POST /api/projects/create` → `{name, template, file?}` → crée puis restart
+- `POST /api/projects/create` → `{name, template, parent?, file?}` → crée puis restart
+- `GET /api/projects/browse?path=` → `{path, display, parent, at_root, dirs}` —
+  sous-dossiers, pour le sélecteur de dossier de la modale « Nouveau projet »
+- `POST /api/projects/mkdir` → `{parent, name}` → crée un sous-dossier
+  (bouton **＋ Nouveau dossier** du sélecteur) et y entre
+
+⚠ **Créer ou ouvrir un projet se termine par un suicide du serveur**, donc
+l'échec du transport ne dit rien du résultat. `_restart_after_response()`
+accroche le redémarrage à `response.call_on_close` (le corps a été remis au
+serveur WSGI) plutôt qu'à un `sleep(0.2)` lancé avant de répondre — sans ça la
+connexion était coupée avant l'arrivée du corps sur une création un peu longue,
+et le navigateur affichait « Erreur réseau » alors que le projet existait. Le
+front ne conclut plus à l'échec sans vérifier : sur erreur réseau il attend le
+retour du serveur et compare le projet actif au nom demandé.
+
+**Où est créé un projet** : champ « Dossier parent » de la modale, par défaut
+`~/Documents/AMCx`, avec un bouton **📁 Parcourir**.
+
+⚠ **Le sélecteur est borné au dossier personnel** (`project_state.browse_root`),
+le champ texte non. Le serveur n'a aucune authentification et `--host` permet
+de l'exposer : une route qui énumère n'importe quel dossier de la machine
+serait une primitive de reconnaissance offerte à qui l'atteint. Le champ libre,
+lui, ne révèle rien — il faut déjà connaître le chemin qu'on y tape. Les
+tentatives de sortie (`/etc`, `~/../..`) répondent **403**.
+
+⚠ **Lecture et écriture partagent le même contrôle de borne**
+(`project_state.check_under_browse_root`, appelé par `list_subdirs` *et* par
+`make_subdir`) : deux contrôles séparés finiraient par diverger, et c'est celui
+de l'écriture qui coûterait cher. Le nom d'un dossier créé passe par la même
+règle qu'un nom de projet — il peut en devenir un — donc `..` et `a/b` sont
+refusés avant tout accès disque.
+
+⚠ **Le nom de projet est validé par liste noire**, pas blanche
+(`project_state.project_name_error`) : l'ancienne règle n'acceptait que
+`[A-Za-z0-9_-. ]`, donc « Régression » était refusé avec un message annonçant
+« lettres », qui ne disait pas pourquoi. On n'interdit que ce qui casse un
+chemin — séparateurs, caractères interdits sous Windows, `.`/`..`, point ou
+espace final (Windows les retire en silence, le dossier ne porterait pas le nom
+affiché) et les noms de périphérique réservés (`CON`, `NUL.txt`…). Le JS ne
+duplique que les cas courants, la règle qui fait foi est côté serveur.
 - `GET /api/templates` → liste des templates dans `auto_grading/templates/`
 
 ## Statut (examen de test EXAM_2026)
@@ -246,7 +291,7 @@ PDFs → pages/            (extract_pages.py — PyMuPDF, 300 dpi)
      → students.csv      (batch_run.py --cache-only)  ou  /export.csv (UI)
 ```
 
-**Section « 📁 Fichiers du projet » en haut du dashboard** : 2 cartes
+**Section « 📁 Fichiers du projet » en haut de l'onglet Évaluation** : 2 cartes
 côte-à-côte (PDFs scannés à gauche + xlsx étudiants à droite) avec :
 - noms de fichiers, nb pages, taille, date
 - stats agrégées (📥 extraites · ⚙ corrigées · ✓ validées · 👥 étudiants)
@@ -337,7 +382,50 @@ L'UI lit/écrit là. **Ne jamais écraser les `answers` de ces fichiers** — c'
 - **Flagging multi-estimateurs (« levier 2 »)** — une case est `douteuse` ssi au moins un :
   - **E1** masked_ratio_e5 > 0.12 (seuil ABSOLU, indépendant de la calibration GBM) ≠ E2 (shrink vs seuil adaptatif) ≠ E3 (GBM) ;
   - **E4** `predict_proba` ∈ [0.30, 0.70] (GBM peu sûr).
-- Sortie → `_ambiguous_cells` (liste de dicts `{q, char, decision, ratio, masked, proba, reasons}`) écrite directement dans le JSON (cv_grade et seed_raw_responses la propagent ; l'UI l'affiche en magenta).
+- Sortie → `_ambiguous_cells` (liste de dicts `{q, char, decision, ratio, masked, proba, reasons}`) écrite directement dans le JSON (cv_grade et seed_raw_responses la propagent ; l'UI la signale par un `?` orange).
+
+#### ⚠ La référence masquée décrit UNE COPIE — pas « le sujet »
+
+Deux défauts corrigés ensemble, tous deux **silencieux**, tous deux mesurés sur
+un lot réel (39 pages, sujet à 2 versions, `shuffle_answers` actif) :
+
+- **`ref_frames` était indexé par `(question, answer)`.** `answer` est l'ordre
+  de déclaration LaTeX : il est **permuté d'une copie à l'autre**, alors que la
+  case `A` de la question 1 est toujours au même pixel de la feuille. Dès que la
+  copie scannée n'était pas la copie 1, la table rendait donc le cadre d'une
+  **autre case** (jusqu'à 300 px plus loin) : le masque d'encre imprimée tombait
+  à côté, et la mesure masquée devenait du bruit. La clé est désormais
+  **`(question, char)`**, stable d'une copie à l'autre.
+- **`render_reference` rendait la page `page` du PDF**, alors que le calage
+  numérote les pages *par copie* (piège de `Layout.pdf_page`) : la feuille de la
+  **première version** servait de référence à toutes les copies, y compris à
+  celles d'une version dont les cases ne sont pas aux mêmes ordonnées.
+
+Mesure avant/après sur ce lot : **23 cases pourtant noircies à plus de 50 %
+étaient lues « non cochées »** (dont les 6 que l'utilisateur avait corrigées à la
+main sur une copie) → **0** ; **27 % des cases vides** dépassaient le seuil
+d'encre E1, donc signalées « douteuses » pour rien → **1 %** ; signalements de la
+file : **175 → 5**. Le p99 du `masked_ratio_e5` des cases vides passe de 0,251 à
+0,055, pour un minimum de 0,468 chez les cases noircies : le seuil E1 à 0,12
+redevient un seuil, et n'a **pas** eu besoin d'être touché.
+
+⚠ **Le cache de `get_reference` est indexé par la GÉOMÉTRIE de la feuille**
+(`masked_detect.sheet_signature`), pas par le numéro de copie : deux copies
+d'une même version ont des feuilles identiques au pixel près et doivent
+partager le rendu — sinon on re-rend une page de PDF 300 dpi par copie
+corrigée. Deux versions ont deux références. Coût mesuré : +2 % par page.
+
+⚠ **`grade_image` charge la référence APRÈS avoir identifié la copie.** Chargée
+avant (elle sert aussi d'amorce au recalage sans mires), elle décrit la copie 1.
+
+⚠ **Sans mesure masquée, le GBM ne décide plus** (`cv_grade.decide_cell`). Il a
+été entraîné avec ces 5 features toujours présentes ; sur une ligne où elles
+manquent, sa probabilité s'effondre vers une constante (~0,42 mesuré) — donc
+« non cochée », quelle que soit la noirceur de la case. La main revient au seuil
+adaptatif, qui ne dépend que de la mesure brute, et la case n'est signalée
+(`no_masked`) que si le verdict en change : signaler toutes les autres
+remplirait la file. Sans ce garde-fou, une panne de la mesure masquée fait
+disparaître des réponses sans rien afficher.
 
 ⚠ **E6 (structurel : question `single` avec ≠ 1 case cochée) n'est PLUS écrit
 par `cv_grade`** — il est recalculé à l'affichage par
@@ -481,25 +569,306 @@ Détecte si une case est cochée à partir de **23 features** :
 - **`amc_dir`** (dossier de l'examen : PDF des copies, `data/` AMC éventuel), `scan_pdfs` (liste explicite de PDF, sinon auto-découverte), `answer_sheet_page` (0 = dérivée du calage) ;
 - `export_template_xlsx` (modèle xlsx scolarité pour `export_scolarite.py`, "" = aucun) ;
 - `student_xlsx` (liste étudiants, .xlsx ou .csv) et ses colonnes **par index** :
-  `xlsx_id_idx`, `xlsx_nom_idx`, `xlsx_prenom_idx` (-1 = aucune), `xlsx_data_start`
-  (index de la 1re ligne de données). Les anciennes clés `xlsx_*_col`
-  (intitulés) ne servent plus qu'à relire une config antérieure ;
-- `grade_files` (fichiers de notes importés, voir [grade_imports.py](auto_grading/grade_imports.py)) — chaque entrée `{path, join_mode:"id"|"name", join_col:<idx>, data_start:<idx>, grade_cols:[{idx, label, seuil, max, agg_weight}], name_overrides:{<nom brut>:<id|null>}}` (colonnes par **index**, jointure par id ou nom fuzzy) ;
-- `hist_granularity` (largeur d'une barre d'histogramme, en points) ;
-- `qcm_seuil`, `qcm_max`, `qcm_agg_weight` (paramètres de la colonne QCM) ;
-- `final_threshold` (plafond dur de la note finale) ;
-- `pass_mark` (seuil de réussite : ligne verticale sur l'histo final + comptage des copies en dessous).
+  `xlsx_id_idx`, `xlsx_nom_idx`, `xlsx_prenom_idx`, **`xlsx_mail_idx`**
+  (-1 = aucune), `xlsx_data_start` (index de la 1re ligne de données) et
+  **`xlsx_sheet`** (onglet du classeur, `""` = onglet actif — voir le piège
+  plus bas). Les anciennes clés `xlsx_*_col` (intitulés) ne servent plus qu'à
+  relire une config antérieure ;
+- `grade_files` (fichiers de notes importés, voir [grade_imports.py](auto_grading/grade_imports.py)) — chaque entrée `{path, sheet, join_mode:"id"|"name", join_col:<idx>, data_start:<idx>, grade_cols:[{idx, label, seuil, max, agg_weight}], name_overrides:{<nom brut>:<id|null>}}` (colonnes par **index**, jointure par id ou nom fuzzy ; `sheet` = onglet du classeur, `""` = onglet actif) ;
+- ⚠ **Les cinq clés suivantes ne sont plus lues au niveau d'un examen** (cf.
+  *Onglet Évaluation*) : elles sont conservées telles quelles et serviront au
+  niveau qui rassemble plusieurs examens. Les effacer casserait les config déjà
+  écrites, et les appliquer en silence changerait la note :
+  - `hist_granularity` (largeur d'une barre d'histogramme, en points) ;
+  - `qcm_seuil` (**normalisation** du QCM ; `null` = auto), `qcm_max`, `qcm_agg_weight` ;
+  - `final_threshold` (plafond dur de la note agrégée) ;
+  - `pass_mark` (seuil de réussite).
+- `question_floor` / `question_ceiling` / `total_floor` / `show_score_range` :
+  règles de **barème**, appliquées par `score.py` à chaque calcul. Réglées dans
+  l'onglet **Sujet** (bandeau *Réglages globaux* → *Barème*).
 
-Importé par `student_list.py` (roster), `grade_imports.py` (notes importées) et `front/server.py`. Modifiable via l'UI (dashboard ⚙ + boutons « Liste étudiants » / « Fichiers de notes »).
+Importé par `student_list.py` (roster), `grade_imports.py` (notes importées) et `front/server.py`. Modifiable via l'UI (onglet Évaluation : « Liste étudiants » ; onglet Sujet : plancher/plafond du barème).
 
-**Dashboard — 2 histogrammes + formule.** Chaque colonne de note (QCM + importées) a `seuil`, `max`, `agg_weight`. Rescaling : `note* = note × max ∕ seuil`.
-- Histogramme du haut (calibration) : `note*` superposées, **non plafonnées** ; granularité = largeur de barre.
-- Histogramme du bas : note finale = `min( Σ(agg_weightᵢ·noteᵢ*) ∕ Σ agg_weightᵢ , final_threshold )` — moyenne pondérée des `note*` (non plafonnées dans la moyenne), plafond dur appliqué **seulement** sur le résultat.
-- La formule est affichée en bas du dashboard (à donner aux étudiants).
-- **Nuage de points** : corrélation (Pearson) entre deux notes choisies par l'utilisateur ; survol d'un point → nom de l'étudiant.
-- Réglages : « Appliquer » ou **Entrée** dans un champ recalcule tout. Bouton **Sauvegarder le compte rendu** → `/api/save-report` (dossier `compte_rendu/`).
+### ⚠ La normalisation par défaut est le barème du sujet, pas une constante
+
+Le diviseur du rescaling s'appelle **normalisation** dans l'interface. La clé de
+stockage garde son nom historique (`qcm_seuil`, et `seuil` dans
+`grade_files[*].grade_cols[*]`) : la renommer casserait les config.json déjà
+écrites — mais plus aucun libellé ne dit « seuil » pour ce paramètre, qui se
+confondait avec le *seuil de réussite* et le *plafond* de la note finale.
+
+`config.DEFAULTS["qcm_seuil"] = None` = **auto**, résolu au barème maximal du
+sujet (`sujet_store.subject_total_max()`, une copie par **version** — deux
+versions inégales prennent la plus haute, car un diviseur unique ne peut pas
+sous-noter une version entière). Avant, il était figé par le gabarit : 32 dans
+`DEFAULTS` (câblé sur EXAM_2026) et **10** dans `new_project.CONFIG_TEMPLATE`.
+Sur un sujet qui vaut 5 points, toute la promo était donc divisée par 10 — un
+QCM parfait affichait 10/20 — **sans que rien ne le signale**.
+
+⚠ `config._migrate_qcm_seuil()` ramène ces deux valeurs à « auto » à la lecture
+(in-memory, comme `_migrate_banks`). Elle ne peut pas faire de dégât : quand le
+placeholder coïncide avec le barème réel, « auto » rend exactement le même
+nombre — le seul cas où elle change quelque chose est celui où il ne le
+décrivait pas.
+
+⚠ **Ces clés ne sont plus lues au niveau d'un examen** (cf. *Onglet Évaluation*
+ci-dessous) : elles restent en config, et serviront au niveau qui compare
+plusieurs examens.
+
+## Onglet Évaluation (`/`) — UN examen, aucun réglage
+
+L'ex-« Dashboard ». Il porte le nom de ce qu'il décrit : **une** évaluation,
+celle dont le sujet est dans l'onglet d'à côté.
+
+⚠ **La note d'un examen est son score BRUT sur le barème du sujet.** Il n'y a
+aucun curseur, aucune normalisation, aucun plafond, aucune pondération.
+Seuiller (« 30 points suffisent pour tout avoir ») et ramener sur une autre
+échelle (« sur 20 ») ne servent qu'à *comparer ou agréger* cet examen avec
+autre chose — c'est le travail du niveau au-dessus, pas de cette page. Les deux
+histogrammes, le nuage de points, la formule et l'import de fichiers de notes
+sont partis pour la même raison : ils décrivent un **ensemble** d'examens.
+
+Ce que la page garde : la carte « Fichiers du projet », la liste des copies
+(score brut), la distribution de la note brute sur une ligne, le bouton
+« compte rendu », et le **score moyen par question** — la seule mesure qui
+parle de cet examen-là.
+
+- `server.exam_columns()` / `exam_threshold()` : l'unique colonne de note, sur
+  le barème. ⚠ On garde la forme « liste de colonnes » que consomme
+  `compute_aggregate` — un examen en est le cas **N = 1**, où le rescaling se
+  réduit à l'identité. **Une seule implémentation de la note**, servie à la
+  page, à `/export.csv`, au `compte_rendu/notes.csv` et aux courriels ; deux
+  auraient fini par annoncer deux notes.
+- ⚠ **Le score moyen par question vient de `server.question_stats()`**, la même
+  fonction que l'onglet Questions (`/api/questions/stats` n'en est que
+  l'emballage JSON). L'évaluation n'en affiche que `mean_raw`, en points.
+- ⚠ **`legacy_grade_settings()` dit ce qui a changé, et seulement si ça a
+  changé.** Un projet antérieur porte `qcm_max = 20` : sa note passe de
+  `brut × 20 ∕ barème` au brut, et ce nombre part à la scolarité. Le critère
+  est donc **la note, pas la présence d'une clé** : l'ancienne formule
+  `min(brut × max ∕ normalisation, plafond)` est identique à la nouvelle tant
+  que `max = normalisation` et que le plafond ne mord pas sur le barème.
+  Mesuré sur les projets réels : « 5 sur 5, plafond 20 » sur un sujet qui vaut
+  5 ne signale **rien** (c'est le cas courant), « ramené sur 20 à partir de 33 »
+  en signale deux. Un bandeau qui crie pour rien est un bandeau qu'on apprend à
+  ignorer.
+
+⚠ **Plancher/plafond par question et plancher global ont déménagé dans l'onglet
+Sujet** (bandeau *Réglages globaux* → *Barème*, avec « afficher la fourchette
+sur le sujet »). Ils changent le **score** — `score.py` les applique à chaque
+calcul —, donc les retirer du tableau de bord sans les remettre ailleurs aurait
+laissé un projet avec un plancher actif et aucune commande pour le voir. Leur
+place est auprès du barème, pas auprès d'une page qui ne règle plus rien. Ils
+s'écrivent toujours dans le `config.json` du projet (`POST /api/config`, pas
+`/api/sujet/config`) : `score.py` les relit sur le mtime du fichier.
+
+### [grades_view.py](auto_grading/grades_view.py) — les notes, sans projet actif
+
+Colonnes, rescaling, agrégation, histogrammes, nuage de points, bornes de
+curseurs : **logique pure**, zéro I/O, zéro état global. Tout ce qui dépend du
+sujet (barème, points d'une question) entre par **paramètre** — c'est ce qui
+permettra au même code de servir un ensemble d'examens sans une seconde
+implémentation. `server.py` n'en importe plus que `SERIES_COLORS`,
+`series_stats` et `compute_aggregate` ; le reste attend le niveau au-dessus.
+
+Le rescaling qu'il porte : `note* = note × max ∕ normalisation`, note finale
+`min( Σ(agg_weightᵢ·noteᵢ*) ∕ Σ agg_weightᵢ , final_threshold )`.
+
+⚠ **Les routes `/api/grade-file*` et `build_grade_files_info()` sont
+conservées** alors que plus aucune page ne les appelle : elles sont l'API des
+notes importées, que le niveau au-dessus consommera telle quelle.
+
+### [exam_results.py](auto_grading/exam_results.py) — la table des résultats, une seule fois
+
+Une ligne par étudiant, absents compris, triée par nom. **Pure** : les copies,
+les absents et la note entrent par paramètre, `note_of(copy)` étant fourni par
+l'appelant (`server.exam_columns()` + `compute_aggregate`) — ce module ne
+décide pas de la note, une seconde définition ici finirait par contredire la
+première.
+
+⚠ `/export.csv` et `compte_rendu/notes.csv` la bâtissaient **chacun de leur
+côté** : deux tris, deux façons de marquer un absent, deux jeux de colonnes,
+pour deux fichiers censés dire la même chose. `server.exam_rows()` est
+désormais l'unique construction. Vérifié sur un projet réel : le `notes.csv`
+régénéré est **identique au caractère près** à celui qu'écrivait l'ancien code.
+
+⚠ **`ABSENT_MARK` n'est plus déclaré qu'ici.** Il l'était trois fois — serveur,
+[export_scolarite.py](auto_grading/export_scolarite.py),
+[mail_results.py](auto_grading/mail_results.py) — chaque copie renvoyant aux
+deux autres en commentaire.
+
+⚠ Les intitulés `note_sur_32` / `QCM_brut_sur_32` gardent leurs noms : 32 était
+le barème d'EXAM_2026, pas une constante, mais des scripts de la scolarité et
+l'onglet Courriels (`mail_score_col`) les lisent.
+
+#### Lire un projet sans serveur — `amcx results`
+
+```sh
+amcx results                                   # projet actif, lisible
+amcx results --json                            # pour un autre programme
+amcx results --project ~/Documents/AMCx/QCM1 --json
+```
+
+C'est le point d'entrée qu'un niveau supérieur (plusieurs examens d'un même
+dossier) appellera **en sous-processus**, un par projet.
+
+⚠ **Un process = un projet.** `config`, `sujet_store` et `server` figent leurs
+chemins **à l'import** : lire deux projets dans le même process donnerait le
+sujet de l'un et les copies de l'autre, en silence. `--project` re-exécute donc
+le script avec `AMCX_PROJECT_DIR` posé. **Mesuré** : import de `server` 0,3 s
+(Flask n'est pas démarré), lecture de 38 copies 0,09 s, **3 projets lus en
+parallèle en 0,56 s** — c'est ce qui rend inutile le refactor « passer
+`project_root` partout ».
+
+⚠ L'argv de la ré-exécution est **reconstruit**, pas recopié de `sys.argv` :
+appelé par `amcx results`, celui-ci porte le mot « results » que le script ne
+connaît pas.
+
+⚠ **Un dossier qui n'est pas un projet le dit** (`ResultsError`, code de sortie
+2). Avant le contrôle, un mauvais chemin rendait « 0 copie, barème 0 » avec un
+code 0, et un chemin inexistant retombait sur le dossier d'installation : un
+examen vide se serait glissé dans un relevé d'ensemble sans que rien ne le
+signale. `resolve_project()` accepte le dossier du projet **ou** son
+sous-dossier `auto_grading/` — c'est ce dernier que rend
+`new_project.create_project()` et que pointe `~/.config/amcx/active_project`,
+alors qu'on nomme « projet » le dossier parent. La règle est déterministe et le
+chemin réellement lu est rendu dans la sortie (`path`).
 
 L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent jamais `raw_responses/`.
+
+
+## Vue d'ensemble (`/cohorte`) — plusieurs examens d'un même dossier
+
+Un **ensemble** est un dossier qui contient un `cohorte.json` et, à côté, les
+projets AMCx des examens qu'il rassemble :
+
+```
+L3-2026/
+  cohorte.json
+  QCM1/          ← un projet AMCx
+  rattrapage/    ← un autre
+  compte_rendu/  ← notes.csv + mail_log.csv de l'ENSEMBLE
+```
+
+C'est le niveau où « seuiller à 30 » et « ramener sur 20 » ont un sens : un
+examen seul se lit sur son propre barème (cf. *Onglet Évaluation*), comparer ou
+agréger demande une échelle commune. Moteur : [cohort.py](auto_grading/cohort.py),
+page `/cohorte`, ligne de commande `amcx cohort --dir D [--json]`.
+
+⚠ **Changer d'ensemble ne redémarre PAS le serveur**, contrairement à changer de
+projet : un ensemble lit ses examens par sous-processus, il ne fige aucun chemin
+dans le process courant. Le pointeur vit dans `~/.config/amcx/active_cohort`
+(env `AMCX_COHORT_DIR` prioritaire).
+
+### La note d'une colonne — le plafond s'applique AVANT la moyenne
+
+`note* = min(brut ∕ normalisation, 1) × échelle`, dans `grades_view.rescale`.
+La normalisation est **le score qui vaut tout** : seuiller à 30 un examen qui en
+vaut 31 donne 20/20 à qui obtient 30, et au-delà on ne gagne plus rien. Par
+défaut, normalisation = échelle = **barème de l'examen**, donc `note* = brut`.
+
+⚠ **Ce plafond est par colonne, pas seulement sur la note finale.** C'est une
+promesse faite aux étudiants (« 30 points suffisent »), pas un crédit
+transférable sur une autre note. Mesuré sur un QCM de 31 points seuillé à 30 et
+ramené sur 20, plus un projet à 14/20 de poids égal : **17,0** avec le plafond
+par colonne, **17,33** sans.
+
+⚠ **Pas de plancher ici** : une note brute peut être négative (`mult = Σ b/m`),
+et l'écraser à 0 fausserait les moyennes. Le plancher à 0 est une décision
+d'affichage, prise au moment d'annoncer la note (`mail_results`, `--no-floor`).
+
+⚠ **Une colonne absente ne compte ni au numérateur ni au dénominateur**
+(`grades_view.weighted_final`) : un étudiant qui n'a passé qu'un examen sur deux
+obtient la note de celui qu'il a passé. C'est la règle du niveau examen depuis
+toujours ; ici elle devient visible, donc elle est **affichée** (« ABS », colonne
+`absent_de`) plutôt que subie.
+
+⚠ **`scale_warnings()` dit ce qui rendrait la moyenne trompeuse** : deux
+colonnes ramenées sur des échelles différentes (un QCM sur 33 et un projet sur
+20, à poids égal) donnent un « /26,5 » que personne n'a demandé. Le niveau
+examen l'évitait en n'ayant qu'une colonne.
+
+### ⚠ Le même étudiant ne porte pas le même identifiant d'un examen à l'autre
+
+Le défaut le plus coûteux trouvé ici, et il ne se voit que sur des données
+réelles. Mesuré sur deux vrais examens : `3017` dans l'un, `13017` dans l'autre
+— **la même personne**, une liste portant le numéro complet et l'autre ses
+quatre derniers chiffres. **36 étudiants sur 39** apparaissaient en double, avec
+la moitié de leurs notes chacun et deux notes finales fausses.
+
+`cohort.identity_map()` rapproche donc un identifiant d'un autre dont il est le
+**suffixe** — la même règle que `StudentMatcher.by_id` pour rattacher une copie
+à sa liste —, à deux conditions vérifiées toutes les deux :
+
+- le rapprochement est **unique** : deux identifiants longs finissant par le
+  même suffixe ⇒ on ne rapproche rien (fondre deux étudiants est pire que d'en
+  afficher un en double) ;
+- les **noms concordent**, ou l'un des deux est inconnu (un examen sans liste
+  rend « ? » et ne doit pas bloquer un rapprochement que le numéro établit).
+
+Ce qui est refusé est **listé** dans `warnings`, jamais tu : c'est la seule
+façon de voir qu'une ligne en double vient d'un numéro ambigu. L'identifiant
+canonique retenu est le plus long, les autres restent visibles (`also_id`).
+
+⚠ Une copie **non reliée** (aucun identifiant) ne peut être recollée à rien d'un
+examen à l'autre : elle est comptée à part, jamais fondue dans une ligne au
+hasard.
+
+### ⚠ Rien n'entre dans la moyenne sans qu'on l'ait demandé
+
+Un projet trouvé dans le dossier mais absent de `cohorte.json` est un
+**candidat**, pas un membre (`cohort.candidates()`) : sans cette règle, un
+dossier d'essai deviendrait une note. La page les propose, un clic les ajoute.
+
+⚠ `load()` **lève** sur un `cohorte.json` corrompu au lieu de repartir des
+défauts : repartir de zéro effacerait la composition de l'ensemble et les
+réglages de note à la première écriture.
+
+### Exports et courriels — les deux niveaux, un seul moteur
+
+- `GET /cohorte/export.csv` : une ligne par étudiant, `<colonne>_brut` et
+  `<colonne>` pour chacune, `note_finale`, `absent_de`.
+  ⚠ **Une cellule vide et un `ABS` ne disent pas la même chose** : `ABS` = cet
+  étudiant était *attendu* à cet examen et n'a pas composé ; vide = cet examen
+  ne le concernait pas. Les confondre ferait passer une promotion entière pour
+  absente à l'examen de l'autre demi-journée.
+- `POST /api/cohorte/report` écrit `<ensemble>/compte_rendu/notes.csv` — **le
+  même fichier**, posé là où les courriels le cherchent, avec les intitulés
+  qu'attend `mail_results.load_recipients` (`id_canonique`, `nom_prenom`,
+  `courriel`, `note_finale`). Pas de second format à maintenir.
+- L'envoi passe par la ligne de commande, et la page **affiche la commande**
+  plutôt que de la deviner :
+
+```sh
+python auto_grading/mail_results.py \
+  --notes "<ensemble>/compte_rendu/notes.csv" \
+  --log   "<ensemble>/compte_rendu/mail_log.csv" \
+  --out-of 20 --send
+```
+
+⚠ **`--log` est indispensable** (option ajoutée pour ça) : le journal du projet
+actif ferait **sauter les étudiants déjà servis pour l'examen** — même adresse,
+autre note. Le journal suit le fichier de notes, il ne le devine pas.
+
+⚠ Le prénom vient du roster du **projet actif** (`load_recipients`) : pour un
+étudiant que ce roster ne connaît pas, le message dit son nom complet. Jamais
+« Dear , ».
+
+### Routes
+
+| Route | Rôle |
+|---|---|
+| `GET /cohorte` | la page (ou l'invite d'ouverture si aucun ensemble actif) |
+| `POST /api/cohorte/open` | `{path, create}` — ⚠ `create` est explicite : poser un `cohorte.json` dans un dossier au hasard n'est pas anodin. Borné au dossier personnel (`check_under_browse_root`) |
+| `POST /api/cohorte/config` | plafond, seuil de réussite, granularité + `columns:[{path, seuil, max, agg_weight}]` |
+| `POST /api/cohorte/exams` | `{path, label}` ajoute · `{path, remove:true}` retire (**aucun fichier supprimé**) |
+| `POST /api/cohorte/report` | écrit `compte_rendu/notes.csv` → `{path, n_rows, command}` |
+| `GET /cohorte/export.csv` | le même tableau, en téléchargement |
+
+⚠ **`null` = « auto »** dans `/api/cohorte/config`, et c'est une valeur : le
+front renvoie `null` (classe `is-off`) et non le nombre affiché, qui figerait
+l'échelle au barème du jour. Même contrat que la normalisation du tableau de
+bord d'origine.
 
 ## Architecture fichiers
 
@@ -521,11 +890,15 @@ auto_grading/
 ├── sujet/                     ← subject.json (SOURCE DE VÉRITÉ) + exam.tex (généré)
 │                                 + DOC-sujet.pdf + exam.xy (calage)
 ├── review_state.py            ← ce qui reste à relire : signalements, état traité, risque (pur)
+├── grades_view.py             ← colonnes de note, rescaling, agrégation, histogrammes (PUR)
+├── exam_results.py            ← table des résultats (1 ligne/étudiant) + `amcx results` (PUR)
+├── cohort.py                  ← ensemble d'examens : membres (sous-processus), colonnes, agrégation
 ├── score.py                   ← applique le barème (single=value/0 ; mult=Σ b/m, peut être négatif)
 ├── student_list.py            ← import de la liste (xlsx/csv, colonnes détectées par contenu)
 │                                 + StudentMatcher : match par le numéro lu (largeur quelconque) puis nom
 ├── grade_imports.py           ← import csv/xlsx de notes externes : auto-détection de structure,
 │                                 jointure par id OU par nom (fuzzy), résolution manuelle des ambigus
+├── mail_results.py / .txt     ← envoi des notes par courriel (onglet Courriels + CLI)
 ├── extract_pages.py           ← PDF → JPEG 300 dpi (PyMuPDF)
 ├── cv_grade.py                ← pipeline OpenCV + GBM : detect_mires, warp, box_fill_ratio,
 │                                 adaptive_threshold, extract_features, load_cell_classifier,
@@ -538,7 +911,7 @@ auto_grading/
 ├── front/
 │   ├── server.py              ← UI Flask (toutes les routes)
 │   ├── seed_raw_responses.py  ← merge CV+AMC → raw_responses/ (--preserve-manual)
-│   ├── templates/             ← base.html + dashboard/zoom/flagged/student/identites/sujet/banque
+│   ├── templates/             ← base.html + evaluation/zoom/flagged/student/identites/sujet/banque
 │   │                            + partials _zoom_grid / _id_grid / _student_card / zoom_fragment
 │   └── static/                ← style.css + vendor/ (KaTeX + marked.js, vendorisés hors-ligne)
 ├── pages/                     ← 173 JPEG (ignorés git ; 1 pub CamScanner écartée)
@@ -586,19 +959,23 @@ pkill -f "front/server.py"
 
 ## UI — routes
 
-**Ordre des onglets** (dans `base.html`) : **Sujet** | Dashboard | **Questions** | Review rapide | Zoom global | Identités | Export CSV.
+**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | Review rapide | Identités | **Courriels** | Export CSV.
 
 | Route | Rôle |
 |---|---|
 | `/sujet` | **Onglet Sujet** : modèle canonique (text/qcm/open) + outline + bandeau global |
-| `/` | **Dashboard** : liste étudiants + fiche + 2 histogrammes + nuage de points |
+| `/` | **Évaluation** : un examen — copies, note brute, score moyen par question. Aucun réglage |
+| `/cohorte` | **Ensemble** : plusieurs examens d'un dossier — colonnes, histogrammes, nuage, formule |
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
 | `/flagged` | **Review rapide** : signalements groupés par question, triés par risque ; `?status=open\|done\|all&sort=risk\|scan` |
 | `/student/<b>/<p>` | Vue copie : image canonique + ronds magenta + zoom embedded |
 | `/student/<b>/<p>/zoom` | Onglets *Réponses* (2 zones) / *Identité* (crop nom + grille ID) |
 | `/identites` | Review finale : copies non reliées ↔ noms, drag&drop |
+| `/mail` | **Onglet Courriels** : gabarit, expéditeur, secret SMTP, envoi des notes |
 | `/sujet/pdf` | PDF du sujet (`sujet/DOC-sujet.pdf`), inline |
+| `/sujet/publication/<kind>.pdf` | Sujet vierge / corrigé à publier (`kind` ∈ `sujet`, `corrige`) |
+| `/api/sujet/publication` | POST `{kind}` → recompile ce document, renvoie `{ok, log, n_pages, url}` |
 | `/diagnostic` | Diagnostic d'installation (à envoyer au support) |
 | `/api/doctor` | GET : mêmes contrôles en JSON `{ok, checks:[{status,label,detail}]}` |
 | `/sujet/region/<q>.png` | crop PNG de la région d'une question (aperçu) |
@@ -612,6 +989,7 @@ pkill -f "front/server.py"
 | `/api/sujet/header` | POST patch (canonique seul, refus legacy = 409) |
 | `/api/sujet/answer-sheet` | POST patch (canonique seul) |
 | `/api/sujet/regenerate-seed` | POST → nouveau seed aléatoire |
+| `/api/sujet/versions/update` | POST `{vid, name?, num_copies?, header?}` → plages de copies recalculées (cf. *Versions du sujet*) |
 | `/api/sujet/blocks/add` | POST `{kind, after_bid?, data?}` → `{bid}` |
 | `/api/sujet/blocks/delete` | POST `{bid}` |
 | `/api/sujet/blocks/move` | POST `{bid, after_bid|null}` |
@@ -627,15 +1005,16 @@ pkill -f "front/server.py"
 | `/api/set-id-digit` | fixe un chiffre du numéro étudiant |
 | `/api/assign-student` | assigne/retire un étudiant |
 | `/api/mark_validated` | flag `validated` = **copie relue en entier** ; `{value:false}` pour l'enlever |
-| `/api/config` | GET/POST config dashboard |
+| `/api/config` | GET/POST config du projet (barème : plancher/plafond, fourchette) |
 | `/api/upload-xlsx` | POST fichier (.xlsx/.csv) → analyse : colonnes, aperçu, proposition |
 | `/api/student-list/preview` | POST mapping → ce qu'il chargerait, sans rien écrire |
 | `/api/student-list` | POST mapping → contrôle, sauvegarde de l'ancienne liste, enregistrement |
+| `/api/student-list/analyze` | POST `{sheet}` → ré-analyse le fichier en attente sur cet onglet |
 | `/api/student-list/cancel` | POST → abandonne le fichier en attente |
 | `/api/upload-grade-file`, `/api/grade-file`, `/api/grade-file/remove`, `/api/grade-file/resolve` | notes externes |
 | `/api/save-report` | écrit `compte_rendu/` : notes.csv + SVG |
 | `/api/student-card/<b>/<p>` | fragment HTML fiche étudiant |
-| `/export.csv` | CSV récap |
+| `/export.csv` | CSV récap (dont le `courriel`, si la liste en porte un) |
 | `/img/...`, `/img_canon/...`, `/zoom_img/...`, `/name_img/<b>/<p>.jpg` | images (cache disque sous `static/zoom_cache/<hash-projet>/`, invalidé au mtime de la page source) |
 
 ## Édition du sujet — pertes de saisie évitées
@@ -681,6 +1060,17 @@ et aucune route n'est authentifiée. Garde-fous en place — **à ne pas retirer
 - **`bank_id` validé** avant tout glob (`bank.is_valid_bank_id`) : `"*"`
   matchait la première question venue.
 - `ValueError` → **400** via `@app.errorhandler`, pas un 500 opaque.
+
+- **Le sélecteur de dossier ne sort pas du dossier personnel** :
+  `GET /api/projects/browse` refuse en **403** tout chemin hors de
+  `project_state.browse_root()`. C'est la seule route qui énumère le disque.
+
+- **`[hidden]` doit gagner contre les classes** (`style.css`, en tête) : la
+  règle du navigateur est de spécificité 0, donc `.pm-modal-field { display:
+  flex }` la battait et un élément masqué en JS restait affiché — le champ
+  « Fichier AMC » s'affichait pour le template fourni. Trois règles ponctuelles
+  rattrapaient déjà le coup au cas par cas ; `[hidden] { display: none
+  !important }` vaut pour tout le reste.
 
 La route `/api/save` (écriture d'un JSON arbitraire à un chemin fourni par le
 client, sans aucun appelant côté front) a été **supprimée**.
@@ -733,23 +1123,39 @@ Depuis : la review rapide pose des marques par case (`✓ Tout traiter`), jamais
 données déjà validées d'EXAM_2026 gardent leur sens ancien — c'est irrattrapable
 a posteriori, il faut le savoir avant de citer le chiffre d'exactitude.
 
-### `/flagged` — groupé par question, trié par risque
+### `/flagged` — une file de doutes, du plus ambigu au moins ambigu
 
-- **Un bloc = une question, toutes ses cases visibles** (les non signalées en
-  contexte grisé). Juger « aucune réponse lue » demande de voir la question
-  entière ; l'ancien découpage Positifs/Négatifs l'éclatait sur deux colonnes
-  qui mélangeaient toutes les questions de la copie.
-- **La file montre ce qui reste** ; les questions déjà traitées sont repliées.
-- **Tri par risque décroissant** (`?sort=risk`, défaut ; `scan` pour l'ordre de
-  scan) : `Σ (1 + incertitude)` sur les signalements ouverts, avec
-  `incertitude = 1 − |2p − 1|`. **665 des 885 cases signalées d'EXAM_2026 ont
-  une probabilité GBM < 0,01** — elles ne doivent pas passer devant un vrai
-  doute. Ce qu'une relecture interrompue laisse derrière elle est alors ce qui
-  compte le moins.
-- **Les copies dont seule l'identité pose question y entrent.** Elles étaient
-  absentes des DEUX onglets, y compris de l'onglet Identité qui existe pour
-  elles (5 copies sur EXAM_2026, invisibles partout ailleurs que dans
-  `/identites`).
+- **Un bloc = une question, toutes ses cases sur une ligne**, et rien d'autre.
+  Le liseré magenta dit la décision courante, le `?` orange le doute de
+  l'algorithme (cf. *Code couleur*). Un clic sur une case change la décision.
+- ⚠ **Aucune notion de « traité ».** Retirée sur retour d'usage : elle
+  superposait un second état (traité / pas traité) à celui qui compte ici
+  (douteux / pas douteux), et « ✓ Tout traiter » vidait la file **sans rien
+  décider**. Corriger une case reste enregistré comme décision humaine
+  (`/api/toggle` → `_reviewed_cells`), ce dont `build_dataset` a besoin pour
+  ses étiquettes `ui_reviewed` — le seul usage de ces marques qui subsiste.
+  **Conséquence assumée : la file ne se vide pas toute seule** ; un doute
+  qu'on choisit de laisser tel quel y reste. Les routes `/api/review-cell`,
+  `review-question`, `review-copy`, `review-identity` existent encore mais
+  aucune page ne les appelle.
+- ⚠ **Une copie dont seule l'identité pose question n'est PAS dans l'onglet
+  Réponses** : elle n'y a rien à montrer, et c'est ce qui remplissait la liste
+  de copies sans une seule case à regarder (38 sur 38, projet sans liste
+  étudiants chargée). Elle est dans l'onglet Identité, qui existe pour ça. Le
+  bandeau d'identité reste affiché sur les copies qui figurent dans les deux.
+- **Tri par ambiguïté décroissante** (`sort=amb`, défaut ; `scan` pour l'ordre
+  de scan) : le **maximum** de `1 − |2p − 1|` sur les cases signalées, pas la
+  somme — cinq doutes tièdes ne doivent pas passer devant un vrai doute. Un
+  signalement de structure vaut 0,5 (ni sûr, ni douteux). `review_state` rend
+  les questions déjà triées ; la page ne trie rien.
+- ⚠ **Deux comptes distincts** : `n_cell_flags` (réponses seules, affiché) et
+  `n_flagged` (identité comprise). Les confondre annonçait « 42 signalements »
+  pour 4 questions et 38 identités.
+
+**Historique** : la page a été groupée par question (2025), puis découpée en
+deux colonnes cochées / non cochées, puis ramenée à une seule colonne — la
+colonne de droite était le plus souvent vide, et la question à se poser se lit
+déjà sur la case.
 
 ⚠ Deux degrés d'alerte sur l'identité (`server.id_state`) : `unresolved`
 (aucun étudiant ne correspond) et `weak` (grille illisible, rattachement par le
@@ -761,13 +1167,41 @@ quelqu'un l'a décidé. Les compter aurait rempli la file de cas déjà tranché
 template Jinja, `s.items` résout la *méthode* du dict avant la clé et la boucle
 casse sur `'builtin_function_or_method' object is not iterable`.
 
-### Le magenta ne voulait pas dire la même chose des deux côtés
+⚠ **`server.get_layout(copy)` prend une copie.** Sans elle, l'index
+`(question, lettre) → case` était celui de la **copie 1** : sur un sujet à
+versions, toutes les vignettes des copies de la seconde version répondaient
+**404** (`/zoom_img/...`), donc s'affichaient vides dans la review rapide comme
+dans le zoom. Même correction pour `get_warped(..., copy)` (offsets par
+question) et `sheet_of_question`.
+
+⚠ **`copy_review()["n_open"]` ne compte QUE les réponses ; la file y ajoute
+l'identité douteuse.** Les routes rendaient le premier nombre à une page qui
+affichait le second : « 9 à traiter » tombait à 7 au premier clic, l'identité
+disparaissant du compte en même temps que la case traitée. `server.
+copy_open_count(d)` est l'unique implémentation, servie à la page comme aux
+routes (`toggle`, `review-cell`, `review-question`, `review-copy`,
+`review-identity` — cette dernière rendait un décompte que le front devinait
+en ±1).
+
+### Code couleur — une couleur, un sens, dans toutes les vues de correction
+
+| | veut dire | où |
+|---|---|---|
+| **magenta** | la **décision courante** — « cette case compte comme cochée », ce chiffre est celui retenu — qu'elle vienne du modèle ou d'un clic | rond plein de la vue copie, liseré des cases de `/flagged` et du zoom, teinte de la zone *Positifs* |
+| **orange** | un **doute de l'algorithme** : `?` (case signalée), `⚠` (CV ≠ AMC), halo pointillé sur l'image | sous la case, jamais en liseré |
+| **gris** | **déjà traité** — un état de la relecture, pas de la case | `✓`, vignette pâlie |
+
+⚠ **Le doute ne se dit jamais par un liseré.** Dans une colonne de `/flagged`,
+toutes les cases sont douteuses : un liseré posé là-dessus ne distingue rien —
+c'est le défaut signalé en usage réel. Et le vert disait à la fois « cochée »
+(zone *Positifs*, bordure du zoom) et « relue » (`seen-mark`), pendant que le
+magenta disait à la fois « cochée » (vue copie) et « douteuse » (zoom) : un
+liseré ne se lisait qu'en se rappelant sur quelle page on était.
 
 Sur l'image de la copie, le rond magenta **plein** dit « lu comme coché ». Une
-case *signalée mais non cochée* — **78 %** des signalements — n'avait donc
-aucune marque sur l'image, alors que dans la grille de zoom juste en dessous le
-même magenta veut dire « à relire ». D'où le **halo pointillé** (`.cell-halo`),
-distinct du rond plein, qui disparaît dès que la case est traitée.
+case *signalée mais non cochée* — **78 %** des signalements — n'aurait donc
+aucune marque : d'où le **halo pointillé** (`.cell-halo`), **orange**, qui
+disparaît dès que la case est traitée.
 
 ⚠ Le `viewBox` de l'overlay est la page canonique (~2480 px) ramenée à ~600 px
 à l'écran : une épaisseur de trait en unités utilisateur y devient sous-pixel et
@@ -776,14 +1210,18 @@ le tireté, lui, reste en unités utilisateur (d'où `stroke-dasharray: 26 18`).
 
 ### Compteurs
 
-`_is_to_review` comptait les drapeaux posés par la correction automatique et
-ignorait la relecture : le tableau de bord affichait « 107 à revoir » sur
-EXAM_2026 alors que **106 de ces copies étaient déjà validées**, et le nombre ne
-décroissait jamais. Il portait aussi une comparaison morte —
-`f.startswith("cv_differs_amc")` testait la chaîne littérale de la boucle,
-jamais les drapeaux de la copie. Il rend désormais « il reste quelque chose »
-(signalements ouverts ou identité douteuse), et le tableau de bord affiche en
-plus `traités / total`.
+⚠ **Le tableau de bord n'en affiche plus aucun** (cf. *Configuration runtime*) :
+la progression de la relecture se lit dans l'onglet Review rapide et sur la
+carte « Fichiers du projet ». `_is_to_review()` a donc été supprimé — il ne
+servait plus que ces cartes.
+
+Son histoire vaut d'être gardée : il comptait les drapeaux posés par la
+correction automatique et ignorait la relecture, si bien que le tableau de bord
+affichait « 107 à revoir » sur EXAM_2026 alors que **106 de ces copies étaient
+déjà validées**, et que le nombre ne décroissait jamais. Il portait aussi une
+comparaison morte — `f.startswith("cv_differs_amc")` testait la chaîne
+littérale de la boucle, jamais les drapeaux de la copie. Un compteur qui ne
+bouge pas ne mesure pas ce qu'il annonce.
 
 ⚠ **Un dé-clic est possible partout** : `POST /api/mark_validated {value:false}`,
 `review-cell {reviewed:false}`, `review-identity {reviewed:false}`. Avant, le
@@ -826,6 +1264,52 @@ le fichier. L'ancien repli positionnel sur les colonnes 0/1/2 produisait des
 annonçait « ✓ 2 étudiants ». `StudentMatcher`, lui, ne lève jamais (toutes les
 pages en construisent un) : il porte le message dans `matcher.error`.
 
+### ⚠ Un classeur peut porter plusieurs promotions — l'onglet se demande
+
+`openpyxl` ouvre `wb.active`, c'est-à-dire **l'onglet sélectionné au dernier
+enregistrement du fichier** : ni le premier, ni rien qui se voie. Mesuré sur un
+classeur de scolarité réel à 5 onglets (`resultat - …`, `Feuil1`, `Feuil2`,
+`Reg-EN`, `Reg-FR`) : AMCx chargeait les **165 étudiants du groupe FR** alors
+que l'examen était celui du groupe EN (39 étudiants), sans un mot. Les deux
+groupes ayant des numéros disjoints, **0 des 37 copies scannées** se rattachait
+à quelqu'un — l'utilisateur voit « aucune identité » et n'a aucune raison de
+soupçonner l'onglet.
+
+- `grade_imports.list_sheets(path)` énumère les onglets (`[]` pour un csv) et
+  `read_table(path, sheet=None)` en lit un. ⚠ **Un onglet demandé mais absent
+  lève**, il ne retombe PAS sur `wb.active` : après un renommage, lire
+  silencieusement un autre onglet rendrait une tout autre promo — le défaut
+  même qu'on corrige.
+- L'onglet fait partie du mapping, comme un index de colonne : `xlsx_sheet` en
+  config (`""` = onglet actif), `cols["sheet"]` pour `students_from_file`,
+  `sheet` dans une entrée `grade_files[*]`. `load_students()` le relit à chaque
+  démarrage — sans lui, la relecture repartirait sur l'onglet actif.
+- **La modale demande l'onglet AVANT de proposer les colonnes** : rien n'est
+  présélectionné quand il y en a plusieurs, et le formulaire reste fermé tant
+  qu'aucun n'est choisi. Un `<select>` avec une valeur par défaut aurait laissé
+  passer le choix sans le faire.
+- ⚠ **`student_list.sheet_summaries()` compte les étudiants de chaque onglet**,
+  et c'est ce qui rend le choix possible : une liste de noms bruts ne dit pas
+  lequel porte la promo. Mesuré : `Reg-EN — 39 étudiants · 40 lignes` contre
+  `Feuil1 — 208 étudiants`. `n_students = None` = onglet non compris (annoncer
+  « 0 étudiant » serait une affirmation non vérifiée) ; l'onglet reste
+  choisissable, les colonnes se règlent à la main. Coût : un classeur relu une
+  fois par onglet — 0,4 s pour 5 onglets dont un de 816 lignes —, plafonné à
+  `max_sheets=20`.
+- **Un fichier à un seul onglet (ou un csv) n'affiche rien** : pas de choix à
+  faire. Même règle que le sélecteur d'exemplaire de `/sujet`.
+- ⚠ **Et il n'est pas épinglé non plus** (`xlsx_sheet` reste `""`) : sans
+  ambiguïté à lever, retenir le nom de l'onglet rendrait fatal un simple
+  renommage. On ne contraint que là où l'ambiguïté existe.
+- Le tableau de bord et `doctor` affichent l'onglet retenu. `doctor` **avertit**
+  quand un classeur a plusieurs onglets et qu'aucun n'est choisi (config
+  antérieure au correctif) : c'est le seul cas qui reste silencieux.
+- Routes : `POST /api/student-list/analyze {sheet}` et
+  `POST /api/grade-file/analyze {path, sheet}` ré-analysent le fichier déjà
+  déposé sur un autre onglet, sans re-téléverser et sans rien enregistrer.
+- **Les fichiers de notes ont la même invite** (même composant `.rl-sheet`) :
+  `read_table` leur servait aussi l'onglet actif.
+
 ### Import : détection par contenu, aperçu, contrôle avant écriture
 
 `analyze_roster()` lit xlsx **et csv** (`grade_imports.read_table`) et propose
@@ -837,6 +1321,52 @@ alphabétiques, celle qui est le plus en MAJUSCULES est le nom de famille.
 ⚠ **La détection ne peut pas passer par `grade_imports.analyze_table`** : celui-ci
 reconnaît les identifiants en les cherchant dans le roster — circulaire quand
 c'est justement le roster qu'on charge.
+
+⚠ **Une colonne de courriels n'est pas une colonne de noms** (`_profile`) :
+`jean.dupont@ensai.fr` ne contient aucun chiffre, passe donc le test
+« alphabétique » et concourait comme colonne de nom. Sur un export où le
+courriel s'intercale entre le numéro et le nom, c'est LUI qui était proposé
+comme nom de famille — plausible dans l'aperçu, et faux.
+
+**Ce que la détection encaisse**, fixé par `tests/test_roster_formats.py` :
+csv (virgule, `;`, tabulation, BOM), xlsx, xlsm ; colonnes dans n'importe quel
+ordre ; colonnes parasites (courriel, voie, libellé) ; plusieurs lignes de titre
+au-dessus de l'en-tête ; colonnes vides à gauche ; **aucun en-tête** ; pas de
+colonne prénom ; lignes vides intercalées ; accents, traits d'union et
+apostrophes ; numéros de **n'importe quelle largeur**, zéros de tête conservés.
+
+**Ce qu'elle ne devine pas**, et qui se règle à la main dans la modale (le
+message dit lequel) : un identifiant **non numérique** (`E3021`) — proposé
+nulle part, mais parfaitement chargeable une fois la colonne choisie, et
+`roster_report` prévient alors que ces identifiants ne sont pas des nombres ;
+une liste d'**un seul étudiant** (la 1re ligne de données se cherche sur un bloc
+de trois lignes consécutives).
+
+### Le courriel : une donnée de SORTIE, jamais de rattachement
+
+`Student.email` (facultatif, `""` par défaut) est lu dans la colonne
+`xlsx_mail_idx` et ressort dans les deux CSV — `/export.csv` et le `notes.csv`
+du compte rendu — sous l'intitulé `courriel`. Il sert à renvoyer les notes sans
+re-croiser la liste à la main.
+
+⚠ **Il ne participe à aucun rattachement** : rien ne l'écrit sur une feuille de
+réponses, `StudentMatcher` ne l'indexe pas. L'ajouter au matching ne ferait que
+créer des correspondances invisibles sur la copie.
+
+- **Détection** : la colonne qui porte des « @ » (`_profile` → `n_email`), à
+  partir de **2 cellules** — une seule (un contact en pied de tableau) ne fait
+  pas une colonne de courriels. Aucun repli : sans colonne à « @ », rien n'est
+  proposé et les étudiants portent un courriel vide. Une liste sans courriel
+  reste une liste valide.
+- La même mesure sert à **écarter cette colonne des candidats « nom »**
+  (cf. plus haut) : les deux usages viennent du même comptage.
+- ⚠ **La colonne est toujours présente dans le CSV**, vide si la liste n'en
+  porte pas — un en-tête stable vaut mieux qu'un en-tête qui change selon le
+  projet pour les scripts en aval.
+- ⚠ `_pad_leading_zeros` reconstruit les étudiants pour compléter les zéros de
+  tête : il passe par `dataclasses.replace`, pas par un `Student(id=…, nom=…,
+  prenom=…)` écrit à la main, qui aurait effacé le courriel **en silence**.
+  Même piège pour tout futur champ.
 
 La modale montre les premières lignes du fichier, grise celles situées avant la
 1re ligne de données et teinte les trois colonnes retenues : c'est ce qui rend
@@ -1047,17 +1577,411 @@ grille et changera son calage : ne pas recompiler après impression.
   TOUS les call sites avec un JSON copie (`list_all_copies`, `build_student_card`,
   `student()` route, `build_zoom_questions`, `api_toggle`).
 
+### Versions du sujet (groupes AMC) — matin / après-midi
+
+Donner des questions **toutes différentes** à deux populations (deux
+demi-journées, deux salles) se fait en AMC avec des **groupes** : chaque
+question est déclarée dans un `\element{groupe}{…}` au **niveau document**, et
+chaque `\exemplaire` ne restitue que son groupe.
+
+```latex
+\element{matin}{ \begin{question}{q1} … \end{question} }
+\element{aprem}{ \begin{question}{q2} … \end{question} }
+\exemplaire{40}{ en-tête matin … \restituegroupe{matin} … feuille de réponses }
+\exemplaire{35}{ en-tête aprem … \restituegroupe{aprem} … feuille de réponses }
+```
+
+⚠ **C'est la seule construction AMC qui garantit la disjonction.** Le tirage
+dans un pool commun (`\setdefaultgroupmode{withoutreplacement}` +
+`\restituegroupe[5]{pool}`) est plus simple et protège aussi du voisin de
+table, mais les tirages sont **indépendants d'une copie à l'autre** : mesuré
+sur 4 copies tirant 5 questions sur 10, les copies 1 et 3 en partageaient 3.
+Si la contrainte est « aucune question commune entre les deux sessions », il
+faut deux groupes.
+
+**AMC numérote les copies en continu** d'un `\exemplaire` au suivant (vérifié :
+deux `\exemplaire{2}` donnent les copies 1-2 puis 3-4, codes imprimés
+`+1/1/…`, `+2/1/…`, `+3/1/…`, `+4/1/…`). Conséquence pratique : le numéro
+imprimé en haut de chaque feuille dit de quelle version elle vient, donc **les
+deux demi-journées se scannent dans le même lot** — `decode_page_code` →
+`get_layout(copy=N)` → le bon jeu de questions. Rien à trier à la main.
+
+**Modèle** — `SubjectConfig.versions: list[SubjectVersion]`, chacune
+`{vid, name, group, num_copies, header}` ; `Block.group` dit à quelle version
+appartient un bloc. **`versions` vide = sujet à une version**, et tout le
+chemin rendu/parsing reste alors identique — c'est ce qui protège les projets
+déjà compilés et scannés (vérifié : recompiler un projet migré de 44 blocs
+rend un calage `.xy` identique au bit près).
+
+- ⚠ **Le groupe vit sur le `Block`, pas dans `data`** : `data` est ce qui part
+  dans la banque de questions, et « matin » n'a aucun sens dans un autre projet.
+- ⚠ **Un bloc sans groupe est mis dans `COMMON_GROUP` (`commun`)**, restitué par
+  *toutes* les versions. Déclaré au niveau document hors de tout `\element`, il
+  ne serait imprimé **nulle part**, sans la moindre erreur LaTeX.
+- ⚠ **Le groupe n'est pas renommable** (`update_version` refuse) : c'est
+  l'identité AMC de la version, le renommer désaffilierait toutes ses questions
+  d'un coup. Le libellé `name` est là pour ça.
+- ⚠ **Le nom d'une version est écrit en dernier sur le marqueur
+  `%%QCM-VERSION`** et tout ce qui le suit lui appartient : `_parse_attrs`
+  découpe sur les blancs et tronquerait « Session du matin » à « Session ».
+- ⚠ **Pas de `\newpage` quand la feuille de réponses est conservée verbatim** :
+  le découpage garde déjà le saut d'origine s'il y en avait un. En ajouter un
+  insérait une page blanche sur un sujet dont la feuille commence par
+  `\AMCdebutFormulaire` (qui fait la coupure lui-même) — mesuré : 6 pages au
+  lieu de 4.
+- `_slug_group()` : AMC construit un nom de macro depuis le nom de groupe, tout
+  ce qui n'est pas une lettre ASCII casse la compilation sans message utilisable.
+
+**Détection à l'import** — `_split_grouped_tex()` exige **les deux** moitiés :
+des `\element{G}{…}` au niveau document *et* au moins un `\exemplaire` qui
+restitue un de ces groupes. Un sujet AMCx avec `shuffle_questions` a bien des
+`\element`, mais à l'intérieur de son `\exemplaire` et sur un groupe réservé
+(`RESERVED_GROUPS` = `questions`, `open`, `bareme`) : il ne doit surtout pas
+être lu comme un sujet à versions.
+
+#### ⚠ Numéro AMC ≠ indice d'ordre du document
+
+Le piège central, et la source de toutes les erreurs de notation trouvées ici.
+`answers` dans `raw_responses/` est indexé par **numéro AMC** (celui du
+calage) ; `parse_tex()` indexe ses QCM par **ordre du document**. Les deux
+coïncident sur un sujet simple — un groupe, code étudiant après les questions —
+et c'est exactement ce qui masquait la confusion. Avec deux versions, la copie 1
+porte les questions AMC **1-5** et la copie 2 les **10-14**, alors que l'ordre
+du document les numérote 1 à 10.
+
+| fonction | attend | traduction |
+|---|---|---|
+| `effective_spec(q, copy)`, `get_bareme(copy)`, `max_score(q, copy)` | **indice document** | — |
+| `score.score_question/score_copy`, `answers`, `layout` | **numéro AMC** | `amc_question_map(copy)["qcm"]` |
+| `server.spec_of(q, copy)` / `max_of(q, copy)` | **numéro AMC** | wrappers, à utiliser côté serveur |
+
+`sujet_store.tex_to_amc(copy)` fait la traduction inverse (indice → AMC), pour
+les boucles qui partent des blocs du sujet (stats de banque, onglet Questions).
+
+Ce qui a été corrigé au passage, et qui était déjà faux avant les groupes sur
+tout sujet où les deux numérotations divergent (code étudiant en tête, par ex.) :
+- `score.question_set(copy)` rend les numéros **AMC de cette copie** ; itérer
+  l'ordre du document faisait chercher `answers[1]` sur une copie qui n'a que
+  des clés 10-14 → **toutes les questions à zéro, sans un mot** ;
+- `total_max(copy)` ne somme que les questions **de cette copie** — sommer tout
+  le sujet donnait un barème sur 10 à des copies qui valent 5 ;
+- `effective_spec`/`get_bareme` interrogeaient `_tex_chars` (indexé AMC) avec un
+  indice document → `charmap = None`, options et bonnes réponses **vides**, donc
+  une question à choix unique payée à toute copie qui n'y répond pas (mesuré :
+  copie vide notée 2/5) ;
+- `server.question_numbers(copy)` prend la copie ; sans elle, une feuille de
+  l'après-midi n'affichait aucune de ses questions et en inventait cinq vides ;
+- `amc_question_map` ne signale plus « QCM sans correspondance » pour une
+  question dont le tag est connu du calage mais absent de **cette** copie : elle
+  appartient à l'autre version. Le repli positionnel l'aurait collée sur un
+  numéro de l'autre version.
+
+`check_layout_consistency()` contrôle la première copie de **chaque** version ;
+`doctor` liste les versions, leur plage de numéros et leur barème.
+
+#### Import d'un sujet AMC : ce qui a été réparé
+
+Testé sur un vrai sujet à deux groupes (ENSAI, 10 questions, 2 demi-journées) :
+
+- les 10 questions vivant hors du `\exemplaire`, l'import n'en voyait **aucune**
+  et écrivait un `subject.json` « canonique » à **0 bloc** — éditeur vide,
+  `total_max` **0**, donc **toutes les copies notées 0**, en silence ;
+- la **seconde version disparaissait** du store : `render_subject` ne rendait
+  qu'un `\exemplaire`, donc la moitié après-midi du sujet. Latent tant que
+  `blocks` est vide (`compile_pdf` compile alors le `.tex` tel quel), déclenché
+  par le premier bloc ajouté ;
+- ce qui suit `\end{reponses}` dans une question était **jeté** — typiquement le
+  `\end{multicols}` dont l'ouverture est en fin d'énoncé : `\begin{multicols}`
+  jamais fermé, sujet qui ne compile plus. Conservé désormais dans
+  `data.epilogue`, la paire étant volontairement scindée entre `statement` et
+  `epilogue` (la modéliser demanderait de comprendre l'imbrication LaTeX) ;
+- un `\bareme{b=1,m=0}` collé après `\begin{question}{tag}` restait dans
+  l'énoncé alors qu'il est déjà lu dans `value` et réémis → **deux `\bareme`**
+  dans la même question dès qu'on changeait la valeur.
+
+**Garde-fou** : `_migration_lost_questions()` refuse d'enregistrer une migration
+qui ne sort **aucun** bloc QCM d'un `.tex` qui contient des `\begin{question}`.
+Le projet est conservé, le sujet reste **legacy** (lecture seule, `.tex` compilé
+tel quel, correction normale) et `POST /api/projects/create` renvoie un
+`warning` que le front affiche en bandeau après le redémarrage (déposé dans
+`sessionStorage`, sinon il serait perdu par le rechargement).
+
+Vérification de bout en bout, sur ce sujet : import → recompilation →
+**calage `.xy` identique au bit près** sur les deux copies, 4 pages, mêmes codes
+imprimés ; puis scans fabriqués des deux versions → `_copy_id` lu (`printed`),
+questions `[1..5]` et `[10..14]`, **5/5 sur chacune**.
+
+**Routes** :
+
+| Route | Rôle |
+|---|---|
+| `POST /api/sujet/versions/update` | `{vid, name?, num_copies?, header?}` |
+| `POST /api/sujet/versions/add` | `{name?, group?, num_copies?, vid?, index?, header?}` |
+| `POST /api/sujet/versions/delete` | `{vid, mode?}` → `{undo}` |
+| `POST /api/sujet/versions/restore` | `{undo}` tel que rendu par delete |
+| `POST /api/sujet/blocks/set-group` | `{bid, group}` → `{previous}` |
+| `POST /api/sujet/header/analyze` | `{raw_tex}` → `{complete, fields, leftovers}` — n'écrit rien |
+| `POST /api/sujet/header/to-raw` | `{fields}` → `{raw_tex}` — n'écrit rien |
+| `POST /api/sujet/answer-sheet/to-raw` | `{fields, num_copies?}` → `{tex}` — n'écrit rien |
+
+Toutes renvoient les plages de numéros **recalculées pour toutes les versions**
+(`server._versions_payload()`, unique implémentation, partagée avec la page) :
+changer le nombre de copies d'une version décale toutes les suivantes, et le
+front ne peut pas le deviner.
+
+`/sujet` affiche un tableau des versions dans le bandeau et une pastille de
+version sur chaque bloc — sans elle, deux questions voisines dans la liste
+partent sur deux sujets différents sans que rien ne le montre. Le « Total
+barème » de la toolbar devient **par version**.
+
+⚠ **Un bloc « commun » compte dans TOUTES les versions**, pas dans aucune : il
+est imprimé sur chacune. La colonne « QCM » du tableau et le total de barème
+(serveur *et* `refreshTotalMax` côté client) l'ajoutent donc à chaque version.
+Compté à part, il apparaissait comme une pseudo-version au barème propre.
+
+⚠ **Le barème d'une version se calcule depuis SES QUESTIONS**, jamais depuis le
+numéro de sa première copie : `sujet_store.version_total_max(subject, group)`,
+qui somme `max_score` sur les QCM du groupe **plus les communs** (`max_score`
+ne dépend pas de la copie — seule la carte des lettres en dépend). Ne pas
+confondre avec `total_max(copy)`, qui passe par le calage pour savoir quelles
+questions AMC porte une copie donnée : c'est lui qui note les copies.
+
+Le lire par `total_max(first_copy)` avait deux défauts, tous deux constatés :
+une version tout juste créée n'est dans aucun calage, et surtout **changer le
+nombre de copies d'une version fait disparaître le barème des suivantes** — le
+décalage sort leur première copie du calage compilé, alors que leur barème n'a
+pas bougé d'un point.
+
+⚠ **Une seule fonction rafraîchit le tableau des versions**
+(`applyVersionsPayload`, nourrie par la réponse de *toute* écriture : update,
+set-group). Les mises à jour partielles laissaient des cellules périmées, et
+`applyBlockGroup` recomptait les QCM en parallèle du serveur — deux vérités
+qui finissent par diverger.
+
+#### Ajouter / supprimer une version, affecter un bloc
+
+- **Le sélecteur de version de chaque bloc EST l'affectation**
+  (`.block-group-sel`, `POST /api/sujet/blocks/set-group`). Sans lui, une
+  version ajoutée resterait vide à jamais et le groupe d'un bloc ne se
+  changerait qu'en éditant le store à la main. Il remplace la pastille en mode
+  canonique ; la pastille reste en legacy.
+  ⚠ Il est **exclu du marquage `dirty`** (`select:not(.block-group-sel)`) : la
+  version vit sur le `Block`, pas dans son `data` (`data` part dans la banque,
+  où « matin » n'a aucun sens). Elle est enregistrée seule et tout de suite ;
+  la marquer « non enregistrée » réclamait une sauvegarde qui n'avait rien à
+  écrire, et faisait surgir la confirmation « blocs modifiés » au milieu d'une
+  annulation.
+- ⚠ **`add_version` sur un sujet SANS versions en crée DEUX** : la version
+  courante — jusque-là implicite, portée par `cfg.header` et `cfg.num_copies` —
+  puis la nouvelle. Sans ça le sujet passait à « une version vide + des
+  questions orphelines », que le rendu range en `commun` : la nouvelle version
+  aurait imprimé le sujet entier. Les blocs existants **gardent leur groupe**
+  (vide = commun, donc imprimés des deux côtés) : ranger d'office les questions
+  dans la première version les ferait disparaître de la seconde en silence.
+  La modale le dit avant d'agir.
+- **Supprimer une version pose la question du sort de ses questions**, elle ne
+  la devine pas : `mode="reparent"` (défaut) les rend **communes** — aucune
+  question n'est jamais supprimée, comme pour les catégories de la banque —,
+  `mode="delete_blocks"` les emporte. La modale nomme la version et compte ses
+  questions ; sans question propre, le choix n'est pas proposé.
+- **Supprimer la dernière version** ne laisse pas un sujet sans `\exemplaire` :
+  le sujet redevient un sujet à une version (`versions = []`) et **reprend
+  l'en-tête et le nombre de copies** de celle qu'on retire. C'est ce qui rend
+  l'opération réversible.
+- `delete_version` rend un **payload d'annulation** (identité, position, état
+  exact des blocs touchés) que `restore_version` réapplique **sous le même
+  verrou** : le front ne reconstruit rien, sinon il restaurerait une version
+  amputée. Vérifié sur le vrai projet à 2 versions : supprimer (les deux modes)
+  puis annuler rend un `subject.json` identique **et un `.xy` recompilé
+  byte-identique**.
+- `_unique_group()` refuse un groupe déjà pris, `COMMON_GROUP` et les
+  `RESERVED_GROUPS` : deux versions au même groupe restitueraient les **mêmes**
+  questions, et LaTeX ne dirait rien.
+- `set_block_group` **refuse un groupe qu'aucune version ne restitue** : le
+  rendu le traiterait en commun, donc imprimé partout au lieu de nulle part —
+  silencieux dans les deux cas.
+
+#### ⚠ Ctrl+Z qui survit à un rechargement (`pushPersistentUndo`)
+
+Les actions de version rechargent la page — la table, les sélecteurs de chaque
+bloc et la numérotation par version en dépendent —, ce qui **vide la pile
+Ctrl+Z**, qui vit en mémoire. Sans relais, l'action la plus lourde de l'éditeur
+aurait été la seule non annulable.
+
+Seules les actions dont l'annulation est un **appel serveur paramétrable**
+passent par là (une fermeture ne se sérialise pas) : on persiste dans
+`sessionStorage` le *nom* de l'action et sa charge utile, **jamais du code**.
+`UNDO_KINDS` est le registre des annulations rejouables (`version-restore`,
+`version-remove`).
+
+- ⚠ **C'est une pile, pas une case unique.** Enchaîner deux suppressions de
+  version est courant ; une case unique n'aurait gardé que la seconde et le
+  Ctrl+Z suivant n'aurait plus rien eu à défaire, sans un mot. Chaque entrée
+  porte un `id` pour être retirée par identité, et n'est retirée qu'**une fois
+  l'appel serveur passé** — un échec doit laisser l'action annulable, comme
+  dans `UNDO.run`.
+- Au chargement, les entrées sont remises en pile **dans l'ordre** et le bouton
+  « ↩ Annuler » de la dernière est réaffiché : sinon le filet disparaissait au
+  moment précis où l'on en a besoin. Passé 15 min, l'entrée est purgée — elle
+  n'est plus dans la tête de l'utilisateur et resterait annulable par un Ctrl+Z
+  distrait.
+- Vérifié de bout en bout : supprimer les deux versions, ajouter une version
+  (chemin bootstrap), puis trois Ctrl+Z → sujet identique à l'octet près.
+
 ### Bandeau global (`<details>` repliable en haut)
 
 - **Randomisation** : `num_copies`, `random_seed` (+ bouton ♻ régénérer),
   `shuffle_answers`, `shuffle_questions` (= insertion `\melangegroupe{questions}`
   + wrap `\element{questions}{...}` autour des questions).
 - **En-tête du sujet** : 2 sous-groupes pliables :
-  - *Champs structurés* (établissement, année, auteur, titre, durée, sous-titre,
-    instructions) → génère un tableau LaTeX + centerblock.
+  - *Champs structurés* (établissement, année, auteur, **date**, titre, durée,
+    sous-titre, **filets**, instructions) → génère un tableau LaTeX +
+    centerblock.
   - *LaTeX brut* (textarea) → `header.raw_tex` prime si rempli. C'est le cas
     par défaut après migration legacy (l'en-tête original est préservé
     verbatim). En legacy : affiché en `<pre>` readonly.
+
+⚠ **Avec des versions, `cfg.header` n'est imprimé NULLE PART** : chaque
+`\exemplaire` rend le sien (`_render_multi_version_subject`). Le formulaire
+éditait donc un en-tête qu'aucune copie ne porte, et les en-têtes réellement
+imprimés — un par version, en LaTeX brut après import — n'étaient éditables
+par aucune UI. D'où le sélecteur **« En-tête de la version »** en tête du
+bloc : le formulaire patche alors `versions/update {vid, header}`.
+⚠ **La version visée est capturée à la FRAPPE, pas à l'envoi** : la
+sauvegarde est différée de 500 ms, et changer de version pendant ce délai
+écrivait la fin de l'en-tête du matin sur celui de l'après-midi. Le
+changement de version *vide* d'abord la file (`_hdrFlush`), puis remplit les
+champs.
+
+⚠ **L'état grisé du bloc structuré suit la frappe** (`syncHeaderRawMode`) :
+vider le LaTeX brut pour « revenir aux champs » laissait tout désactivé
+jusqu'au rechargement.
+
+**Ce qui manquait pour se passer du LaTeX brut** — audit mené sur les deux
+en-têtes réels du dépôt (EXAM_2026 et le sujet ENSAI importé) :
+
+| élément de l'en-tête réel | champ |
+|---|---|
+| `ENSAI - 1A`, `ENSAI - 2A — MCQ on…` | `establishment` |
+| `Année 2025-2026` | `year` |
+| `Emmanuel Pilliat` | `author` |
+| `8/9/2026` | **`date` (ajouté)** |
+| `Examen : Introduction aux Tests…` | `title` |
+| `(durée : 2 heures)`, `Duration: 10 min` | `duration` |
+| `Calculatrice autorisée.`, `Morning` | `subtitle` |
+| `\hrule` autour des consignes | **`rules` (ajouté)** |
+| les 3 paragraphes de consignes, gras compris | `instructions` (LaTeX libre) |
+
+Les deux en-têtes se réécrivent donc entièrement en champs. Ce qui reste
+propre au brut est la **mise en page** (position exacte des `\vspace`,
+`\hfill` sur la même ligne), pas l'information.
+
+#### « 🔎 Détecter les champs » — `sujet_store.analyze_header_tex`
+
+Un sujet importé garde son en-tête **verbatim** dans `raw_tex` : c'est ce qui
+garantit un `.xy` identique au bit près, donc utilisable sur des copies déjà
+imprimées. Le prix, c'est un en-tête qu'on ne peut plus éditer autrement qu'en
+LaTeX. Le bouton propose de le répartir dans les champs.
+
+`analyze_header_tex(raw) -> {"fields", "leftovers", "ok"}` est **pure** — zéro
+I/O, testable seule. Route `POST /api/sujet/header/analyze {raw_tex}`, qui
+n'écrit rien : le LaTeX vient du **champ de saisie**, pas du store, pour que
+l'analyse porte sur ce que l'utilisateur a sous les yeux (éditions non
+enregistrées comprises). ⚠ Son verdict s'appelle `complete` dans la réponse,
+pas `ok` — `ok` dit déjà que la requête a abouti, et les confondre ferait
+passer « je n'ai rien su décomposer » pour une panne.
+
+Découpage appris des en-têtes réels : zone d'identité (jusqu'au
+`\begin{center}`, à défaut jusqu'au premier `\hrule`) découpée en lignes sur
+`\\`/`\par` puis en cellules sur `\hfill` ; bloc centré (gras = titre,
+italique = sous-titre) ; le reste = consignes.
+
+- ⚠ **C'est une proposition, jamais une conversion silencieuse.** Elle change
+  forcément la mise en page, donc le `.xy` : l'appliquer sur un sujet déjà
+  imprimé désaligne les copies. La modale le dit, et rien ne part sans
+  confirmation. Annulable par Ctrl+Z (pile en mémoire — pas de rechargement
+  ici).
+- ⚠ **Ce qui n'a pas trouvé de champ est LISTÉ, jamais avalé** : un fragment
+  perdu en silence, c'est une ligne qui disparaît de l'en-tête imprimé.
+  L'encart orange s'affiche **au-dessus** du bouton « Appliquer ».
+- ⚠ **Une structure n'est pas coupée en deux champs.** `_hdr_placeable` refuse
+  les accolades déséquilibrées, les `\begin{…}` et les commandes qui ne sont
+  pas du texte de ligne (`\includegraphics`, `\input`…) : un `tabular`
+  réparti sur deux champs donne un sujet qui ne compile plus, et un logo à la
+  place du nom de l'établissement est *plausible et faux*. Le nettoyage ne
+  rogne plus les accolades à l'aveugle non plus — `\includegraphics{logo.png}`
+  y perdait la sienne.
+- ⚠ **Les motifs sont testés sur du texte REPLIÉ** (`_hdr_fold` : accents
+  LaTeX et Unicode ôtés). Les vrais sujets écrivent `dur\'ee`, `Ann\'ee` :
+  chercher « durée » n'y trouvait rien et la durée restait collée au titre. Ce
+  qui est rangé dans les champs reste le texte d'origine, accents compris.
+- ⚠ **Une ligne vide des consignes est conservée** : en LaTeX c'est une fin de
+  paragraphe. Les jeter avec la présentation collait les trois consignes
+  d'EXAM_2026 en un seul bloc — constaté en compilant.
+- « 8/9/2026 - Morning » est scindé en `date` + `subtitle` : laissés ensemble,
+  « Morning » s'imprimait en haut à gauche.
+
+**Mesuré** sur les trois en-têtes réels du dépôt (les deux versions de QCM1 et
+EXAM_2026) : `ok = True`, aucun fragment non reconnu, et le sujet recompilé
+donne les mêmes 4 pages avec les mêmes codes imprimés. Ces trois en-têtes sont
+figés verbatim dans `tests/test_versions.py` — ce sont eux qui ont dicté le
+découpage.
+
+#### Bascule champs ⇄ LaTeX brut (en-tête ET feuille de réponses)
+
+Quatre boutons, deux par bloc. `sujet_store.header_to_raw(h)` et
+`answer_sheet_to_raw(a, num_copies)` rendent le LaTeX que les champs
+produisent ; routes `POST /api/sujet/header/to-raw` et
+`/api/sujet/answer-sheet/to-raw`, qui **n'écrivent rien** — le front applique
+par l'écriture habituelle, ce qui rend la bascule annulable par Ctrl+Z comme
+le reste (pile en mémoire, aucun rechargement).
+
+⚠ **Les deux sens ne se valent pas**, d'où une confirmation d'un seul côté :
+
+| sens | effet sur le PDF |
+|---|---|
+| champs → brut | **aucun** : on fige exactement ce qui aurait été imprimé |
+| brut → champs | la mise en page est régénérée → le **calage** change |
+
+Pour la feuille de réponses le retour aux champs est bien plus lourd que pour
+l'en-tête : c'est elle qui porte les **cases**. Des copies imprimées avec
+l'ancienne feuille ne se lisent plus. La confirmation le dit et donne la
+taille du LaTeX qui sera remplacé.
+
+⚠ **Le `\newpage` fait partie du texte figé** (`answer_sheet_to_raw` le met en
+tête). `render_subject` l'émet à CÔTÉ de la feuille canonique et cesse de
+l'émettre dès que `cfg.answer_sheet_tex` est rempli — une feuille importée
+porte déjà sa coupure. Sans lui, « passer au brut » supprimait un saut de
+page : **mesuré, le `.xy` changeait**, donc toutes les positions de cases.
+La promesse affichée (« le PDF est inchangé ») est vérifiée par
+`TestSwitchKeepsRendering` et, de bout en bout, par une compilation
+avant/après : `b7035b8d9cbeef08` des deux côtés, aller **et** retour.
+
+⚠ **`_strip_meta_markers` ne touche QUE les lignes de marqueurs** — ni les
+lignes vides, ni les blancs de début et de fin. Une ligne vide est une fin de
+paragraphe LaTeX ; les « ranger » faisait que le texte figé ne rendait plus
+tout à fait comme les champs dont il sortait.
+
+⚠ **`header_to_raw` rend un en-tête déjà brut tel quel** : le « repasser » en
+brut l'écraserait par le rendu, vide, des champs.
+
+⚠ La feuille de réponses ne se **recharge plus** au passage rempli ⇄ vide (le
+`location.reload()` abandonnait sans prévenir la pile Ctrl+Z et les éditions
+de blocs en cours) : `syncAnswerSheetRawMode()` suit la frappe, comme
+`syncHeaderRawMode()`.
+
+⚠ `.bd-mode-switch` doit poser `flex-direction: row` : `.bd-field` impose
+`column`, et sans l'écraser le `flex-basis` de la note s'appliquait à sa
+**hauteur** — la ligne mesurait 261 px au lieu de 69.
+
+⚠ Trois défauts du rendu structuré corrigés au passage, chacun **silencieux** :
+le tableau d'identification était émis même vide (bande blanche en haut d'un
+sujet qui n'a qu'un titre) ; `duration` et `subtitle` étaient subordonnés à
+`title`, donc les renseigner sans titre ne rendait **rien** ; et un `\\`
+traînait avant `\end{center}`, ce qui ouvre une ligne vide. Un en-tête
+structuré **déjà en service** rend toujours exactement les mêmes octets
+(test `test_en_tete_sans_date_reste_inchange`) — son `.xy`, donc le calage des
+copies imprimées, en dépend.
 - **Feuille de réponses** : `id_grid_digits`, `name_field`, `columns`. En
   legacy : disabled. Préservée verbatim après migration via `answer_sheet_tex`.
 - **Sélecteur copie** `[Copie : N ▼]` pour debug (visualiser le mapping
@@ -1119,6 +2043,13 @@ que l'utilisateur est en train de regarder.
 - clic sur une **zone** → l'éditeur scrolle sur le bloc ;
 - clic dans le panneau **hors** de toute zone → vue agrandie sur cette page.
 
+⚠ **Le bandeau du panneau d'aperçu ne porte plus qu'un avertissement.** Le
+titre « Aperçu PDF — Q1 · Morning — tag » répétait ce que la sélection magenta
+montre déjà des deux côtés, et le mode d'emploi du clic occupait une ligne à
+demeure. Il ne reste que « *… pas dans le PDF compilé* » pour un bloc
+sélectionné absent du calage — sans ça rien n'expliquerait l'absence de cadre.
+Vide, la ligne disparaît (`.preview-title:empty { display: none }`).
+
 **Géométrie des régions** (`sujet_store.pdf_regions`) : les cases du calage ne
 disent pas où commence un énoncé. `_pdf_region_hints()` lit donc le texte du
 PDF (PyMuPDF) et `_statement_top()` remonte ligne à ligne depuis les cases,
@@ -1148,6 +2079,167 @@ qu'un cadre faux.
 ⚠ Ces régions sont indexées par **bid** (chaîne), pas par numéro AMC — d'où
 les clés mixtes `int | str` de `pdf_regions()`. Ne pas faire
 `sorted(regions.items())` (TypeError) : trier par `(page, y0)`.
+
+⚠ **Le calage numérote les pages par copie, le PDF les concatène.**
+`\page{2/1/58}` est la 1re page de la copie 2, soit la 3e page du PDF quand la
+copie 1 en fait deux. `Layout.pdf_page()` / `pdf_page_map()` font la
+conversion, à partir de la position dans `page_ids` (trié par copie puis page,
+c'est-à-dire l'ordre d'impression) — donc sans supposer un nombre de pages
+constant d'une version à l'autre. Sans cette conversion, toutes les régions de
+la seconde version se posaient sur les pages de la première.
+
+⚠ **Une passe par version** (`sujet_store.region_copies()` : la 1re copie de
+chaque version, `[1]` sans versions). Prendre toutes les copies ferait pointer
+chaque question sur la dernière copie imprimée, ne prendre que la copie 1
+laissait la seconde moitié du sujet **sans aucun aperçu** — c'est ce qui se
+voyait comme « un seul groupe dans la preview ».
+
+⚠ **Le filtre des cases porte sur le RÔLE, pas sur la page.** Il excluait la
+page de la feuille de réponses (`b.page != asp`), ce qui perdait toute question
+imprimée sur cette même page — la 5e question de chaque version, qui tombe
+juste avant `\AMCdebutFormulaire`, n'avait aucun cadre. On garde désormais les
+cases `ROLE_QUESTIONONLY` (position de la question dans le questionnaire) et on
+écarte les `ROLE_ANSWER`, sauf la ligne de barème d'un answerbox.
+
+⚠ **`block_preview_keys` mappe les QCM par leur TAG**, pas par leur position.
+Les deux coïncident sur un sujet simple ; avec plusieurs versions la 6e
+question du document porte le numéro AMC 10, et l'indexer par sa position
+collait son cadre d'aperçu sur la question de l'autre version.
+
+#### Numéro affiché : le rang DANS SA VERSION
+
+⚠ **Trois numérotations, et les confondre a été constaté.** `server.question_stats()`
+rend les trois explicitement, et **aucune page ne doit en dériver une quatrième** :
+
+| champ | c'est | sert à |
+|---|---|---|
+| `q` | l'ordre du **document** | clé de `parse_tex()`, du barème, de `answers` |
+| `preview_q` | le **numéro AMC** (via `block_preview_keys()`) | trouver la région de l'aperçu PDF |
+| `q_in_version` + `version` | ce qui est **imprimé sur la copie** | tout ce qui s'affiche |
+
+Le défaut, signalé en usage sur un sujet à deux versions de 5 questions :
+l'onglet Questions demandait l'aperçu de « Q10 » et recevait le cadre de la
+**question AMC 10**, c'est-à-dire la *première* question de l'après-midi
+(imprimée « Question 1 ») ; et les questions 6 à 9 du document tombaient sur les
+**colonnes du code étudiant** (`etu[1]`…`etu[4]`, qui occupent les numéros AMC
+6-9), donc n'avaient aucun aperçu — « Q8 ne donne pas de rendu PDF ».
+
+`server.qcm_rank_in_version(blocks)` est l'**unique** implémentation du rang
+imprimé, partagée par l'onglet Sujet, l'onglet Questions et la page Évaluation.
+Trois comptages parallèles, c'est trois pages qui nomment la même question
+différemment.
+
+#### ⚠ Le haut d'une région ne remonte pas au-dessus des cases de la précédente
+
+`_statement_top()` remonte ligne à ligne dans le **texte** du PDF et s'arrête au
+premier saut de paragraphe. Il ne voit pas les cases à cocher : quand deux
+questions sont serrées — pas de blanc entre les réponses de l'une et l'énoncé de
+l'autre — il remontait jusqu'à l'énoncé précédent. Résultat mesuré sur deux
+sujets réels : la région de la question N faisait **20 px de haut** (donc vide,
+aucun aperçu) et celle de la question N+1 affichait **les deux questions**.
+
+Le calage, lui, sait exactement où finissent les cases de la précédente : il sert
+désormais de **plancher** au haut de région. Effet mesuré : sur un sujet de 31
+questions, **18 régions sur 35 étaient fausses** ; après correction, les 32
+cadres montrent chacun exactement leur question (`Question N` et une seule), et
+10/10 sur le sujet à deux versions. Le contrôle qui le vérifie est le bon
+réflexe : extraire le texte de chaque région avec PyMuPDF et comparer l'en-tête
+« Question N » au numéro affiché.
+
+`item["q_in_version"]` (route `/sujet`) est le rang du QCM parmi ceux de son
+groupe — c'est le numéro imprimé sur la copie de l'étudiant. Le rang global
+`q` reste la clé de `parse_tex()` et du barème, et reste porté par `data-q`
+(le chemin legacy `/api/sujet/save` l'utilise) ; l'affichage passe par
+`data-qv`. Afficher « Q6 » sur la 1re question de l'après-midi n'a aucun sens :
+cette question est imprimée « Question 1 » sur son sujet.
+
+`qLabelOf(blk, {withVersion})` construit le libellé : `Q1` pour la pastille du
+bloc (la version est déjà dite par la pastille de groupe à côté) et
+`Q1 · Afternoon` pour les cadres de l'aperçu, qui n'ont aucun autre contexte.
+La Structure ajoute une puce de version à droite de chaque ligne — sans elle,
+elle affiche deux fois « Q1 … Q5 » sans dire laquelle est laquelle.
+
+⚠ **Le total du barème est recalculé côté client** à chaque édition
+(`refreshTotalMax`). Il sommait toutes les questions de la page : sur deux
+versions à 5 points, le bandeau annonçait « 10.00 par version », écrasant la
+valeur correcte rendue par le serveur. Il somme désormais **par groupe**, et
+masque la mention « par version » quand les totaux diffèrent.
+
+#### Aperçu : panneau redimensionnable et vue agrandie en fenêtre
+
+- **Poignée `.sujet-gutter`** entre l'éditeur et l'aperçu : glisser règle
+  `--pv-w` (le `flex-basis` de `.sujet-right`), persisté. Sous 150 px on replie,
+  et c'est le **même état** que le bouton 👁 (`.no-preview`) — sinon « replié à
+  0 px » et « masqué » seraient deux états distincts qui se contrediraient au
+  rechargement. Double-clic replie, flèches ← → au clavier.
+- **La vue agrandie est une fenêtre**, plus une lightbox : ni fond opaque ni
+  `inset: 0`, donc l'éditeur reste visible **et cliquable** derrière — c'est ce
+  qui permet l'aller-retour entre les deux. Déplaçable par son bandeau,
+  redimensionnable par la poignée d'angle, réductible au seul bandeau
+  (double-clic sur le bandeau), bascule plein écran. Position, taille et état
+  réduit sont persistés.
+- ⚠ `clampToViewport` garde toujours **80 px de bandeau** dans l'écran : une
+  fenêtre poussée dehors serait irrécupérable sans vider le `localStorage`.
+  Une fenêtre rouverte alors qu'elle était réduite est ré-ouverte déployée,
+  sinon le clic sur « vue agrandie » ne montrerait rien.
+- ⚠ **Une seule déclaration `position` sur `.sujet-gutter`.** La règle en
+  portait deux (`sticky` puis `relative`) et la seconde gagnait : la poignée
+  restait en haut de la colonne au lieu de suivre le défilement, donc
+  inattrapable dès qu'on descendait dans le sujet.
+
+#### Annulation (Ctrl+Z) — pile d'actions, pas d'action inverse
+
+Les champs de saisie ont déjà l'annulation native du navigateur. Ce qui n'en
+avait **aucune**, ce sont les actions par clic : basculer une réponse en
+mauvaise, ajouter ou supprimer une réponse, déplacer un bloc.
+
+- ⚠ **Chaque entrée restaure l'état capturé avant l'action**, elle ne rejoue
+  pas l'action inverse. C'est ce qui rend correct le cas du **choix unique** :
+  cocher une réponse y décoche l'ancienne, et « re-basculer » ne saurait pas
+  laquelle remettre. `snapCorrect()` / `restoreCorrect()` reposent tout l'état
+  des réponses du bloc.
+- ⚠ **Ce qui départage native et applicative, c'est la dernière ACTION, pas
+  l'endroit où se trouve le curseur.** La première version cédait à
+  l'annulation native dès que le focus était dans un champ : ça ne marchait
+  que tant que le focus restait sur le bouton cliqué, et il suffisait de
+  cliquer ensuite dans un énoncé pour que Ctrl+Z ne fasse plus **rien du
+  tout** — la native n'avait aucune frappe à défaire et la nôtre était
+  court-circuitée. C'est le défaut qui a été signalé et reproduit. On ne cède
+  donc à la native que si l'utilisateur a réellement tapé **depuis** la
+  dernière action empilée (`LAST_TEXT_EDIT` vs `UNDO.lastPushAt()`).
+- ⚠ **Porte de sortie obligatoire** (`LAST_DEFER`) : céder à la native tant
+  qu'elle *pourrait* avoir de l'historique enfermait Ctrl+Z dans le champ, car
+  elle finit par n'avoir plus rien à défaire sans qu'on puisse l'interroger.
+  On mémorise donc la valeur du champ à chaque cession : inchangée au coup
+  suivant = la native est à court, on reprend la main. Coût mesuré : **une
+  frappe Ctrl+Z de plus** pour franchir la frontière, et seulement quand on a
+  tapé du texte avant de vouloir annuler une action antérieure.
+- ⚠ **Une entrée capture une POSITION, pas un déplacement de ±1**
+  (`moveBlockTo(blk, afterBid)`). Rejouer « une case dans l'autre sens » était
+  faux dès qu'autre chose bougeait entre-temps : un ▼ puis un glisser-déposer,
+  et l'annulation produisait un ordre jamais visité. Les **deux** chemins de
+  glisser-déposer (bloc et Structure) empilent aussi — ils ne le faisaient pas,
+  alors que c'est la façon annoncée de réordonner.
+- ⚠ **`UNDO.run` est `async` et remet l'entrée en pile sur échec.** Elle
+  dépilait avant le `try` et annonçait « Annulé ✓ » de façon synchrone : une
+  annulation asynchrone refusée par le serveur était perdue de la pile *et*
+  annoncée comme réussie.
+- ⚠ **La suppression d'un bloc est dans la pile.** Sans ça, le Ctrl+Z qui suit
+  une suppression dépilait l'entrée *précédente* — sur un nœud détaché, donc
+  sans effet — annonçait « Annulé ✓ », et son `setStatus` effaçait le bouton
+  « ↩ Annuler » avant les 12 s : le réflexe naturel après une suppression
+  accidentelle était le geste qui rendait le bloc irrécupérable.
+- ⚠ **Ctrl+Z ne fait rien quand une modale est ouverte** (`aModalIsOpen`) :
+  il mutait l'éditeur derrière elle, la confirmation s'affichant dans une barre
+  de statut masquée. Ctrl+Shift+Z / Ctrl+Y répondent « pas de rétablissement »
+  au lieu de rester muets — muet, rien ne distingue « non implémenté » de
+  « raccourci non reçu ».
+- Une réponse supprimée est **réinsérée telle quelle** : le nœud détaché garde
+  ses écouteurs, donc elle reste éditable et basculable sans reconstruire le
+  markup (vérifié).
+- La suppression d'un **bloc** garde son bouton « ↩ Annuler » de 12 s, qui doit
+  repasser par le serveur (le bloc est réellement supprimé côté store) — ce
+  n'est pas la même mécanique qu'une annulation purement DOM.
 
 `GET /sujet/regions.json` n'expose que les pages couvertes par le calage :
 avec `\exemplaire{N}` le PDF contient N copies, mais le calage ne décrit que
@@ -1226,14 +2318,46 @@ Tout est neutralisé sous `prefers-reduced-motion: reduce`.
   (`.bar-field`), partagée par l'en-tête des QCM, des questions ouvertes et des
   `answerbox`. `.q-horiz` ne sert plus qu'à la case à cocher « horiz », où
   l'alignement en ligne est le bon.
-- **Suppression annulable** : `deleteBlock` capture contenu + position avant de
-  supprimer et propose « ↩ Annuler » 12 s (`setStatusAction`). Ça remplace la
-  confirmation modale — le ✕ est à 8 px de « dupliquer », et une boîte de
-  dialogue de plus ne protège personne, alors qu'un retour arrière si.
+- **Suppression : confirmation PUIS annulation.** Le projet ne comptait d'abord
+  que sur le bouton « ↩ Annuler » de 12 s (`setStatusAction`), en jugeant
+  qu'une boîte de dialogue « ne protège personne ». Le pari a été perdu en
+  usage réel : deux questions ont été supprimées sans que le retour arrière
+  soit vu à temps. `deleteBlock` demande donc confirmation avant d'agir, et le
+  message **nomme ce qu'on va perdre** (`describeBlock` : « la question Q4
+  “pente” (Morning) et ses 4 réponses ») — c'est ce qui distingue une
+  confirmation utile d'un réflexe « OK ». Les deux filets sont gardés.
   ⚠ L'annulation **réutilise le bid d'origine** (`POST /api/sujet/blocks/add`
   accepte `bid`) : il est gravé dans le calage compilé (`bareme-<bid>` d'un
   answerbox, marqueur `ffz<bid>` d'une question libre), un identifiant neuf
   romprait le lien avec l'aperçu et le HTR jusqu'à la recompilation.
+  ⚠ Elle réutilise aussi le **groupe** (`add_block(..., group=)`) et repart des
+  **données stockées**, pas de `collectBlockData` : l'éditeur ne rend que ce
+  qu'il affiche, si bien que le couple supprimer → annuler perdait `epilogue`
+  (le `\end{multicols}` d'un sujet importé, donc un sujet qui ne compile plus)
+  et rangeait le bloc restauré dans `COMMON_GROUP`, imprimé dans toutes les
+  versions. Les deux ont été constatés sur un vrai projet.
+  ⚠ **Si la lecture de l'état stocké échoue, on ne supprime pas** : la version
+  précédente avalait l'échec, restaurait ensuite un bloc amputé et annonçait
+  « restauré ✓ » — sujet qui ne compile plus. On ne supprime que ce qu'on saura
+  remettre.
+  ⚠ **`after_bid = None` veut dire « en fin » pour `add_block` et « en tête »
+  pour `move_block`** — deux conventions opposées pour le même argument. La
+  restauration passant par `add_block`, remettre le PREMIER bloc du sujet le
+  renvoyait à la fin du document, en silence : d'où `at_start`.
+  ⚠ **`restore=True` contourne `DISABLED_KINDS`** : sans lui, un
+  `question_freeform` supprimé était définitivement perdu, alors que le filtre
+  ne vise que la *création* — ce que CLAUDE.md promettait déjà.
+  ⚠ L'annulation appelle `ensureSavedBeforeReload()` avant de recharger, comme
+  `importFromBank` et l'application d'une édition IA, qui ne le faisaient pas
+  non plus : `reloadPage` lève le garde-fou `beforeunload`, les blocs modifiés
+  non enregistrés partaient donc en silence.
+
+- **Les numéros de question sont recalculés côté client** (`renumberBlocks`,
+  appelé par `buildOutline`, qui tourne après tout changement de structure).
+  Ils venaient du seul rendu serveur : après un déplacement, la pastille et
+  surtout la confirmation de suppression nommaient une question qui n'était
+  plus à ce rang — or `describeBlock` existe précisément pour nommer ce qu'on
+  va perdre.
 
 ### Jetons de design (`:root` en tête de style.css)
 
@@ -1377,6 +2501,58 @@ legacy parce que :
 - Une ligne vide est insérée entre les blocs (`parts.append("")` dans
   `render_subject`) pour préserver les paragraphes LaTeX que les marqueurs
   pourraient avaler.
+
+### Publier le sujet et son corrigé (menu « 📤 Publier »)
+
+Ce qu'on donne aux étudiants **après** l'examen : le questionnaire vierge et le
+même document avec les bonnes réponses noircies.
+`sujet_store.compile_publication(kind)` → `sujet/DOC-publication-<kind>.pdf`,
+route `POST /api/sujet/publication`, servis par `GET /sujet/publication/<kind>.pdf`.
+
+⚠ **Ce ne sont pas des documents à imprimer** : ni mires, ni code de copie, ni
+feuille de réponses, donc aucun calage ne les décrit. `DOC-sujet.pdf` reste le
+seul document dont les copies scannées peuvent venir. La compilation n'écrit ni
+`exam.tex`, ni `exam.xy`, ni `DOC-sujet.pdf`, et n'invalide aucun cache de
+géométrie — publier ne peut pas déplacer une note.
+
+- **Le crochet AMC est `\def\CorrigeExterne{1}`** dans `exam-config.tex` (comme
+  `\SujetExterne` l'est pour le calage, cf. `automultiplechoice.sty` ligne
+  2672). Il allume d'un coup : **une seule copie par `\exemplaire`** — donc une
+  par version, sans quoi on publierait les 44 copies —, pas de mires, pas de
+  code imprimé, pas de filigrane.
+- ⚠ **Le sujet vierge sort du MÊME crochet**, réponses éteintes dans le
+  préambule (`\AMC@correcfalse`, `\def\AMC@intituleHead{}`, injectés juste
+  avant `\begin{document}`). Il n'existe pas d'option AMC « comme le corrigé,
+  mais vierge » : `modele` s'en approche mais garde le bandeau « Correction ».
+  Et le fichier de configuration ne peut pas servir — il est lu **avant** que
+  ces drapeaux n'existent (`\InputIfFileExists` ligne 42, `\newif` ligne 65).
+  C'est ce qui rend les deux PDF **superposables page pour page** : ils
+  diffèrent de trois lignes de préambule, rien d'autre.
+- ⚠ **La source est `sujet/exam.tex`, pas le store.** Le document publié décrit
+  l'examen qui a eu lieu, donc la dernière compilation ; des blocs édités depuis
+  ne sont sur la copie de personne.
+- ⚠ **On recompile à chaque demande** au lieu de servir le dernier fichier : un
+  corrigé périmé part chez les étudiants sans que rien ne le signale, et trois
+  secondes de `pdflatex` coûtent moins cher que ça.
+- **La feuille de réponses est retirée** (`publication_tex`, entre les marqueurs
+  `%%QCM-ANSWER-SHEET…`), avec le `\newpage` qui l'introduit — sinon le document
+  se termine par une page blanche. ⚠ `%%QCM-ANSWER-SHEET` est un **préfixe** de
+  `%%QCM-ANSWER-SHEET-END` : sans le `(?!-END)`, la borne gauche s'accroche à la
+  fermeture du bloc précédent et tout le second `\exemplaire` — en-tête et
+  questions compris — disparaît du document publié. Fixé par
+  `tests/test_publication.py`.
+- ⚠ **Un sujet legacy garde sa feuille de réponses** : sans marqueurs, il n'y a
+  pas de quoi l'isoler, et couper au jugé publierait un sujet tronqué. Le
+  bandeau de statut le dit.
+- ⚠ **Avec `shuffle_answers`, l'ordre publié n'est celui d'aucune copie en
+  particulier** (AMC repart de la copie 1 pour chaque `\exemplaire`). C'est
+  annoncé dans le statut : un étudiant qui compare le corrigé à sa feuille
+  verrait sinon des lettres qui ne correspondent pas et conclurait qu'il est
+  faux.
+- ⚠ **Le panneau du menu est mesuré puis ramené dans la fenêtre**
+  (`openPubMenu`) : il est trois fois plus large que son bouton et la toolbar se
+  replie en fenêtre étroite — ancré à droite, il sortait de 61 px à gauche de
+  l'écran (mesuré).
 
 ### Découpage legacy intelligent (visualisation seule)
 
@@ -1627,7 +2803,7 @@ Premier `tests/` du dépôt — **`unittest` de la stdlib**, pas de pytest (aucu
 dépendance ajoutée) :
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 175 tests
+.venv/bin/python -m unittest discover -s tests -v     # 460 tests
 ./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
 ```
 
@@ -1865,6 +3041,87 @@ plafond de 500 lignes de `list_questions`, qui mordra bien avant.
 Jinja est en `auto_reload=False` (debug off) et met `banque.html` en cache dès
 le premier rendu. Constaté en testant : un serveur lancé avant l'ajout de
 l'arbre servait indéfiniment l'ancienne page, arbre absent et aucune erreur.
+
+### Variantes d'une même question (backend local)
+
+Le sujet du matin et celui de l'après-midi posent souvent **la même** question à
+des valeurs près. Ce n'est ni un doublon (les deux doivent rester imprimables)
+ni deux questions (la banque triplerait et on ne verrait plus le cours). D'où
+les **variantes** : la liste n'affiche qu'un représentant par groupe, annoté
+`🔀 N`, et l'on déplie le groupe pour choisir celle qu'on imprime.
+
+Moteur : [bank_variants.py](auto_grading/bank_variants.py) — **logique pure,
+zéro I/O**, partagée par les deux backends comme `bank_taxonomy.py`. Le modèle
+tient dans un champ : `variant_of` vaut `""` si la question est **chef** de son
+groupe (cas par défaut, une question seule comprise) et sinon le `bank_id` du
+chef.
+
+⚠ **Pas de chaîne.** Rattacher A à B alors que B est déjà une variante range A
+sous le **chef** de B. Une arborescence obligerait chaque page à remonter les
+parents pour répondre à « quelles sont les variantes de celle-ci ? », et deux
+pages finiraient par en compter deux nombres différents.
+
+⚠ **Rattacher une question qui a déjà des variantes FUSIONNE les deux groupes.**
+Laisser ses variantes derrière elle créerait un second chef au même énoncé —
+exactement le doublon que ce mécanisme existe pour éviter. `set_variant_of`
+rend donc **l'état réel du groupe après écriture**, jamais ce qui a été
+demandé, et l'UI affiche ce qu'elle a obtenu.
+
+⚠ **Supprimer un chef ne supprime jamais ses variantes** : la plus ancienne est
+promue, les autres la suivent (`promote_on_delete`). Même règle que pour les
+catégories — aucune question n'est jamais supprimée implicitement. Sans ça,
+supprimer une question en ferait disparaître plusieurs de la liste, toujours
+sur le disque mais repliées sous un chef qui n'existe plus.
+
+⚠ **Un pointeur mort ou un cycle est RÉPARÉ à la lecture, pas levé**
+(`normalize`, appelé par tout listing). Ces fichiers se suppriment à la main,
+se synchronisent par git, se restaurent depuis une sauvegarde : une banque ne
+doit pas devenir illisible parce qu'un `variant_of` désigne un fichier absent.
+`bank.repair_variants()` persiste la réparation pour ne pas la refaire à chaque
+listing.
+
+⚠ **Le filtre porte sur chaque question, le repli vient APRÈS**
+(`expand_matches`). Une recherche qui ne touche qu'une variante ramène donc son
+groupe entier : sinon la variante serait repliée sous un chef que le filtre n'a
+pas retenu, et elle disparaîtrait de l'écran — introuvable alors qu'elle
+correspond exactement à ce qu'on cherche.
+
+⚠ **Rattacher ne touche ni `modified_at` ni `version`**, pour la même raison que
+classer dans une catégorie : la liste est triée par date de modification, et
+ranger de vieux QCM les ferait tous remonter en tête.
+
+⚠ `variant_of` et `created_at` sont **dans `index.json`** (version 3) : replier
+les variantes est fait à chaque listing, et relire 300 fichiers à chaque frappe
+de la recherche annulerait l'index. L'ordre au sein d'un groupe est
+`(created_at, bank_id)` — `_now()` est à la seconde, donc deux questions créées
+dans le même lot ne se départagent que par leur identifiant : un import qui
+tient à l'ordre doit poser `created_at` lui-même.
+
+| Route | Rôle |
+|---|---|
+| `GET /api/bank/<id>/variants` | `{head, members:[…]}` — le groupe entier, chef d'abord |
+| `POST /api/bank/<id>/variants` | `{head_id}` rattache · `{head_id: null}` détache |
+| `GET /api/bank?variants=all` | liste à plat (défaut : repliée) |
+
+**UI** : badge `🔀 N` sur la ligne de liste de `/banque`, encart « Variantes »
+dans le panneau de détail (groupe cliquable, ✕ pour détacher, bouton
+« Rattacher à une autre question… » qui met la liste en mode désignation —
+bandeau + curseur, parce qu'une liste qui change de sens en silence se paye au
+premier clic). Dans la modale « 📚 Banque » de `/sujet`, une rangée de pastilles
+choisit **la variante à insérer** : sans elle on insérerait toujours le
+représentant et les autres formulations seraient stockées pour rien.
+
+⚠ **Non fait : le backend en ligne.** `bank_online` n'expose pas `list_variants`,
+donc `_var_backend()` répond **501** (même contrat que `_cat_backend`). En
+revanche `variant_of` est dans le `skip` de `_question_to_row` : `from_block` le
+pose sur toute question locale, et sans ce filtre `bank_migrate` échouerait en
+PGRST204 dès la première question.
+
+⚠ **`.banque-list-panel` est passé de 280 à 340 px** et la ligne n'affiche plus
+que la **feuille** de la catégorie (chemin complet en infobulle). 280 px
+suffisaient tant que la banque était vide ; avec de vrais titres et une vraie
+catégorie par ligne, le titre tombait à « Conclure… » pendant que le chemin
+était tronqué à « Modèle linéaire › V… », qui ne distingue rien.
 
 ### Backend en ligne (Supabase) — multi-user
 
@@ -2170,6 +3427,182 @@ réponse (rectangle large sous le marker, hauteur `lines × 24pt`). Écrit
   `xcolor` (chargé par AMC). Si une compile flatten les couleurs, le marker
   reste lisible mais visible — pas grave.
 
+## Onglet « Courriels » — envoyer les notes aux étudiants
+
+Page `/mail` + moteur [mail_results.py](auto_grading/mail_results.py) (portage
+du script Julia d'origine). Lit `compte_rendu/notes.csv`, recolle le prénom
+depuis la liste étudiants, et envoie à chacun un message sobre en anglais.
+
+L'onglet édite le gabarit, l'objet, l'expéditeur, le serveur et le secret ;
+il montre l'aperçu sur un vrai destinataire, la liste de qui recevra quoi, et
+lance l'envoi avec une barre de progression. Le CLI fait la même chose sans
+navigateur :
+
+```bash
+python auto_grading/mail_results.py                          # simulation
+python auto_grading/mail_results.py --only moi@x.fr --send   # essai
+python auto_grading/mail_results.py --send                   # envoi
+```
+
+⚠ **Les réglages de l'onglet font foi pour les deux chemins** : le CLI lit
+`mail_*` en config, les options ne font que les surcharger. Sans ça, la ligne
+de commande et l'interface enverraient deux messages différents.
+
+### Gabarit : `$champ`, pas `{champ}`
+
+`string.Template` plutôt que `str.format` : un texte de courriel contient des
+accolades bien plus souvent qu'un `$`, et `str.format` obligerait à les
+doubler. Champs : `$name` (prénom), `$full_name`, `$email`, `$id`, `$score`,
+`$max_score`, `$date`, `$sender`. Un `$` littéral s'écrit `$$`.
+
+- Le gabarit vit **dans le projet** (`mail_template.txt`), initialisé depuis
+  celui fourni ([mail_results.txt](auto_grading/mail_results.txt)) au premier
+  accès : le texte et la date sont propres à un examen.
+- ⚠ **L'objet passe par le même moteur** que le corps (`$name`, `$date` y sont
+  utiles). Les trois chemins le rendent : aperçu, worker de l'onglet, CLI.
+- ⚠ **Un `$champ` inconnu et un `$` isolé lèvent un message qui dit quoi
+  faire**, jamais un `KeyError` nu ni un `ValueError` au milieu d'un envoi.
+- ⚠ `default_subject("")` rend « MCQ results », **sans tiret cadratin
+  orphelin** : « MCQ results — » serait parti tel quel dans 38 boîtes le jour
+  où la date n'est pas renseignée.
+- ⚠ **L'aperçu porte sur le contenu du formulaire**, pas sur le disque : le
+  gabarit voyage dans le corps de `POST /api/mail/preview`, éditions non
+  enregistrées comprises.
+
+### Enregistrement automatique — Ctrl+Shift+R ne perd rien
+
+Les réglages et le gabarit s'enregistrent **seuls** : 400 ms après la dernière
+frappe, et **immédiatement** sur `change` (sortie de champ, choix dans un menu).
+
+⚠ **Un garde-fou `beforeunload` n'aurait pas suffi** : un rechargement forcé
+(Ctrl+Shift+R) ne restaure aucun champ de formulaire — contrairement à un F5 —,
+et un gabarit réécrit en entier partait sans un mot. Avertir n'était pas ce
+qu'on voulait : on voulait qu'il n'y ait rien à perdre. Rien sur cette page
+n'envoie de courriel, donc persister au fil de la frappe est sans risque.
+
+⚠ **Le mot de passe est exclu de l'automatisme** : il ne part que par le
+bouton, pour qu'une saisie à moitié tapée ne soit jamais enregistrée.
+
+⚠ **Le rechargement peut devancer l'enregistrement.** Deux filets, parce qu'un
+seul ne suffisait pas :
+- `visibilitychange` → `navigator.sendBeacon` (et non `fetch`, qui serait
+  annulé par la navigation) pour la dernière rafale ;
+- `reconcile()` au chargement : la page est rendue depuis `config.json`, et un
+  beacon parti juste avant peut y arriver **après**. Sans ce contrôle, l'écran
+  réaffichait l'ancienne valeur — puis la frappe suivante la réenregistrait,
+  effaçant en silence les dernières touches. Il ne recale que les champs
+  auxquels personne n'a encore touché (`touched`), jamais par-dessus une
+  saisie en cours. Mesuré : un rechargement lancé 0 ms après la frappe affiche
+  désormais la bonne valeur.
+
+⚠ **Une valeur DÉRIVÉE ne doit pas se figer** : le champ « Identifiant SMTP »
+vide signifie « la même que l'adresse d'expédition ». Le formulaire affichait
+la valeur résolue, que l'enregistrement automatique gravait aussitôt en dur —
+changer l'adresse ensuite ne l'entraînait plus. D'où `smtp_user` (effectif,
+pour la connexion) **et** `smtp_user_raw` (stocké, pour le champ). Tout défaut
+dérivé ajouté ici demandera la même paire.
+
+### Le mot de passe
+
+`~/.config/amcx/smtp_password`, créé en **0600 avant d'être écrit** (`os.open`
+avec le mode : poser les droits après laisserait une fenêtre où le secret est
+lisible de tous).
+
+⚠ **Il y est EN CLAIR, et l'interface le dit.** Le chiffrer sans demander une
+phrase secrète à chaque envoi rangerait la clé juste à côté — de l'apparence de
+sécurité. Ce qui est réellement acquis, et qui est le point :
+
+- il est **hors du dossier de projet**, qui se partage (sujet, scans, config) ;
+- **aucune route ne le renvoie** : `_mail_settings()` n'expose que
+  `password_set: bool`, et le champ du formulaire est en écriture seule ;
+- ⚠ **un champ vide ne l'efface pas** — la clé `password` n'est traitée que si
+  elle est présente dans le corps, sinon enregistrer les réglages détruirait le
+  secret à chaque fois. L'effacement est un bouton explicite.
+
+Précédence : `AMCX_SMTP_PASSWORD` > fichier > saisie au clavier (CLI seul).
+Pour Gmail, c'est un **mot de passe d'application**, jamais celui du compte.
+
+⚠ **Rien ne part sans `--send`.** Un envoi à toute une promo est irréversible
+et sort du poste. Le mode par défaut se connecte à zéro serveur : il imprime
+les destinataires, les écartés et le message rendu, puis s'arrête.
+
+⚠ **Le mot de passe n'est écrit nulle part** — ni dans le code, ni dans
+`config.json`, qui suit le projet quand on le partage et que `public_config()`
+ne masquerait pas. Il vient de `AMCX_SMTP_PASSWORD`, sinon il est demandé au
+clavier. Pour Gmail, c'est un *mot de passe d'application*.
+
+⚠ **Rien n'est écarté en silence** : une copie sans adresse, sans note ou non
+reliée à un étudiant est **listée** avant l'envoi, avec son motif. Sur un envoi
+de masse, une ligne filtrée sans un mot est un étudiant qui ne recevra rien sans
+que personne ne le sache — et « il était absent » ne ressemble pas à
+« l'export est cassé ».
+
+⚠ **Le barème annoncé est celui du sujet** (`mail_results.default_max_score` →
+`sujet_store.subject_total_max()`) : depuis que la note d'un examen est son
+score brut, `note_finale` et `QCM_brut` vivent sur la **même** échelle. Ce
+n'est surtout pas `final_threshold`, un plafond dur souvent laissé à 20 alors
+que le sujet vaut 5 — « 5 / 20 » à un étudiant qui a tout juste. Le repli
+historique (moyenne pondérée des `max` de chaque colonne) ne sert plus qu'aux
+projets dont le sujet n'est pas lisible. Pour toute autre colonne, `--out-of`
+est **exigé** plutôt que deviné.
+
+⚠ **Le prénom vient du roster, pas du csv.** `nom_prenom` colle les deux ; le
+découper serait faux dès qu'un nom de famille est composé (« ADJEBA MBA
+Christian »). Sans roster chargé, repli sur le nom complet — jamais « Dear , »,
+qui signalerait à l'étudiant un envoi bâclé.
+
+- **Journal** `compte_rendu/mail_log.csv` : une adresse déjà servie n'est pas
+  re-servie (`--force` pour passer outre). Relancer la commande après trois
+  échecs ne doit pas re-notifier toute la promo. Un **échec** reste à renvoyer.
+- Un échec n'interrompt pas la boucle : sur 40 destinataires, s'arrêter à la
+  première adresse morte laisserait 39 personnes sans leur note.
+- Les notes négatives sont ramenées à 0 (comme le script d'origine) ;
+  `--no-floor` pour les annoncer telles quelles.
+- Testé de bout en bout contre un **serveur SMTPS jetable** : 39 messages
+  (1 essai + 38 étudiants), 39 destinataires distincts, en-têtes et corps
+  vérifiés sur les messages réellement reçus. `tests/test_mail_results.py`
+  couvre la logique (gabarit, secret, journal, échelle, simulation).
+
+**Routes** : `GET /mail` · `GET /api/mail` · `POST /api/mail/settings`
+(réglages + gabarit + secret) · `POST /api/mail/preview` (n'écrit rien) ·
+`POST /api/mail/send` `{mode: "test"|"all", to?, force?}` → `task_id` ·
+`GET /api/mail/send/<task_id>`.
+
+⚠ **Aucun destinataire par défaut** : `mode` est obligatoire, `test` exige une
+adresse, et `all` saute les adresses déjà servies sans `force`. Le front
+confirme en **nommant** ce qui part (nombre, expéditeur, objet) — un « OK »
+réflexe sur « Confirmer ? » ne protège personne.
+
+### ⚠ Les absents : dans les exports, hors des courriels
+
+Un étudiant de la liste qu'**aucune copie ne réclame** (`server.absent_students`)
+n'existait nulle part. Les deux moitiés du correctif comptent :
+
+- **Dans les exports** (`/export.csv` et `compte_rendu/notes.csv`), il a une
+  ligne comme les autres, à sa place alphabétique, avec `ABS`
+  (`server.ABSENT_MARK`) pour les colonnes qui dépendent de la copie. Sans
+  elle, il disparaît du fichier remis à la scolarité, et « absent » devient
+  indiscernable de « oublié dans l'export ».
+- **Hors des courriels** : `mail_results.load_recipients` l'écarte **sous son
+  nom**, motif « absent (ABS) ». Lui envoyer un message annonçant une note
+  qu'il n'a pas serait pire que ne rien envoyer.
+
+⚠ **`ABS` est une chaîne, jamais `0`** : un absent n'a pas eu zéro, il n'a pas
+composé. Les confondre fausse toute moyenne recalculée en aval sur le fichier
+exporté — et, côté correction, tirerait la moyenne de la promo vers le bas.
+
+⚠ **Ils n'entrent pas dans les statistiques** de l'onglet Évaluation : ceux-ci décrivent les copies corrigées. `absent_students()`
+n'est appelé que par les deux écrivains de CSV.
+
+⚠ **Les notes importées d'un absent sont conservées** dans `notes.csv` : il peut
+très bien avoir rendu le projet sans venir au QCM. Seules les colonnes issues de
+la copie valent `ABS`.
+
+⚠ **`export_scolarite.py` les compte à part** et laisse la cellule **vide** :
+la colonne est numérique dans le modèle de la scolarité, y écrire « ABS »
+pourrait faire échouer leur import. L'absence est dite dans le récapitulatif
+(`n absent(s) laissé(s) vides`), pas devinée par le destinataire du fichier.
+
 ## Si tu dois changer le barème
 
 L'éditer dans l'onglet *Sujet* : le barème est écrit dans `sujet/subject.json` et le
@@ -2185,6 +3618,6 @@ dehors, l'importer comme nouveau projet (`new_project.py --from-amc`).
 - **CV+ML est source primaire des `answers`** (pas AMC) — choix utilisateur « CV par défaut, flag si diff AMC ». La ground truth AMC est dans `_amc_answers`, la diff dans `_cv_amc_diff`.
 - **Le ML tourne sur toutes les cases** (et pas seulement une bande grise) ; l'ambiguïté est le désaccord ML/seuil — définition nette voulue par l'utilisateur.
 - **Pas d'API Anthropic** dans le pipeline de correction : `grader.py`/`vision_prompt.py` (voie multimodale abandonnée) sont dans [archive/](auto_grading/archive/) ; l'import paresseux de `batch_run.py` échoue désormais avec un message explicite. L'API Anthropic ne sert qu'à l'édition IA du sujet et au HTR.
-- **`index.html` supprimé** — `/` rend `dashboard.html` (toutes les pages héritent de `base.html`).
+- **`index.html` supprimé** — `/` rend `evaluation.html` (ex-`dashboard.html`, toutes les pages héritent de `base.html`).
 - **`to_review/`** + `prepare_to_review.py` / `import_reviewed.py` / `update_to_review_with_cv.py` / `build_index_md.py` = ancien workflow fichiers, superseded par l'UI → déplacés dans [auto_grading/archive/](auto_grading/archive/) (⚠ `import_reviewed.py` écrivait dans `raw_responses/` sans rien préserver).
 - Le serveur Flask est en `debug=off` → **les templates ne se rechargent pas à chaud**, redémarrer après édition.

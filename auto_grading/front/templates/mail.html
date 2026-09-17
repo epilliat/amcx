@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+{% block title %}Courriels — {{ recipients|length }} destinataires{% endblock %}
+
+{% block content %}
+<div class="mailpage">
+
+  <div class="ml-col ml-edit">
+    <h2 class="ml-title">✉ Message aux étudiants</h2>
+
+    {% if error %}
+      <div class="ml-error">{{ error }}</div>
+    {% endif %}
+
+    <section class="ml-card">
+      <div class="ml-card-head">Message</div>
+      <div class="ml-grid">
+        <label class="ml-field">Objet
+          <input type="text" id="m-subject" value="{{ settings.subject }}"
+                 placeholder="MCQ results — $date"></label>
+        <label class="ml-field">Date de l'épreuve
+          <input type="text" id="m-date" value="{{ settings.date }}"
+                 placeholder="3 September 2025"></label>
+      </div>
+
+      <label class="ml-field ml-field-wide">Corps du message
+        <textarea id="m-template" rows="14" spellcheck="false">{{ template }}</textarea>
+      </label>
+      <div class="ml-fields-help">
+        Champs disponibles — cliquer pour insérer :
+        {% for f in fields %}<button type="button" class="ml-chip" data-field="{{ f }}">${{ f }}</button>{% endfor %}
+        <span class="ml-note">un « $ » littéral s'écrit <code>$$</code></span>
+      </div>
+      <div class="ml-path">Gabarit : <code>{{ template_path }}</code></div>
+    </section>
+
+    <section class="ml-card">
+      <div class="ml-card-head">Expéditeur et serveur</div>
+      <div class="ml-grid">
+        <label class="ml-field">Nom affiché
+          <input type="text" id="m-sender-name" value="{{ settings.sender_name }}"
+                 placeholder="Emmanuel Pilliat"></label>
+        <label class="ml-field">Adresse d'expédition
+          <input type="email" id="m-sender" value="{{ settings.sender }}"
+                 placeholder="prenom.nom@gmail.com"></label>
+        <label class="ml-field">Serveur SMTP
+          <input type="text" id="m-host" value="{{ settings.smtp_host }}"></label>
+        <label class="ml-field ml-field-narrow">Port
+          <input type="number" id="m-port" value="{{ settings.smtp_port }}"
+                 min="1" max="65535"></label>
+        <label class="ml-field">Identifiant SMTP
+          <input type="text" id="m-user" value="{{ settings.smtp_user_raw }}"
+                 placeholder="= adresse d'expédition"></label>
+      </div>
+
+      {# ⚠ Champ en ÉCRITURE SEULE : la valeur enregistrée n'est jamais renvoyée
+         au navigateur, on n'affiche que l'état. #}
+      <div class="ml-secret">
+        <label class="ml-field">Mot de passe d'application
+          <input type="password" id="m-password" autocomplete="new-password"
+                 placeholder="{% if settings.password_set %}enregistré — laisser vide pour le garder{% else %}xxxx xxxx xxxx xxxx{% endif %}">
+        </label>
+        <div class="ml-secret-state">
+          {% if settings.env_password %}
+            <span class="ml-badge ml-badge-ok">✓ fourni par <code>AMCX_SMTP_PASSWORD</code></span>
+            <span class="ml-note">la variable d'environnement prime sur le fichier</span>
+          {% elif settings.password_set %}
+            <span class="ml-badge ml-badge-ok">✓ enregistré</span>
+            <button type="button" class="btn btn-tiny" id="m-forget">Effacer</button>
+          {% else %}
+            <span class="ml-badge ml-badge-warn">aucun mot de passe</span>
+          {% endif %}
+        </div>
+        <details class="ml-secret-help">
+          <summary>Où il est rangé, et ce que ça protège</summary>
+          <p>Le mot de passe est écrit dans <code>{{ settings.password_path }}</code>,
+             en dehors du dossier de projet, avec les droits <code>0600</code>
+             (lisible par ton seul compte).</p>
+          <p><b>Il y est en clair.</b> Le chiffrer sans te demander une phrase
+             secrète à chaque envoi rangerait la clé juste à côté : ce serait
+             de l'apparence de sécurité, pas de la sécurité. Ce qui est
+             réellement acquis : il ne part pas avec le projet quand tu le
+             partages, aucune page ne le réaffiche, et il n'apparaît dans
+             aucune réponse du serveur.</p>
+          <p>Avec Gmail, utilise un <b>mot de passe d'application</b>
+             (Compte Google → Sécurité → Validation en deux étapes → Mots de
+             passe des applications), jamais celui de ton compte : il ne donne
+             accès qu'à l'envoi, et se révoque seul.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="ml-card">
+      <div class="ml-card-head">Note annoncée</div>
+      <div class="ml-grid">
+        <label class="ml-field">Colonne
+          <select id="m-score-col">
+            <option value="note_finale"{% if settings.score_col == 'note_finale' %} selected{% endif %}>note finale</option>
+            <option value="QCM_brut_sur_32"{% if settings.score_col == 'QCM_brut_sur_32' %} selected{% endif %}>QCM brut</option>
+          </select></label>
+        <label class="ml-field ml-field-narrow">Sur
+          <input type="number" id="m-max" step="0.5" min="0.5"
+                 value="{{ "%g"|format(max_score) }}"></label>
+      </div>
+      <div class="ml-path">Notes lues dans <code>{{ notes_csv }}</code> —
+        produit par « 💾 Sauvegarder le compte rendu » du tableau de bord.</div>
+    </section>
+
+    <div class="ml-actions">
+      <button class="btn btn-primary" id="m-save">Enregistrer</button>
+      <span id="m-status" class="settings-hint"></span>
+      <span class="settings-hint">les réglages s'enregistrent tout seuls ·
+        le bouton sert à valider un mot de passe</span>
+    </div>
+  </div>
+
+  <div class="ml-col ml-side">
+    <section class="ml-card">
+      <div class="ml-card-head">Aperçu
+        <select id="m-preview-who" class="ml-preview-who"></select>
+      </div>
+      <div class="ml-preview">
+        <div class="ml-preview-head">
+          <div><b>À :</b> <span id="p-to"></span></div>
+          <div><b>Objet :</b> <span id="p-subject"></span></div>
+        </div>
+        <pre class="ml-preview-body" id="p-body"></pre>
+      </div>
+    </section>
+
+    <section class="ml-card">
+      <div class="ml-card-head">Envoi</div>
+      <div class="ml-send-counts">
+        <b>{{ recipients|length }}</b> destinataire(s) ·
+        <b>{{ recipients|selectattr('sent')|list|length }}</b> déjà servi(s)
+        {% if skipped %} · <b class="ml-warn">{{ skipped|length }}</b> écarté(s){% endif %}
+      </div>
+      {% if skipped %}
+      <details class="ml-skipped">
+        {# « copie » serait faux : un absent n'en a pas. #}
+        <summary>{{ skipped|length }} qui ne recevront pas de message</summary>
+        <ul>{% for s in skipped %}<li>{{ s.who }} — {{ s.why }}</li>{% endfor %}</ul>
+      </details>
+      {% endif %}
+
+      <div class="ml-send-test">
+        <label class="ml-field">Essai sur ma propre adresse
+          <input type="email" id="m-test-to" placeholder="moi@exemple.fr"></label>
+        <button class="btn btn-small" id="m-send-test">Envoyer l'essai</button>
+      </div>
+      <div class="ml-send-all">
+        <button class="btn btn-danger" id="m-send-all">✉ Envoyer à tous</button>
+        <label class="ml-force"><input type="checkbox" id="m-force">
+          y compris les adresses déjà servies</label>
+      </div>
+      <div class="ml-progress" id="m-progress" hidden>
+        <div class="ml-progress-step" id="m-progress-step"></div>
+        <div class="pf-progress-bar"><div class="pf-progress-fill" id="m-progress-fill" style="width:0%"></div></div>
+        <pre class="pf-progress-log" id="m-progress-log"></pre>
+      </div>
+      <div class="ml-path">Journal : <code>{{ log_path }}</code></div>
+    </section>
+
+    <section class="ml-card">
+      <div class="ml-card-head">Destinataires</div>
+      <table class="ml-table">
+        <tbody>
+        {% for r in recipients %}
+          <tr{% if r.sent %} class="is-sent"{% endif %}>
+            <td class="ml-t-name">{{ r.full_name }}</td>
+            <td class="ml-t-mail">{{ r.email }}</td>
+            <td class="ml-t-score">{{ "%g"|format(r.score) }}</td>
+            <td class="ml-t-flag">{% if r.sent %}✓{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const MAIL = {{ {"recipients": recipients}|tojson }};
+const $ = id => document.getElementById(id);
+const statusEl = $('m-status');
+
+function settings() {
+  return {
+    subject: $('m-subject').value,
+    date: $('m-date').value,
+    sender: $('m-sender').value,
+    sender_name: $('m-sender-name').value,
+    smtp_host: $('m-host').value,
+    smtp_port: parseInt($('m-port').value, 10) || 465,
+    smtp_user: $('m-user').value,
+    score_col: $('m-score-col').value,
+    max_score: parseFloat($('m-max').value) || 0,
+    template: $('m-template').value,
+  };
+}
+
+// --- aperçu : porte sur ce qui est À L'ÉCRAN, pas sur le disque ----------
+let previewTimer = null;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreview, 250);
+}
+async function refreshPreview() {
+  const s = settings();
+  const r = await fetch('/api/mail/preview', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({...s, email: $('m-preview-who').value})});
+  const j = await r.json();
+  if (!r.ok) {
+    $('p-to').textContent = ''; $('p-subject').textContent = '';
+    $('p-body').textContent = '✘ ' + j.error;   // textContent : jamais innerHTML
+    $('p-body').classList.add('is-bad');
+    return;
+  }
+  $('p-body').classList.remove('is-bad');
+  $('p-to').textContent = j.to_name + ' <' + j.to + '>';
+  $('p-subject').textContent = j.subject;
+  $('p-body').textContent = j.body;
+}
+// Champs de réglage : tout ce qui est persisté, sauf le secret.
+const SETTING_IDS = ['m-subject', 'm-date', 'm-template', 'm-sender-name',
+                     'm-sender', 'm-host', 'm-port', 'm-user', 'm-score-col',
+                     'm-max'];
+// Ceux qui changent le message rendu → aperçu ; tous → enregistrement.
+const PREVIEW_IDS = ['m-subject', 'm-date', 'm-template', 'm-sender-name',
+                     'm-score-col', 'm-max'];
+let touched = false;      // l'utilisateur a-t-il tapé depuis le chargement ?
+SETTING_IDS.forEach(id => {
+  const el = $(id);
+  el.addEventListener('input', () => {
+    touched = true;
+    if (PREVIEW_IDS.includes(id)) schedulePreview();
+    scheduleSave();
+  });
+  // `change` = la valeur est arrêtée (sortie du champ, choix dans un menu) :
+  // on enregistre TOUT DE SUITE plutôt que d'attendre le délai. C'est ce qui
+  // couvre le cas courant — je quitte le champ, puis je recharge.
+  el.addEventListener('change', () => {
+    touched = true;
+    if (PREVIEW_IDS.includes(id)) schedulePreview();
+    save({});
+  });
+});
+$('m-preview-who').addEventListener('change', refreshPreview);
+// Quitter la page en cours de frappe ne doit pas perdre la dernière rafale :
+// `visibilitychange` part avant que l'onglet ne soit déchargé, `sendBeacon`
+// n'attend pas de réponse (un `fetch` serait annulé).
+window.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'hidden' || saveTimer === null) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  try {
+    navigator.sendBeacon('/api/mail/settings',
+      new Blob([JSON.stringify(settings())], {type: 'application/json'}));
+  } catch (e) { /* rien à faire de plus : la frappe suivante ré-enregistrera */ }
+});
+
+// --- insertion d'un champ au curseur ------------------------------------
+document.querySelectorAll('.ml-chip').forEach(b => {
+  b.addEventListener('click', () => {
+    const ta = $('m-template');
+    const tok = '$' + b.dataset.field;
+    const a = ta.selectionStart, z = ta.selectionEnd;
+    ta.value = ta.value.slice(0, a) + tok + ta.value.slice(z);
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = a + tok.length;
+    schedulePreview();
+  });
+});
+
+// --- enregistrement ------------------------------------------------------
+let saveTimer = null;
+async function save(extra) {
+  clearTimeout(saveTimer);
+  statusEl.textContent = 'Enregistrement…';
+  const body = {...settings(), ...(extra || {})};
+  const r = await fetch('/api/mail/settings', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) { statusEl.textContent = '✘ ' + j.error; return false; }
+  statusEl.textContent = '✓ enregistré';
+  setTimeout(() => { statusEl.textContent = ''; }, 3000);
+  return true;
+}
+
+// ⚠ Enregistrement AUTOMATIQUE, plutôt qu'un garde-fou `beforeunload` : un
+// rechargement forcé (Ctrl+Shift+R) n'a pas de restauration de formulaire, et
+// tout ce qui n'était pas enregistré — un gabarit réécrit en entier — partait
+// sans un mot. Comme rien ici n'envoie de courriel, il n'y a aucun risque à
+// persister au fil de la frappe : ce qui est à l'écran EST ce qui est stocké.
+//
+// ⚠ Le mot de passe en est exclu : il ne passe que par le bouton, pour qu'une
+// saisie à moitié tapée ne soit jamais enregistrée.
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  statusEl.textContent = '…';
+  saveTimer = setTimeout(() => save({}), 400);
+}
+$('m-save').addEventListener('click', async () => {
+  const pw = $('m-password').value;
+  // ⚠ Champ vide = ne pas toucher au secret. L'envoyer quand même l'effacerait
+  // à chaque enregistrement de réglages.
+  const ok = await save(pw ? {password: pw} : {});
+  if (ok && pw) { $('m-password').value = ''; location.reload(); }
+});
+const forget = $('m-forget');
+if (forget) forget.addEventListener('click', async () => {
+  if (!confirm('Effacer le mot de passe enregistré ?')) return;
+  if (await save({password: ''})) location.reload();
+});
+
+// --- envoi ---------------------------------------------------------------
+async function send(payload, label) {
+  const btns = [$('m-send-test'), $('m-send-all')];
+  btns.forEach(b => b.disabled = true);
+  $('m-progress').hidden = false;
+  $('m-progress-step').textContent = 'Connexion…';
+  $('m-progress-fill').style.width = '0%';
+  $('m-progress-log').textContent = '';
+  const r = await fetch('/api/mail/send', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)});
+  const j = await r.json();
+  if (!r.ok) {
+    $('m-progress-step').textContent = '✘ ' + j.error;
+    btns.forEach(b => b.disabled = false);
+    return;
+  }
+  while (true) {
+    await new Promise(res => setTimeout(res, 800));
+    let s;
+    try {
+      s = await (await fetch('/api/mail/send/' + j.task_id)).json();
+    } catch (e) { $('m-progress-step').textContent = 'Erreur réseau'; break; }
+    $('m-progress-step').textContent = s.step || '…';
+    $('m-progress-fill').style.width = (s.progress || 0) + '%';
+    $('m-progress-log').textContent = (s.log || []).join('\n');
+    if (s.status !== 'running') {
+      if (s.status === 'done' && payload.mode === 'all') {
+        setTimeout(() => location.reload(), 1500);
+      }
+      break;
+    }
+  }
+  btns.forEach(b => b.disabled = false);
+}
+
+$('m-send-test').addEventListener('click', async () => {
+  const to = $('m-test-to').value.trim();
+  if (!to) { $('m-test-to').focus(); return; }
+  if (!await save({})) return;          // envoyer ce qui est à l'écran
+  send({mode: 'test', to: to}, 'essai');
+});
+
+$('m-send-all').addEventListener('click', async () => {
+  const force = $('m-force').checked;
+  const n = MAIL.recipients.filter(r => force || !r.sent).length;
+  if (!n) { alert('Aucun destinataire à servir.'); return; }
+  // ⚠ Confirmation qui NOMME ce qui va partir : un « OK » réflexe sur
+  // « Confirmer ? » ne protège personne.
+  if (!confirm(`Envoyer le message à ${n} étudiant(s) ?\n\n`
+    + `Expéditeur : ${$('m-sender').value}\n`
+    + `Objet : ${$('p-subject').textContent}\n\n`
+    + `C'est irréversible.`)) return;
+  if (!await save({})) return;
+  send({mode: 'all', force: force}, 'envoi');
+});
+
+// ⚠ Rattrapage après un rechargement qui a devancé l'enregistrement.
+// La page est rendue depuis `config.json` ; un `sendBeacon` parti juste avant
+// peut y arriver APRÈS. Sans ce contrôle, l'écran réafficherait l'ancienne
+// valeur — et la frappe suivante la réenregistrerait, effaçant en silence les
+// dernières touches. On ne recale que les champs auxquels personne n'a encore
+// touché : jamais par-dessus une saisie en cours.
+async function reconcile() {
+  let j;
+  try {
+    j = await (await fetch('/api/mail')).json();
+  } catch (e) { return; }
+  if (!j.ok || touched) return;
+  const map = {'m-subject': j.settings.subject, 'm-date': j.settings.date,
+               'm-sender': j.settings.sender, 'm-sender-name': j.settings.sender_name,
+               'm-host': j.settings.smtp_host, 'm-port': String(j.settings.smtp_port),
+               'm-user': j.settings.smtp_user_raw,
+               'm-score-col': j.settings.score_col,
+               'm-template': j.template};
+  let changed = false;
+  for (const [id, val] of Object.entries(map)) {
+    const el = $(id);
+    if (el && val !== undefined && el.value !== val) { el.value = val; changed = true; }
+  }
+  if (changed) refreshPreview();
+}
+
+// --- amorçage ------------------------------------------------------------
+(function init() {
+  const sel = $('m-preview-who');
+  MAIL.recipients.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.email;
+    o.textContent = r.full_name + ' — ' + (+r.score.toFixed(2));
+    sel.appendChild(o);                 // textContent : contenu utilisateur
+  });
+  refreshPreview();
+  reconcile();
+})();
+</script>
+{% endblock %}
