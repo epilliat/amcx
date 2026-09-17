@@ -737,6 +737,103 @@ chemin réellement lu est rendu dans la sortie (`path`).
 L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent jamais `raw_responses/`.
 
 
+## Onglet Fichiers (`/fichiers`) — le dossier de travail
+
+Une arborescence à la VS Code sur le **dossier de travail** : les projets AMC
+sont ses sous-dossiers, et ce qui les accompagne (listes d'étudiants, scans en
+attente, comptes rendus) vit à côté. Moteur :
+[workspace.py](auto_grading/workspace.py).
+
+⚠ **C'est le MÊME dossier que l'ensemble de `/cohorte`**, et le même pointeur
+(`~/.config/amcx/active_cohort`, env `AMCX_COHORT_DIR`). Deux racines — « mon
+dossier de travail » ici, « mon ensemble d'examens » là — auraient fini par
+désigner deux endroits, et « mes projets » aurait voulu dire deux choses. Le
+`cohorte.json` n'apparaît que le jour où l'on compose réellement un ensemble :
+**définir la racine n'écrit rien**, ce qui permet de la poser sur un dossier
+existant sans le transformer.
+
+### ⚠ La route la plus dangereuse du projet
+
+Le serveur n'a **aucune authentification** et `--host` permet de l'exposer. Ces
+routes déplacent, renomment et suppriment des fichiers. Les garde-fous, dans
+l'ordre où ils mordent :
+
+- **L'API ne parle qu'en chemins RELATIFS à la racine.** Un client ne peut même
+  pas *exprimer* un chemin extérieur — c'est la barrière la moins contournable,
+  parce qu'elle ne repose sur aucune comparaison.
+- **`resolve()` vérifie le chemin RÉSOLU**, liens symboliques suivis : sans ça,
+  un lien déposé dans le dossier de travail ouvrirait le reste du disque avec
+  les droits de l'utilisateur. Fixé par `test_un_lien_symbolique_qui_sort_est_refuse`.
+- **La racine reste bornée au dossier personnel**
+  (`project_state.check_under_browse_root`), comme le sélecteur de projet.
+- **Un nom passe par `project_state.project_name_error`** (liste noire : `..`,
+  séparateurs, caractères interdits sous Windows, noms de périphérique, point
+  ou espace final). Son paramètre `what` ne change que le libellé — « Donne un
+  nom au fichier » plutôt qu'« au projet » : **une seule règle**, un dossier de
+  rangement pouvant devenir un projet.
+- **Supprimer, c'est mettre à la corbeille** (`.amcx-corbeille/` dans la
+  racine), jamais `rmtree`. Un dossier de projet porte des scans, des
+  corrections relues à la main et des notes. `empty_trash()` est **la seule
+  fonction du projet qui détruit vraiment**, et la confirmation annonce le
+  nombre de fichiers et les octets.
+- **Rien n'écrase rien** : ni un déplacement, ni un renommage, ni un dépôt
+  (`scan.pdf` déposé deux fois donne `scan-2.pdf`), ni une restauration dont
+  la place d'origine a été reprise.
+- **On ne déplace pas un dossier dans lui-même** ni dans l'un de ses
+  descendants : `shutil.move` y construirait une arborescence dont le parent
+  est son propre enfant, sans message utilisable.
+
+⚠ **Liste blanche stricte pour l'affichage EN LIGNE** (`workspace.INLINE_TYPES`
+= pdf, png, jpeg, servis avec `nosniff` et une CSP). Servir un fichier de
+l'utilisateur en `inline` le place sur l'origine du serveur : un `.html` ou un
+`.svg` déposé dans le dossier de travail deviendrait du script exécuté avec les
+droits de l'interface. **Tout le reste passe par `/download`, en
+`as_attachment=True`**, qui n'exécute rien.
+
+⚠ **Le `auto_grading/` d'un projet n'est pas un projet de plus**
+(`workspace.is_project`). Sans cette règle, l'arbre affichait deux pastilles
+« projet actif » imbriquées et il fallait deviner laquelle ouvrir.
+
+### Ce que la page fait
+
+- Arbre **paresseux** (un niveau par requête), dépli persisté par racine dans
+  `localStorage`, guides d'indentation, icône par type, pastille `projet` et
+  **`projet actif`** — sans elle, on croit corriger l'examen qu'on a sous les
+  yeux ici alors que les autres onglets en montrent un autre.
+- Clic droit (ou `⋯` au survol) : nouveau sous-dossier, **nouveau projet AMC
+  ici**, dépôt de fichiers, renommer, déplacer, supprimer.
+- Glisser-déposer pour déplacer ; déposer des fichiers depuis le bureau pour
+  les ajouter (viser une ligne précise reste possible, le panneau entier
+  accepte le dépôt).
+- Clavier : ↑ ↓ pour naviguer, → ← pour déplier/replier, `F2` renommer,
+  `Suppr` mettre à la corbeille.
+- **Aperçu** dans le panneau de détail : texte (tronqué à 200 ko), PDF et
+  images en ligne. Un panneau vide n'aide personne, et l'usage courant est de
+  vérifier un `notes.csv` ou une page scannée sans quitter l'onglet.
+- « Ouvrir ce projet » bascule l'application (le serveur redémarre) ;
+  « Nouveau projet AMC » réutilise `POST /api/projects/create` avec `parent`,
+  donc **le même chemin de création** que la modale de la topbar. La page ne
+  conclut pas à l'échec sur une erreur réseau : la création se termine par un
+  suicide du serveur, elle sonde jusqu'au retour.
+- Le sélecteur de dossier réutilise le composant `pm-browser-*` et
+  `/api/projects/browse`, la seule route qui énumère le disque (403 hors du
+  dossier personnel). Un second sélecteur aurait divergé du premier.
+
+| Route | Rôle |
+|---|---|
+| `GET /fichiers` | la page (ou l'invite de choix de racine) |
+| `GET /api/workspace` | `{root, display, name, n_trash, active}` |
+| `POST /api/workspace/root` | `{path}` — n'écrit rien dans le dossier |
+| `GET /api/workspace/list?path=&hidden=` | entrées d'un dossier |
+| `GET /api/workspace/info?path=` | détail, enrichi pour un projet AMCx |
+| `POST /api/workspace/mkdir` · `rename` · `move` | remaniement |
+| `POST /api/workspace/delete` | `{path}` ou `{paths}` → **corbeille** ; un échec sur l'un n'arrête pas les autres et est **rendu** |
+| `GET /api/workspace/trash` · `POST .../restore` · `.../empty` | corbeille |
+| `POST /api/workspace/upload` | multipart `dest` + `files` |
+| `GET /api/workspace/preview?path=` | texte tronqué / type d'affichage |
+| `GET /api/workspace/view?path=` | **inline, liste blanche** (pdf/png/jpeg) |
+| `GET /api/workspace/download?path=` | toujours `as_attachment` |
+
 ## Vue d'ensemble (`/cohorte`) — plusieurs examens d'un même dossier
 
 Un **ensemble** est un dossier qui contient un `cohorte.json` et, à côté, les
@@ -890,6 +987,7 @@ auto_grading/
 ├── sujet/                     ← subject.json (SOURCE DE VÉRITÉ) + exam.tex (généré)
 │                                 + DOC-sujet.pdf + exam.xy (calage)
 ├── review_state.py            ← ce qui reste à relire : signalements, état traité, risque (pur)
+├── workspace.py               ← dossier de travail : arborescence, corbeille, bornes
 ├── grades_view.py             ← colonnes de note, rescaling, agrégation, histogrammes (PUR)
 ├── exam_results.py            ← table des résultats (1 ligne/étudiant) + `amcx results` (PUR)
 ├── cohort.py                  ← ensemble d'examens : membres (sous-processus), colonnes, agrégation
@@ -959,13 +1057,14 @@ pkill -f "front/server.py"
 
 ## UI — routes
 
-**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | Review rapide | Identités | **Courriels** | Export CSV.
+**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | **Fichiers** | Review rapide | Identités | **Courriels** | Export CSV.
 
 | Route | Rôle |
 |---|---|
 | `/sujet` | **Onglet Sujet** : modèle canonique (text/qcm/open) + outline + bandeau global |
 | `/` | **Évaluation** : un examen — copies, note brute, score moyen par question. Aucun réglage |
 | `/cohorte` | **Ensemble** : plusieurs examens d'un dossier — colonnes, histogrammes, nuage, formule |
+| `/fichiers` | **Fichiers** : arborescence du dossier de travail, corbeille, création de projet |
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
 | `/flagged` | **Review rapide** : signalements groupés par question, triés par risque ; `?status=open\|done\|all&sort=risk\|scan` |

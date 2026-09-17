@@ -149,8 +149,13 @@ def list_subdirs(path: Path) -> list[dict]:
     return out
 
 
-def project_name_error(name: str) -> str | None:
+def project_name_error(name: str, what: str = "projet") -> str | None:
     """Message d'erreur si `name` ne peut pas être un nom de dossier de projet.
+
+    `what` nomme ce qu'on est en train de nommer (« projet », « dossier »,
+    « fichier ») : la règle est la même partout — un dossier de rangement peut
+    devenir un projet —, mais « Donne un nom au projet » en renommant un
+    fichier laisse croire qu'on s'est trompé d'écran.
 
     ⚠ Liste **noire**, pas blanche. L'ancienne version n'acceptait que
     `[A-Za-z0-9_-. ]` : un nom français accentué (« Régression ») était refusé,
@@ -159,7 +164,7 @@ def project_name_error(name: str) -> str | None:
     problème.
     """
     if not name:
-        return "Donne un nom au projet."
+        return f"Donne un nom au {what}."
     if len(name) > 100:
         return "Nom trop long (100 caractères maximum)."
     bad = sorted({c for c in name if c in _BAD_NAME_CHARS})

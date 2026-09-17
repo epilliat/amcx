@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}Fichiers{% if ws.name %} — {{ ws.name }}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="ws-page">
+
+{% if not ws.root %}
+  {# --- Aucune racine : on ne montre pas un arbre vide, on demande le dossier.
+        Le champ texte reste libre (un disque externe), le bouton Parcourir est
+        borné au dossier personnel — même règle que le sélecteur de projet. --#}
+  <div class="ws-onboard">
+    <h2>📁 Choisis ton dossier de travail</h2>
+    <p>
+      C’est le dossier qui contient tes examens : <b>un sous-dossier par projet
+      AMC</b>, plus ce qui les accompagne (listes d’étudiants, scans, comptes
+      rendus). C’est aussi le dossier que l’onglet <b>Ensemble</b> agrège pour
+      calculer les notes de la promo.
+    </p>
+    <p class="settings-hint">
+      Définir la racine n’écrit rien : aucun fichier n’est créé tant que tu n’as
+      rien demandé.
+    </p>
+    <div class="ws-onboard-path">
+      <input type="text" id="ws-root-input" value="{{ ws.default_root }}"
+             placeholder="/chemin/vers/le/dossier" spellcheck="false">
+      <button type="button" class="btn" id="ws-browse">📂 Parcourir…</button>
+      <button type="button" class="btn btn-primary" id="ws-root-set">Utiliser</button>
+    </div>
+    <div class="ws-status" id="ws-status"></div>
+  </div>
+
+{% else %}
+  <div class="ws-bar">
+    <div class="ws-bar-root">
+      <span class="ws-bar-name">📁 {{ ws.name }}</span>
+      <span class="ws-bar-path" title="{{ ws.root }}">{{ ws.display }}</span>
+    </div>
+    <div class="ws-bar-actions">
+      <label class="settings-hint" style="display:flex;align-items:center;gap:4px;">
+        <input type="checkbox" id="ws-hidden"> fichiers cachés
+      </label>
+      <button type="button" class="btn btn-small" id="ws-new-folder">＋ Dossier</button>
+      <button type="button" class="btn btn-small" id="ws-new-project">🎓 Projet AMC</button>
+      <button type="button" class="btn btn-small" id="ws-upload">⤒ Déposer</button>
+      <button type="button" class="btn btn-small ws-trash-btn" id="ws-trash-btn">🗑 Corbeille</button>
+      <button type="button" class="btn btn-small" id="ws-change-root">Changer de dossier…</button>
+    </div>
+  </div>
+
+  <div class="ws-status" id="ws-status"></div>
+
+  <div class="ws-split">
+    <div class="ws-tree-panel" id="ws-tree-panel">
+      <div id="ws-tree"></div>
+      <div class="ws-drop-hint">
+        Glisser pour déplacer · clic droit pour les actions ·
+        déposer des fichiers ici pour les ajouter
+      </div>
+    </div>
+    <div class="ws-detail" id="ws-detail"></div>
+  </div>
+{% endif %}
+
+{# --- Sélecteur de dossier : MÊME composant que la modale « Nouveau projet »
+       (classes `pm-browser-*`, route `/api/projects/browse`, la seule qui
+       énumère le disque et qui répond 403 hors du dossier personnel). Un
+       second sélecteur aurait fini par diverger de celui-là. --#}
+<div class="pm-modal" id="wsBrowseModal" hidden role="dialog"
+     aria-labelledby="wsBrowseTitle">
+  <div class="pm-modal-card">
+    <div class="pm-modal-head">
+      <h3 id="wsBrowseTitle">Dossier de travail</h3>
+      <button type="button" class="pm-modal-close" id="wsBrowseClose">✕</button>
+    </div>
+    <div class="pm-modal-body">
+      <p class="pm-modal-hint">
+        Le dossier qui contient tes projets AMC, un par sous-dossier.
+        Le choisir n’écrit rien dedans.
+      </p>
+      <div class="pm-browser">
+        <div class="pm-browser-head">
+          <button type="button" class="pm-browser-up" id="wsBrowseUp"
+                  title="dossier parent">↑</button>
+          <code id="wsBrowsePath"></code>
+        </div>
+        <ul class="pm-browser-list" id="wsBrowseList"></ul>
+        <div class="pm-browser-err" id="wsBrowseErr" hidden></div>
+        <div class="pm-browser-actions">
+          <button type="button" class="pm-btn-secondary" id="wsBrowseMkdir">＋ Nouveau dossier</button>
+          <span class="pm-browser-spacer"></span>
+          <button type="button" class="pm-btn-secondary" id="wsBrowseCancel">Fermer</button>
+          <button type="button" class="pm-btn-primary" id="wsBrowsePick">Choisir ce dossier</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/workspace.js?v={{ range(1, 100000) | random }}"></script>
+<script>
+(function () {
+  const WSSTATE = {{ ws | tojson }};
+  AMCxWorkspace.boot(WSSTATE);
+
+  // ---- Sélecteur de dossier ------------------------------------------------
+  const modal = document.getElementById('wsBrowseModal');
+  const errBox = document.getElementById('wsBrowseErr');
+  let cur = WSSTATE.root || WSSTATE.default_root;
+  let atRoot = false;
+
+  function showErr(msg) {
+    errBox.hidden = !msg;
+    errBox.textContent = msg || '';       // message serveur : jamais en HTML
+  }
+
+  async function draw(path) {
+    const r = await fetch('/api/projects/browse?path=' + encodeURIComponent(path));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { showErr(j.error || 'Erreur'); return; }
+    showErr('');
+    cur = j.path;
+    atRoot = !!j.at_root;
+    document.getElementById('wsBrowsePath').textContent = j.display || j.path;
+    document.getElementById('wsBrowseUp').disabled = atRoot;
+    const host = document.getElementById('wsBrowseList');
+    host.innerHTML = '';
+    if (!j.dirs.length) {
+      const li = document.createElement('li');
+      li.className = 'pm-browser-empty';
+      li.textContent = '— aucun sous-dossier —';
+      host.appendChild(li);
+      return;
+    }
+    j.dirs.forEach(d => {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pm-browser-item';
+      // ⚠ Nom venu du disque : textContent, jamais innerHTML.
+      b.textContent = d.name;
+      if (d.is_project) {
+        const t = document.createElement('span');
+        t.className = 'pm-browser-tag';
+        t.textContent = 'projet';
+        b.appendChild(t);
+      }
+      b.addEventListener('click', () => draw(d.path));
+      li.appendChild(b);
+      host.appendChild(li);
+    });
+  }
+
+  function open() { modal.hidden = false; showErr(''); draw(cur); }
+  function close() { modal.hidden = true; }
+
+  document.getElementById('wsBrowseClose').addEventListener('click', close);
+  document.getElementById('wsBrowseCancel').addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.getElementById('wsBrowseUp').addEventListener('click', () => {
+    const up = cur.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/';
+    draw(up);
+  });
+  document.getElementById('wsBrowseMkdir').addEventListener('click', async () => {
+    const name = prompt('Nom du nouveau dossier :', '');
+    if (name == null || !name.trim()) return;
+    const r = await fetch('/api/projects/mkdir', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({parent: cur, name: name.trim()})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { showErr(j.error || 'Erreur'); return; }
+    draw(j.path);
+  });
+  document.getElementById('wsBrowsePick').addEventListener('click', () => setRoot(cur));
+
+  async function setRoot(path) {
+    const r = await fetch('/api/workspace/root', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: path})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert('✘ ' + (j.error || 'Erreur')); return; }
+    window.location.reload();
+  }
+
+  const browseBtn = document.getElementById('ws-browse');
+  if (browseBtn) browseBtn.addEventListener('click', open);
+  const changeBtn = document.getElementById('ws-change-root');
+  if (changeBtn) changeBtn.addEventListener('click', open);
+  const setBtn = document.getElementById('ws-root-set');
+  if (setBtn) setBtn.addEventListener('click', () =>
+    setRoot(document.getElementById('ws-root-input').value.trim()));
+  const inp = document.getElementById('ws-root-input');
+  if (inp) inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') setRoot(inp.value.trim());
+  });
+})();
+</script>
+{% endblock %}

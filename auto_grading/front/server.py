@@ -91,6 +91,7 @@ import bank
 import bank_online
 import bank_auth
 import bank_taxonomy as tx
+import workspace
 from config import load_config, save_config
 
 
@@ -5932,6 +5933,228 @@ def cohorte_export_csv():
         buf.getvalue(), mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={name}_notes.csv"},
     )
+
+
+# ==========================================================================
+# Onglet Fichiers — le dossier de travail et son arborescence
+# ==========================================================================
+#
+# ⚠ **Ces routes écrivent sur le disque de l'utilisateur.** Tous les garde-fous
+# vivent dans [workspace.py](../workspace.py) : chemins relatifs à la racine,
+# vérification après résolution des liens symboliques, validation des noms,
+# suppression = corbeille. Les routes ne font que traduire ses refus en codes
+# HTTP — aucune ne recalcule un chemin de son côté, sinon les deux finiraient
+# par diverger et c'est l'écriture qui coûterait cher.
+
+def _ws_error(e: Exception):
+    if isinstance(e, workspace.WorkspaceError):
+        return jsonify({"error": str(e)}), 400
+    if isinstance(e, PermissionError):
+        return jsonify({"error": f"Droits insuffisants : {e}"}), 403
+    if isinstance(e, OSError):
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"error": str(e)}), 500
+
+
+def _ws_state() -> dict:
+    r = workspace.root()
+    return {
+        "root":         str(r) if r else "",
+        "display":      project_state.display_dir(r) if r else "",
+        "name":         r.name if r else "",
+        "default_root": str(project_state.DEFAULT_PROJECTS_ROOT),
+        "home":         str(project_state.browse_root()),
+        "n_trash":      len(workspace.list_trash()) if r else 0,
+        "active":       str(config.project_root()),
+    }
+
+
+@app.route("/fichiers")
+def fichiers_page():
+    return render_template("fichiers.html", ws=_ws_state(), active="fichiers")
+
+
+@app.route("/api/workspace")
+def api_workspace():
+    return jsonify({"ok": True, **_ws_state()})
+
+
+@app.route("/api/workspace/root", methods=["POST"])
+def api_workspace_root():
+    """Définit le dossier de travail. ⚠ N'écrit **rien** dedans — c'est ce qui
+    permet de le poser sur un dossier existant sans le transformer en
+    « ensemble » tant qu'on n'a pas composé de notes."""
+    try:
+        r = workspace.set_root(_json_body().get("path", ""))
+        return jsonify({"ok": True, **_ws_state(), "root": str(r)})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/list")
+def api_workspace_list():
+    try:
+        rel = request.args.get("path", "")
+        hidden = request.args.get("hidden") in ("1", "true", "yes")
+        return jsonify({"ok": True, "path": rel.strip("/"),
+                        "entries": workspace.listdir(rel, hidden=hidden)})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/info")
+def api_workspace_info():
+    try:
+        return jsonify({"ok": True, "entry": workspace.info(
+            request.args.get("path", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/mkdir", methods=["POST"])
+def api_workspace_mkdir():
+    b = _json_body()
+    try:
+        return jsonify({"ok": True,
+                        "path": workspace.mkdir(b.get("parent", ""),
+                                                b.get("name", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/rename", methods=["POST"])
+def api_workspace_rename():
+    b = _json_body()
+    try:
+        return jsonify({"ok": True,
+                        "path": workspace.rename(b.get("path", ""),
+                                                 b.get("name", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/move", methods=["POST"])
+def api_workspace_move():
+    b = _json_body()
+    try:
+        return jsonify({"ok": True,
+                        "path": workspace.move(b.get("path", ""),
+                                               b.get("dest", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/delete", methods=["POST"])
+def api_workspace_delete():
+    """Met à la corbeille. ⚠ **Ne supprime rien** — cf. `workspace.trash`."""
+    b = _json_body()
+    paths = b.get("paths") or ([b["path"]] if b.get("path") else [])
+    done, failed = [], []
+    for rel in paths:
+        try:
+            done.append(workspace.trash(rel))
+        except Exception as e:
+            failed.append({"path": rel, "error": str(e)})
+    # ⚠ Un échec ne fait pas échouer les autres, et il est RENDU : supprimer
+    # 5 dossiers dont 1 verrouillé ne doit ni s'arrêter au premier, ni laisser
+    # croire que les 5 sont partis.
+    return jsonify({"ok": not failed, "trashed": done, "failed": failed,
+                    "n_trash": len(workspace.list_trash())})
+
+
+@app.route("/api/workspace/trash")
+def api_workspace_trash():
+    try:
+        return jsonify({"ok": True, "entries": workspace.list_trash(),
+                        "size": workspace.trash_size()})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/trash/restore", methods=["POST"])
+def api_workspace_trash_restore():
+    try:
+        return jsonify({"ok": True,
+                        "path": workspace.restore(_json_body().get("slot", "")),
+                        "n_trash": len(workspace.list_trash())})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/trash/empty", methods=["POST"])
+def api_workspace_trash_empty():
+    """⚠ La seule route de tout le projet qui détruit vraiment des fichiers."""
+    try:
+        return jsonify({"ok": True, "removed": workspace.empty_trash()})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/upload", methods=["POST"])
+def api_workspace_upload():
+    dest = (request.form.get("dest") or "").strip()
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "aucun fichier"}), 400
+    saved, failed = [], []
+    for f in files:
+        try:
+            saved.append(workspace.save_upload(dest, f.filename, f.stream))
+        except Exception as e:
+            failed.append({"name": f.filename, "error": str(e)})
+    return jsonify({"ok": not failed, "saved": saved, "failed": failed})
+
+
+@app.route("/api/workspace/preview")
+def api_workspace_preview():
+    """Contenu d'un fichier, pour le panneau de détail (texte tronqué)."""
+    try:
+        return jsonify({"ok": True,
+                        **workspace.preview(request.args.get("path", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/view")
+def api_workspace_view():
+    """Sert un fichier **en ligne**, sur liste blanche stricte de types.
+
+    ⚠ PDF, PNG et JPEG seulement (`workspace.INLINE_TYPES`), avec le type
+    annoncé et `nosniff`. Servir un `.html` ou un `.svg` de l'utilisateur ici
+    le placerait sur l'origine du serveur : ce serait du script exécuté avec
+    les droits de l'interface. Le reste passe par `/download`, qui n'exécute
+    rien.
+    """
+    rel = request.args.get("path", "")
+    try:
+        mime = workspace.inline_type(rel)
+        p = workspace.resolve(rel)
+    except workspace.WorkspaceError as e:
+        return jsonify({"error": str(e)}), 400
+    resp = send_file(p, mimetype=mime, as_attachment=False,
+                     download_name=p.name)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Security-Policy"] = "default-src 'none'; object-src 'self'"
+    return resp
+
+
+@app.route("/api/workspace/download")
+def api_workspace_download():
+    """Télécharge un fichier du dossier de travail.
+
+    ⚠ **Toujours `as_attachment=True`, quel que soit le type.** Servir en ligne
+    un fichier fourni par l'utilisateur le place sur l'origine du serveur : un
+    `.html` déposé dans le dossier de travail deviendrait du script exécuté
+    avec les droits de l'interface, et un PDF peut porter du JavaScript. Un
+    téléchargement ne peut rien exécuter ici.
+    """
+    try:
+        p = workspace.resolve(request.args.get("path", ""))
+    except workspace.WorkspaceError as e:
+        return jsonify({"error": str(e)}), 400
+    if not p.is_file():
+        return jsonify({"error": "pas un fichier"}), 404
+    return send_file(p, as_attachment=True, download_name=p.name)
 
 
 def _check_pdflatex():

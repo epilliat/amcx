@@ -4819,3 +4819,189 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .bank-var-chip.is-picked {
   background: #ece4f6; border-color: #b9a4d6; color: #5b3c8c; font-weight: 500;
 }
+
+/* ==========================================================================
+   Onglet Fichiers — arborescence du dossier de travail
+   ========================================================================== */
+
+.ws-page { padding: 14px 16px 28px; }
+
+/* --- Bandeau de la racine ------------------------------------------------ */
+.ws-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: var(--sf); border: 1px solid var(--bd-faint); border-radius: 6px;
+}
+.ws-bar-root { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ws-bar-name { font-weight: 600; color: var(--tx-strong); font-size: 14px; }
+.ws-bar-path {
+  font-size: 11.5px; color: var(--tx-muted); font-family: ui-monospace, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46vw;
+}
+.ws-bar-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.ws-trash-btn.has-items { color: var(--warn-bd); border-color: var(--warn-bd); }
+
+/* --- Deux colonnes -------------------------------------------------------- */
+.ws-split { display: flex; align-items: flex-start; gap: 14px; }
+.ws-tree-panel {
+  flex: 0 0 370px; min-width: 0;
+  background: var(--sf); border: 1px solid var(--bd-faint); border-radius: 6px;
+  padding: 6px 4px 10px;
+  min-height: 340px; max-height: calc(100vh - 150px); overflow: auto;
+  position: sticky; top: 14px;
+  display: flex; flex-direction: column;
+}
+.ws-detail {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--sf); border: 1px solid var(--bd-faint); border-radius: 6px;
+  padding: 16px 18px;
+  min-height: 220px;
+}
+
+/* --- Lignes de l'arbre ---------------------------------------------------- */
+.ws-row {
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 6px 2px 0; border-radius: 4px;
+  font-size: 12.5px; color: var(--tx); cursor: default;
+  white-space: nowrap; user-select: none;
+}
+.ws-row:hover { background: var(--ac-bg); }
+.ws-row.is-selected { background: #d6e3fb; color: #1f4f9e; }
+.ws-row.is-drop { outline: 2px solid var(--ac); outline-offset: -2px; background: var(--ac-bg); }
+.ws-row.is-dragging { opacity: .45; }
+.ws-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* Le chevron garde sa place même sur un fichier : sans ça les noms se
+   décalent d'une ligne à l'autre et l'œil perd la colonne. */
+.ws-caret {
+  flex: 0 0 14px; text-align: center; font-size: 9px; color: var(--tx-muted);
+  cursor: pointer; line-height: 1;
+}
+.ws-caret.is-leaf { visibility: hidden; }
+.ws-icon { flex: 0 0 auto; font-size: 12px; }
+.ws-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ws-row.is-hidden-entry .ws-label { color: var(--tx-muted); font-style: italic; }
+.ws-badge {
+  flex: 0 0 auto; font-size: 9.5px; padding: 0 5px; border-radius: 7px;
+  background: var(--sf-tag); color: var(--tx-soft);
+}
+.ws-badge.is-active { background: #d6e3fb; color: #1f4f9e; font-weight: 600; }
+.ws-menu-btn {
+  flex: 0 0 auto; visibility: hidden; border: 0; background: none; cursor: pointer;
+  color: var(--tx-muted); font-size: 13px; line-height: 1; padding: 0 2px;
+}
+.ws-row:hover .ws-menu-btn, .ws-row.is-selected .ws-menu-btn { visibility: visible; }
+.ws-menu-btn:hover { color: var(--tx-strong); }
+
+/* Guides d'indentation : c'est ce qui rend un arbre profond lisible. */
+.ws-children { position: relative; }
+.ws-children::before {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 1px;
+  background: var(--bd-faint);
+  /* Alignée sur la colonne du chevron du dossier parent : `--d` est la
+     profondeur des ENFANTS, donc le parent est un cran plus à gauche. */
+  left: calc(13px + (var(--d) - 1) * 14px);
+}
+
+.ws-status {
+  min-height: 18px; margin: 0 0 8px; font-size: 12px; color: var(--tx-soft);
+}
+.ws-status.is-err { color: var(--danger); }
+.ws-empty-child { font-size: 11px; color: var(--tx-muted); padding: 2px 0 2px 4px; }
+.ws-rename-input {
+  flex: 1 1 auto; min-width: 0; font: inherit;
+  border: 1px solid var(--ac); border-radius: 3px; padding: 0 3px;
+}
+
+/* --- Panneau de détail ---------------------------------------------------- */
+.ws-crumb { font-size: 11.5px; color: var(--tx-muted); margin-bottom: 6px; }
+.ws-crumb button {
+  border: 0; background: none; cursor: pointer; font: inherit; color: var(--ac); padding: 0;
+}
+.ws-crumb button:hover { text-decoration: underline; }
+.ws-detail h2 { margin: 0 0 4px; font-size: 17px; display: flex; align-items: center; gap: 8px; }
+.ws-meta { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--tx-soft); margin: 8px 0 14px; }
+.ws-meta b { color: var(--tx-strong); font-weight: 600; }
+.ws-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid var(--bd-faint); }
+.ws-proj-card {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; margin: 10px 0 4px; border-radius: 6px;
+  background: var(--ac-bg); border: 1px solid var(--ac-weak);
+}
+.ws-proj-card .ws-proj-txt { font-size: 12.5px; color: var(--tx-soft); flex: 1 1 200px; }
+
+/* --- Écran vide (aucune racine) ------------------------------------------- */
+.ws-onboard {
+  max-width: 620px; margin: 48px auto; text-align: center;
+  background: var(--sf); border: 1px solid var(--bd-faint); border-radius: 8px;
+  padding: 28px 30px;
+}
+.ws-onboard h2 { margin: 0 0 10px; font-size: 19px; }
+.ws-onboard p { color: var(--tx-soft); font-size: 13px; line-height: 1.55; }
+.ws-onboard .ws-onboard-path {
+  display: flex; gap: 8px; margin: 18px 0 6px;
+}
+.ws-onboard input[type="text"] { flex: 1; }
+
+/* --- Menu contextuel (même grammaire que celui de /sujet) ----------------- */
+.ws-ctx {
+  position: fixed; z-index: 1200; min-width: 200px; padding: 4px;
+  background: var(--sf); border: 1px solid var(--bd); border-radius: 6px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.18);
+}
+.ws-ctx button {
+  display: block; width: 100%; text-align: left; border: 0; background: none;
+  padding: 5px 10px; border-radius: 4px; cursor: pointer;
+  font: inherit; font-size: 12.5px; color: var(--tx);
+}
+.ws-ctx button:hover { background: var(--ac-bg); }
+.ws-ctx button.is-danger { color: var(--danger); }
+.ws-ctx button.is-danger:hover { background: var(--danger-bg); }
+.ws-ctx-sep { height: 1px; margin: 4px 6px; background: var(--bd-faint); }
+
+/* --- Zone de dépôt de fichiers -------------------------------------------- */
+.ws-tree-panel.is-dropping { outline: 2px dashed var(--ac); outline-offset: -4px; }
+/* La zone de dépôt occupe le bas du panneau : viser une ligne précise reste
+   possible, mais ne doit pas être obligatoire pour ajouter un scan. */
+.ws-drop-hint {
+  font-size: 11px; color: var(--tx-muted); text-align: center;
+  padding: 8px 4px 2px; border-top: 1px dashed var(--bd-faint);
+  margin-top: auto;
+}
+
+/* --- Corbeille ------------------------------------------------------------ */
+.ws-trash-list { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; }
+.ws-trash-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 8px; border-radius: 4px; font-size: 12.5px;
+  background: var(--sf-row);
+}
+.ws-trash-item .ws-trash-origin { color: var(--tx-muted); font-size: 11px; flex: 1; }
+.ws-trash-warn { font-size: 12px; color: var(--tx-soft); margin: 6px 0 10px; }
+
+@media (max-width: 900px) {
+  .ws-split { flex-wrap: wrap; }
+  .ws-tree-panel { flex: 0 0 100%; position: static; max-height: 46vh; }
+  .ws-detail { flex: 1 1 100%; }
+  .ws-bar-path { max-width: 100%; }
+}
+
+/* Aperçu d'un fichier dans le panneau de détail. */
+.ws-preview { margin-top: 16px; }
+.ws-preview-load, .ws-preview-note { font-size: 11.5px; color: var(--tx-muted); }
+.ws-preview-text {
+  margin: 0; padding: 10px 12px; max-height: 52vh; overflow: auto;
+  background: var(--sf-sunken); border: 1px solid var(--bd-faint);
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; line-height: 1.45; color: var(--tx);
+  white-space: pre; tab-size: 4;
+}
+.ws-preview-pdf {
+  width: 100%; height: 62vh; border: 1px solid var(--bd-faint);
+  border-radius: 5px; background: var(--sf-sunken);
+}
+.ws-preview-img {
+  max-width: 100%; max-height: 62vh; border: 1px solid var(--bd-faint);
+  border-radius: 5px; background: var(--sf-sunken);
+}
