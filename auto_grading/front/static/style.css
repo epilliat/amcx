@@ -3438,8 +3438,16 @@ a.onb-action { text-decoration: none; color: inherit; }
   position: sticky; top: 16px;
   background: #fff; border: 1px solid #e3e4e8; border-radius: 6px;
   padding: 12px;
-  max-height: calc(100vh - 80px); overflow-y: auto;
+  /* ⚠ DEUX ascenseurs, pas un. Le panneau empile filtres, arbre de catégories
+     et liste de questions ; avec un seul ascenseur pour les trois, un arbre
+     réel (une trentaine de nœuds dépliés, ~1 100 px mesurés) pousse TOUTE la
+     liste sous la ligne de flottaison : on ouvre /banque et on ne voit aucune
+     question, sans que rien ne le signale. L'arbre et la liste scrollent donc
+     chacun chez soi, et le panneau lui-même ne scrolle plus. */
+  display: flex; flex-direction: column;
+  height: calc(100vh - 80px); overflow: hidden;
 }
+.banque-filters-compact, .banque-count { flex: 0 0 auto; }
 .banque-detail-pane {
   flex: 1 1 auto; min-width: 0;
   background: #fff; border: 1px solid #e3e4e8; border-radius: 6px;
@@ -3465,8 +3473,13 @@ a.onb-action { text-decoration: none; color: inherit; }
 .banque-empty { color: #888; font-style: italic; padding: 16px; text-align: center; font-size: 13px; }
 .banque-err { color: #c33; }
 
-/* Liste de questions à gauche */
-.banque-list-rows { display: flex; flex-direction: column; gap: 2px; }
+/* Liste de questions à gauche — elle prend ce que l'arbre lui laisse, et
+   jamais moins que de quoi montrer quelques lignes (`min-height`), sinon un
+   arbre très déplié la réduirait à rien. */
+.banque-list-rows {
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1 1 auto; min-height: 120px; overflow-y: auto;
+}
 .banque-q-row {
   display: flex; align-items: center; gap: 6px;
   padding: 6px 8px; border-radius: 4px;
@@ -3523,7 +3536,7 @@ a.onb-action { text-decoration: none; color: inherit; }
 /* Responsive : 1 colonne sur petits écrans */
 @media (max-width: 1100px) {
   .banque-split.no-preview { flex-wrap: wrap; }
-  .banque-list-panel { flex: 0 0 100%; position: static; max-height: 50vh; }
+  .banque-list-panel { flex: 0 0 100%; position: static; height: 60vh; }
   .banque-detail-pane { flex: 1 1 100%; }
 }
 
@@ -4292,7 +4305,24 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .bank-tree .bt-err { color: var(--danger); }
 
 /* Bloc « Catégories » du panneau de gauche de /banque */
-.bq-cats { border-top: 1px solid var(--bd-faint); padding-top: 6px; margin-top: 2px; }
+/* ⚠ C'est le `<details>` LUI-MÊME qui scrolle, et qui peut rétrécir.
+   Deux pièges, tous deux constatés :
+   - Chromium enveloppe le contenu d'un `details` dans une boîte anonyme : un
+     `display:flex` dessus ne fait PAS rétrécir ses enfants. Le `max-height`
+     clampait le parent à 191 px pendant que l'arbre en gardait 957 et se
+     dessinait par-dessus la liste des questions.
+   - Un arbre de hauteur fixe (`flex: 0 0 auto`) fait déborder le panneau sur
+     un écran court : filtres + arbre + liste dépassaient les 420 px
+     disponibles en 900×700, et le bas de la liste devenait inatteignable
+     (`overflow: hidden` du panneau). D'où `flex: 0 1 auto` + `min-height: 0` :
+     l'arbre cède la place, il a son ascenseur. */
+.bq-cats {
+  border-top: 1px solid var(--bd-faint); padding-top: 6px; margin-top: 2px;
+  flex: 0 1 auto; min-height: 0; max-height: 34vh; overflow-y: auto;
+}
+/* Le libellé reste attrapable même une fois l'arbre défilé — c'est lui qui
+   replie la section. */
+.bq-cats > summary { position: sticky; top: 0; background: #fff; z-index: 1; }
 .bq-cats > summary {
   font-size: 11px; font-weight: 600; color: var(--tx-muted);
   cursor: pointer; padding: 2px 4px; list-style: none;

@@ -3346,6 +3346,32 @@ revanche `variant_of` est dans le `skip` de `_question_to_row` : `from_block` le
 pose sur toute question locale, et sans ce filtre `bank_migrate` échouerait en
 PGRST204 dès la première question.
 
+#### ⚠ Le panneau gauche a DEUX ascenseurs, pas un
+
+Il empile trois zones : filtres, arbre de catégories, liste des questions. Avec
+un seul ascenseur pour les trois, un arbre réel — une trentaine de nœuds
+dépliés, **1 114 px mesurés** — poussait **toute la liste sous la ligne de
+flottaison** : on ouvrait `/banque` et on ne voyait aucune question, sans que
+rien ne le signale. Le défaut n'existait pas tant que la banque était vide ;
+il est apparu avec l'import des catégories.
+
+Le panneau est donc un flex vertical de hauteur fixe qui ne scrolle plus
+(`overflow: hidden`) ; l'arbre et la liste scrollent chacun chez soi.
+
+⚠ **La borne de l'arbre est posée sur le `<details>` lui-même**, pas sur le
+`div` intérieur : Chromium enveloppe le contenu d'un `details` dans une boîte
+anonyme, si bien qu'un `display: flex` sur le `details` ne fait **pas**
+rétrécir ses enfants. Première tentative : le `max-height` clampait le parent à
+191 px pendant que l'arbre en gardait 957 et se **dessinait par-dessus** la
+liste.
+
+⚠ **L'arbre doit pouvoir rétrécir** (`flex: 0 1 auto; min-height: 0`), pas
+seulement être plafonné. À hauteur fixe, filtres + arbre + liste dépassaient
+les 420 px du panneau en 900×700 et le bas de la liste devenait inatteignable,
+le panneau ne scrollant plus. Vérifié à 1500×1000, 1200×620 et 900×700 : la
+liste tient dans le panneau dans les trois cas. Le `<summary>` est `sticky` —
+c'est lui qui replie la section, il ne doit pas défiler hors de portée.
+
 ⚠ **`.banque-list-panel` est passé de 280 à 340 px** et la ligne n'affiche plus
 que la **feuille** de la catégorie (chemin complet en infobulle). 280 px
 suffisaient tant que la banque était vide ; avec de vrais titres et une vraie
