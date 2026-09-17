@@ -141,11 +141,24 @@
       <div class="bq-cats-status" id="bq-cats-status"></div>
     </details>
 
+    {# Séparateur arbre ↔ liste. Les deux zones scrollent chacune chez soi :
+       sans lui, le partage était figé (34 vh à l'arbre) alors que ce qu'on
+       veut voir change d'une minute à l'autre — la structure du cours quand on
+       range, la liste quand on cherche. #}
+    <div class="bq-hsplit" id="bq-hsplit" role="separator"
+         aria-orientation="horizontal" tabindex="0"
+         title="Glisser pour partager entre catégories et questions (double-clic : par défaut)"></div>
+
     <div class="banque-count" id="bq-count">—</div>
     <div class="banque-list-rows" id="bq-list">
       <p class="banque-empty">Chargement…</p>
     </div>
   </aside>
+
+  {# Séparateur liste ↔ détail — même geste, autre axe. #}
+  <div class="bq-vsplit" id="bq-vsplit" role="separator"
+       aria-orientation="vertical" tabindex="0"
+       title="Glisser pour élargir la liste ou la fiche (double-clic : par défaut)"></div>
 
   <!-- Zone centrale : détail de la question sélectionnée -->
   <section class="banque-detail-pane" id="bq-detail">
@@ -1321,6 +1334,98 @@ document.getElementById('bank-add-create').addEventListener('click', async () =>
     bankAddStatus.textContent = '✘ ' + (j.error || 'erreur');
   }
 });
+
+/* ======================================================================
+ * Séparateurs glissables — le partage de l'espace appartient au lecteur
+ *
+ * Deux axes, un seul mécanisme : on écrit une variable CSS sur un hôte et on
+ * la persiste. ⚠ On ne touche PAS aux styles des panneaux depuis le JS —
+ * poser un `style.flexBasis` à la main mettrait la règle hors de portée des
+ * media queries, et le mode une colonne (< 1100 px) figerait la largeur
+ * choisie sur grand écran.
+ * ====================================================================== */
+function makeGutter(el, opts) {
+  if (!el) return;
+  const host = opts.host;
+  let v = null;
+  try { v = localStorage.getItem(opts.key); } catch (e) {}
+  const apply = (px) => {
+    if (px == null) {
+      host.style.removeProperty(opts.varName);
+      host.classList.remove(opts.sizedClass);
+      return;
+    }
+    host.style.setProperty(opts.varName, Math.round(px) + 'px');
+    host.classList.add(opts.sizedClass);
+  };
+  if (v) apply(parseFloat(v));
+
+  const clamp = (px) => Math.max(opts.min, Math.min(px, opts.max()));
+  const commit = (px) => {
+    apply(px);
+    try { localStorage.setItem(opts.key, String(Math.round(px))); } catch (e) {}
+  };
+
+  el.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add('is-dragging');
+    document.body.classList.add(opts.vertical ? 'bq-resizing-v' : 'bq-resizing-h');
+    const move = (e) => apply(clamp(opts.measure(e)));
+    const up = (e) => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.classList.remove('is-dragging');
+      document.body.classList.remove('bq-resizing-v', 'bq-resizing-h');
+      commit(clamp(opts.measure(e)));
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+  });
+
+  // Double-clic : revenir au partage par défaut. Un réglage qu'on ne sait pas
+  // défaire est un réglage qu'on n'ose pas toucher.
+  el.addEventListener('dblclick', () => {
+    apply(null);
+    try { localStorage.removeItem(opts.key); } catch (e) {}
+  });
+
+  // Clavier : un séparateur atteignable à la souris seulement n'est pas
+  // atteignable du tout pour qui n'a pas de souris.
+  el.addEventListener('keydown', (ev) => {
+    const step = ev.shiftKey ? 40 : 12;
+    const dec = opts.vertical ? 'ArrowLeft' : 'ArrowUp';
+    const inc = opts.vertical ? 'ArrowRight' : 'ArrowDown';
+    if (ev.key !== dec && ev.key !== inc) return;
+    ev.preventDefault();
+    commit(clamp(opts.current() + (ev.key === inc ? step : -step)));
+  });
+}
+
+(function initGutters() {
+  const split = document.querySelector('.banque-split');
+  const panel = document.querySelector('.banque-list-panel');
+  const cats  = document.getElementById('bq-cats');
+  if (!split || !panel || !cats) return;
+
+  makeGutter(document.getElementById('bq-vsplit'), {
+    host: split, varName: '--bq-list-w', sizedClass: 'has-list-w',
+    key: 'amcx-bq-list-w', vertical: true, min: 240,
+    max: () => Math.max(240, split.getBoundingClientRect().width - 380),
+    measure: (e) => e.clientX - split.getBoundingClientRect().left,
+    current: () => panel.getBoundingClientRect().width,
+  });
+
+  makeGutter(document.getElementById('bq-hsplit'), {
+    host: panel, varName: '--bq-cats-h', sizedClass: 'has-cats-h',
+    key: 'amcx-bq-cats-h', vertical: false, min: 40,
+    // ⚠ On garde toujours de quoi montrer la liste : un séparateur poussé à
+    // fond ne doit pas reproduire le défaut qu'il corrige.
+    max: () => Math.max(40, panel.getBoundingClientRect().height - 260),
+    measure: (e) => e.clientY - cats.getBoundingClientRect().top,
+    current: () => cats.getBoundingClientRect().height,
+  });
+})();
 
 // Init : remplit le label du bouton banque
 refreshBankList();

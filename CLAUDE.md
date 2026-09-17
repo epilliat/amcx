@@ -3372,6 +3372,30 @@ le panneau ne scrollant plus. Vérifié à 1500×1000, 1200×620 et 900×700 : l
 liste tient dans le panneau dans les trois cas. Le `<summary>` est `sticky` —
 c'est lui qui replie la section, il ne doit pas défiler hors de portée.
 
+#### Séparateurs glissables — le partage de l'espace appartient au lecteur
+
+Deux poignées sur `/banque`, un seul mécanisme (`makeGutter` dans
+`banque.html`) : `.bq-hsplit` partage le panneau gauche entre l'arbre et la
+liste, `.bq-vsplit` partage la page entre la liste et la fiche. Un partage figé
+ne peut pas être bon : ce qu'on veut voir change d'une minute à l'autre — la
+structure du cours quand on range, la liste quand on cherche.
+
+- ⚠ **Le JS écrit une variable CSS sur un hôte, il ne touche jamais au style
+  des panneaux.** Poser un `style.flexBasis` à la main mettrait la règle hors
+  de portée des media queries : une largeur choisie sur grand écran survivrait
+  au passage en **une colonne** (< 1100 px). D'où `--bq-list-w` +
+  `.has-list-w`, que la media query ré-écrase.
+- ⚠ **La butée garde toujours 260 px au panneau et 120 px à la liste** : un
+  séparateur poussé à fond ne doit pas reproduire le défaut qu'il corrige
+  (liste invisible, cf. ci-dessus).
+- **Double-clic = retour au défaut**, et la valeur est retirée du
+  `localStorage`. Un réglage qu'on ne sait pas défaire est un réglage qu'on
+  n'ose pas toucher.
+- **Flèches au clavier** (Maj = pas de 40 px) : une poignée qu'on n'attrape
+  qu'à la souris n'est pas atteignable pour qui n'en a pas.
+- La zone de saisie fait 7 px, le trait visible 3 px (`::after`) : on attrape
+  sans viser, sans dessiner une barre de plus.
+
 ⚠ **`.banque-list-panel` est passé de 280 à 340 px** et la ligne n'affiche plus
 que la **feuille** de la catégorie (chemin complet en infobulle). 280 px
 suffisaient tant que la banque était vide ; avec de vrais titres et une vraie

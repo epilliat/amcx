@@ -3434,6 +3434,7 @@ a.onb-action { text-decoration: none; color: inherit; }
   /* 280 px suffisaient tant que la banque était vide. Avec de vrais titres et
      une vraie catégorie sur chaque ligne, le titre y tombait à « Conclure… » ;
      le panneau de détail, lui, avait 1 100 px dont la moitié inoccupée. */
+  /* Largeur réglable au séparateur (cf. `.bq-vsplit`) ; 340 px par défaut. */
   flex: 0 0 340px;
   position: sticky; top: 16px;
   background: #fff; border: 1px solid #e3e4e8; border-radius: 6px;
@@ -3448,6 +3449,46 @@ a.onb-action { text-decoration: none; color: inherit; }
   height: calc(100vh - 80px); overflow: hidden;
 }
 .banque-filters-compact, .banque-count { flex: 0 0 auto; }
+/* ⚠ La largeur réglée ne s'applique QUE quand l'utilisateur en a posé une, et
+   seulement dans la disposition à deux colonnes : la media query « une
+   colonne » (< 1100 px) doit rester maîtresse, sinon une largeur choisie sur
+   grand écran survivrait au passage en colonne unique. */
+.banque-split.has-list-w .banque-list-panel { flex: 0 0 var(--bq-list-w); }
+.banque-list-panel.has-cats-h .bq-cats {
+  flex: 0 0 var(--bq-cats-h); max-height: none;
+}
+
+/* Séparateurs glissables — le partage de l'espace appartient au lecteur. */
+.bq-vsplit {
+  flex: 0 0 7px; align-self: stretch;
+  margin: 0 -3px;               /* mord sur la gouttière, sans la creuser */
+  cursor: col-resize;
+  border-radius: 4px;
+  position: sticky; top: 16px; height: calc(100vh - 80px);
+}
+.bq-hsplit {
+  flex: 0 0 7px; margin: 2px -4px 0;
+  cursor: row-resize; border-radius: 4px;
+}
+/* La zone de saisie est large (7 px), le trait visible est fin : une poignée
+   qu'on attrape sans viser, et qui ne dessine pas une barre de plus. */
+.bq-vsplit::after, .bq-hsplit::after {
+  content: ''; display: block; background: var(--bd-faint, #e3e4e8);
+  border-radius: 2px; transition: background .12s;
+}
+.bq-vsplit::after { width: 3px; height: 100%; margin: 0 auto; }
+.bq-hsplit::after { height: 3px; width: 46px; margin: 2px auto; }
+.bq-vsplit:hover::after, .bq-hsplit:hover::after,
+.bq-vsplit:focus-visible::after, .bq-hsplit:focus-visible::after,
+.bq-vsplit.is-dragging::after, .bq-hsplit.is-dragging::after {
+  background: var(--accent, #2769d8);
+}
+.bq-vsplit:focus-visible, .bq-hsplit:focus-visible { outline: none; }
+/* Pendant le glissé, le curseur ne doit pas changer selon ce qu'il survole,
+   et rien ne doit se sélectionner. */
+body.bq-resizing-v, body.bq-resizing-v * { cursor: col-resize !important; }
+body.bq-resizing-h, body.bq-resizing-h * { cursor: row-resize !important; }
+body.bq-resizing-v, body.bq-resizing-h { user-select: none; }
 .banque-detail-pane {
   flex: 1 1 auto; min-width: 0;
   background: #fff; border: 1px solid #e3e4e8; border-radius: 6px;
@@ -3536,8 +3577,11 @@ a.onb-action { text-decoration: none; color: inherit; }
 /* Responsive : 1 colonne sur petits écrans */
 @media (max-width: 1100px) {
   .banque-split.no-preview { flex-wrap: wrap; }
-  .banque-list-panel { flex: 0 0 100%; position: static; height: 60vh; }
+  .banque-list-panel,
+  .banque-split.has-list-w .banque-list-panel { flex: 0 0 100%; position: static; height: 60vh; }
   .banque-detail-pane { flex: 1 1 100%; }
+  /* Empilés, les deux panneaux n'ont plus de frontière verticale à glisser. */
+  .bq-vsplit { display: none; }
 }
 
 /* ============================================================
