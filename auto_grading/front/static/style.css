@@ -1101,7 +1101,16 @@ img.case.correct + .case-label { font-weight: bold; }
   font-size: 15px;
   margin-right: 14px;
   letter-spacing: .02em;
+  /* C'est un lien vers l'explorateur de fichiers : il doit se comporter comme
+     tel au survol, sans prendre l'aspect des onglets — il ne décrit pas le
+     projet actif, mais le dossier qui les contient tous. */
+  text-decoration: none;
+  padding: 6px 8px;
+  border-radius: 5px;
+  margin-left: -8px;
 }
+.topbar-brand:hover { background: rgba(255,255,255,.12); }
+.topbar-brand.active { background: rgba(255,255,255,.16); }
 .topbar-link {
   color: #c4ccda;
   text-decoration: none;
@@ -4958,6 +4967,12 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .ws-ctx button.is-danger { color: var(--danger); }
 .ws-ctx button.is-danger:hover { background: var(--danger-bg); }
 .ws-ctx-sep { height: 1px; margin: 4px 6px; background: var(--bd-faint); }
+/* Sur le vide du panneau, le menu ne vise aucune ligne : il dit alors sur quoi
+   il porte, sinon « Nouveau sous-dossier » ne dit pas « sous » quoi. */
+.ws-ctx-head {
+  padding: 3px 10px 5px; font-size: 10.5px; color: var(--tx-muted);
+  border-bottom: 1px solid var(--bd-faint); margin-bottom: 4px;
+}
 
 /* --- Zone de dépôt de fichiers -------------------------------------------- */
 .ws-tree-panel.is-dropping { outline: 2px dashed var(--ac); outline-offset: -4px; }

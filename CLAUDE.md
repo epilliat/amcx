@@ -739,6 +739,10 @@ L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent ja
 
 ## Onglet Fichiers (`/fichiers`) — le dossier de travail
 
+On y arrive par le **brand « AMCx »** de la barre du haut, pas par un onglet :
+les onglets décrivent le projet actif, le dossier de travail est le niveau qui
+les contient.
+
 Une arborescence à la VS Code sur le **dossier de travail** : les projets AMC
 sont ses sous-dossiers, et ce qui les accompagne (listes d'étudiants, scans en
 attente, comptes rendus) vit à côté. Moteur :
@@ -800,8 +804,16 @@ droits de l'interface. **Tout le reste passe par `/download`, en
   `localStorage`, guides d'indentation, icône par type, pastille `projet` et
   **`projet actif`** — sans elle, on croit corriger l'examen qu'on a sous les
   yeux ici alors que les autres onglets en montrent un autre.
-- Clic droit (ou `⋯` au survol) : nouveau sous-dossier, **nouveau projet AMC
-  ici**, dépôt de fichiers, renommer, déplacer, supprimer.
+- ⚠ **Toutes les actions sont au clic droit dans l'arbre** (ou par le `⋯` au
+  survol d'une ligne) : ouvrir le projet, nouveau sous-dossier, nouveau projet
+  AMC ici, dépôt de fichiers, renommer, déplacer, supprimer. Le **panneau de
+  droite décrit, il ne commande pas** — une rangée de boutons y agissait sur
+  l'élément sélectionné, donc à l'autre bout de l'écran de ce qu'on vise. Seule
+  « Ouvrir ce projet » y reste : ce n'est pas une opération de fichier, c'est ce
+  que fait l'application.
+- Le clic droit sur le **vide du panneau** vise la racine (le menu la nomme en
+  tête) : sans ce cas, on ne pourrait plus rien créer à la racine dès qu'un
+  dossier est sélectionné.
 - Glisser-déposer pour déplacer ; déposer des fichiers depuis le bureau pour
   les ajouter (viser une ligne précise reste possible, le panneau entier
   accepte le dépôt).
@@ -1057,14 +1069,20 @@ pkill -f "front/server.py"
 
 ## UI — routes
 
-**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | **Fichiers** | Review rapide | Identités | **Courriels** | Export CSV.
+**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | Review rapide | Identités | **Courriels** | Export CSV.
+
+⚠ **Le brand « AMCx » de la topbar EST le lien vers `/fichiers`**, et il n'y a
+pas d'onglet Fichiers. Les onglets décrivent tous le **projet actif** ; le
+dossier de travail est le niveau au-dessus, celui qui les contient. En faire un
+onglet de plus le rangeait à côté de « Sujet » et « Évaluation », comme s'il
+parlait du même examen.
 
 | Route | Rôle |
 |---|---|
 | `/sujet` | **Onglet Sujet** : modèle canonique (text/qcm/open) + outline + bandeau global |
 | `/` | **Évaluation** : un examen — copies, note brute, score moyen par question. Aucun réglage |
 | `/cohorte` | **Ensemble** : plusieurs examens d'un dossier — colonnes, histogrammes, nuage, formule |
-| `/fichiers` | **Fichiers** : arborescence du dossier de travail, corbeille, création de projet |
+| `/fichiers` | **Fichiers** (lien du brand « AMCx ») : arborescence du dossier de travail, corbeille, création de projet |
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
 | `/flagged` | **Review rapide** : signalements groupés par question, triés par risque ; `?status=open\|done\|all&sort=risk\|scan` |

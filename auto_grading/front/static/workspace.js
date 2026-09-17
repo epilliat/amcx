@@ -264,8 +264,8 @@ async function renderDetail() {
   host.innerHTML = '';
   if (!WS.sel) {
     const p = el('p', 'banque-empty',
-      'Sélectionne un dossier ou un fichier à gauche. '
-      + 'Clic droit (ou ⋯) pour les actions.');
+      'Sélectionne un dossier ou un fichier à gauche pour le voir ici. '
+      + 'Toutes les actions sont au clic droit dans l’arbre.');
     host.appendChild(p);
     return;
   }
@@ -311,6 +311,10 @@ async function renderDetail() {
   if (info.is_link) put('Lien', 'symbolique');
   host.appendChild(meta);
 
+  // ⚠ Seule commande conservée à droite : ouvrir le projet n'est pas une
+  // opération de fichier, c'est ce que l'application fait. Les actions de
+  // gestion (créer, renommer, déplacer, supprimer) vivent au clic droit, sur
+  // l'élément qu'elles visent — pas à l'autre bout de l'écran.
   if (info.project_root) {
     const card = el('div', 'ws-proj-card');
     card.appendChild(el('span', null, '🎓'));
@@ -323,28 +327,6 @@ async function renderDetail() {
     card.appendChild(b);
     host.appendChild(card);
   }
-
-  const act = el('div', 'ws-detail-actions');
-  const add = (label, cls, fn) => {
-    const b = el('button', 'btn' + (cls ? ' ' + cls : ''), label);
-    b.type = 'button';
-    b.addEventListener('click', fn);
-    act.appendChild(b);
-    return b;
-  };
-  if (info.is_dir) {
-    add('＋ Sous-dossier', null, () => askMkdir(info.rel));
-    add('🎓 Nouveau projet AMC', null, () => askProject(info.rel));
-    add('⤒ Déposer des fichiers', null, () => pickUpload(info.rel));
-  } else {
-    add('⤓ Télécharger', null, () => {
-      window.location = '/api/workspace/download?path=' +
-                        encodeURIComponent(info.rel);
-    });
-  }
-  add('✎ Renommer', null, () => askRename(info.rel, info.name));
-  add('🗑 Supprimer', 'bq-danger', () => askDelete(info));
-  host.appendChild(act);
 
   if (!info.is_dir) renderPreview(host, info);
 }
@@ -551,26 +533,43 @@ function openMenu(x, y, e) {
     b.addEventListener('click', () => { closeMenu(); fn(); });
     m.appendChild(b);
   };
-  if (e.is_dir) {
-    item('＋ Nouveau sous-dossier', () => askMkdir(e.rel));
-    item('🎓 Nouveau projet AMC ici', () => askProject(e.rel));
-    item('⤒ Déposer des fichiers…', () => pickUpload(e.rel));
-    m.appendChild(el('div', 'ws-ctx-sep'));
+  const sep = () => m.appendChild(el('div', 'ws-ctx-sep'));
+
+  // `e === null` : clic droit sur le vide du panneau. Sans ce cas, on ne
+  // pourrait plus rien créer à la racine dès qu'un dossier est sélectionné.
+  const rel = e ? e.rel : '';
+  const isDir = e ? e.is_dir : true;
+
+  if (!e) m.appendChild(el('div', 'ws-ctx-head', WS.name || 'racine'));
+
+  if (e && e.project) {
+    item('🎓 Ouvrir ce projet', () => openProject(WS.root + '/' + e.rel, e.name));
+    sep();
+  }
+  if (isDir) {
+    // « sous-dossier » n'a de sens que sous quelque chose : sur le vide du
+    // panneau, la cible est la racine.
+    item(e ? '＋ Nouveau sous-dossier' : '＋ Nouveau dossier', () => askMkdir(rel));
+    item('🎓 Nouveau projet AMC ici', () => askProject(rel));
+    item('⤒ Déposer des fichiers…', () => pickUpload(rel));
   } else {
     item('⤓ Télécharger', () => {
-      window.location = '/api/workspace/download?path=' + encodeURIComponent(e.rel);
+      window.location = '/api/workspace/download?path=' + encodeURIComponent(rel);
     });
   }
-  item('✎ Renommer…', () => askRename(e.rel, e.name));
-  item('↗ Déplacer vers la racine', () => doMove(e.rel, ''));
-  m.appendChild(el('div', 'ws-ctx-sep'));
-  item('🗑 Supprimer…', async () => {
-    try {
-      const info = (await api('/api/workspace/info?path=' +
-                              encodeURIComponent(e.rel))).entry;
-      askDelete(info);
-    } catch (err) { fail(err); }
-  }, 'is-danger');
+  if (e) {
+    sep();
+    item('✎ Renommer…', () => askRename(e.rel, e.name));
+    if (parentOf(e.rel)) item('↗ Déplacer vers la racine', () => doMove(e.rel, ''));
+    sep();
+    item('🗑 Supprimer…', async () => {
+      try {
+        const info = (await api('/api/workspace/info?path=' +
+                                encodeURIComponent(e.rel))).entry;
+        askDelete(info);
+      } catch (err) { fail(err); }
+    }, 'is-danger');
+  }
 
   m.style.visibility = 'hidden';
   document.body.appendChild(m);
@@ -716,6 +715,11 @@ function boot(state) {
   // courant. Viser une ligne précise reste possible, mais ne doit pas être
   // obligatoire.
   const panel = document.getElementById('ws-tree-panel');
+  panel.addEventListener('contextmenu', ev => {
+    if (ev.target.closest('.ws-row')) return;      // la ligne s'en charge
+    ev.preventDefault();
+    openMenu(ev.clientX, ev.clientY, null);
+  });
   panel.addEventListener('dragover', ev => {
     if (![...ev.dataTransfer.types].includes('Files')) return;
     ev.preventDefault();

@@ -15,7 +15,11 @@
 </head>
 <body>
 <nav class="topbar">
-  <span class="topbar-brand">{{ app_name|default('AMCx') }}</span>
+  {# La marque EST l'entrée de l'explorateur de fichiers : il porte sur le
+     dossier de travail, pas sur l'examen courant, donc il n'a pas sa place
+     dans la rangée d'onglets qui décrivent tous le projet actif. #}
+  <a href="/fichiers" class="topbar-brand {% if active == 'fichiers' %}active{% endif %}"
+     title="Fichiers du dossier de travail">{{ app_name|default('AMCx') }}</a>
 
   <div class="project-menu" id="projectMenu">
     <button type="button" class="project-menu-btn" id="projectMenuBtn"
@@ -46,7 +50,6 @@
   <a href="/" class="topbar-link {% if active == 'evaluation' %}active{% endif %}">Évaluation</a>
   <a href="/questions" class="topbar-link {% if active == 'questions' %}active{% endif %}">Questions</a>
   <a href="/cohorte" class="topbar-link {% if active == 'cohorte' %}active{% endif %}">Ensemble</a>
-  <a href="/fichiers" class="topbar-link {% if active == 'fichiers' %}active{% endif %}">Fichiers</a>
   <a href="/flagged" class="topbar-link {% if active == 'flagged' %}active{% endif %}">Review rapide</a>
   <a href="/identites" class="topbar-link {% if active == 'identites' %}active{% endif %}">Identités</a>
   <a href="/mail" class="topbar-link {% if active == 'mail' %}active{% endif %}">Courriels</a>
