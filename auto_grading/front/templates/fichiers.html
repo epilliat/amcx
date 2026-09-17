@@ -11,9 +11,10 @@
   <div class="ws-onboard">
     <h2>📁 Choisis ton dossier de travail</h2>
     <p>
-      C’est le dossier qui contient tes examens : <b>un sous-dossier par projet
-      AMC</b>, plus ce qui les accompagne (listes d’étudiants, scans, comptes
-      rendus). C’est aussi le dossier que l’onglet <b>Ensemble</b> agrège pour
+      C’est le dossier où tu ranges ton travail : des <b>évaluations</b> (un
+      sous-dossier par examen), éventuellement groupées en <b>projets</b>, plus
+      ce qui les accompagne (listes d’étudiants, scans, comptes rendus). La
+      racine est aussi le projet que l’onglet <b>Projet</b> agrège pour
       calculer les notes de la promo.
     </p>
     <p class="settings-hint">
@@ -32,7 +33,10 @@
 {% else %}
   <div class="ws-bar">
     <div class="ws-bar-root">
-      <span class="ws-bar-name">📁 {{ ws.name }}</span>
+      <span class="ws-bar-name">{{ '📚' if ws.cohort else '📁' }} {{ ws.name }}</span>
+      {# La racine du dossier de travail EST le projet actif : c'est elle que
+         l'onglet Projet agrège. La pastille le dit, sinon on la cherche. #}
+      {% if ws.cohort %}<span class="ws-badge is-cohort">projet actif</span>{% endif %}
       <span class="ws-bar-path" title="{{ ws.root }}">{{ ws.display }}</span>
     </div>
     <div class="ws-bar-actions">
@@ -40,7 +44,8 @@
         <input type="checkbox" id="ws-hidden"> fichiers cachés
       </label>
       <button type="button" class="btn btn-small" id="ws-new-folder">＋ Dossier</button>
-      <button type="button" class="btn btn-small" id="ws-new-project">🎓 Projet AMC</button>
+      <button type="button" class="btn btn-small" id="ws-new-eval">🎓 Évaluation</button>
+      <button type="button" class="btn btn-small" id="ws-new-cohorte">📚 Projet</button>
       <button type="button" class="btn btn-small" id="ws-upload">⤒ Déposer</button>
       <button type="button" class="btn btn-small ws-trash-btn" id="ws-trash-btn">🗑 Corbeille</button>
       <button type="button" class="btn btn-small" id="ws-change-root">Changer de dossier…</button>
@@ -53,8 +58,9 @@
     <div class="ws-tree-panel" id="ws-tree-panel">
       <div id="ws-tree"></div>
       <div class="ws-drop-hint">
-        <b>Clic droit</b> pour créer, renommer, déplacer, supprimer ·
-        glisser pour déplacer · déposer des fichiers ici pour les ajouter
+        <b>Clic droit</b> pour créer une évaluation ou un projet, renommer,
+        déplacer, supprimer · glisser pour déplacer · déposer des fichiers ici
+        pour les ajouter
       </div>
     </div>
     <div class="ws-detail" id="ws-detail"></div>
@@ -74,7 +80,7 @@
     </div>
     <div class="pm-modal-body">
       <p class="pm-modal-hint">
-        Le dossier qui contient tes projets AMC, un par sous-dossier.
+        Le dossier qui contient ton travail : évaluations et projets.
         Le choisir n’écrit rien dedans.
       </p>
       <div class="pm-browser">
@@ -144,7 +150,7 @@
       if (d.is_project) {
         const t = document.createElement('span');
         t.className = 'pm-browser-tag';
-        t.textContent = 'projet';
+        t.textContent = 'évaluation';
         b.appendChild(t);
       }
       b.addEventListener('click', () => draw(d.path));

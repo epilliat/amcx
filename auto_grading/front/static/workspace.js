@@ -79,7 +79,8 @@ const EXT_ICON = {
 };
 
 function iconOf(e) {
-  if (e.project) return '🎓';
+  if (e.project) return '🎓';       // une évaluation : un examen
+  if (e.cohort) return '📚';        // un projet : plusieurs évaluations
   if (e.is_dir) return WS.open.has(e.rel) ? '📂' : '📁';
   return EXT_ICON[e.ext] || '📄';
 }
@@ -163,15 +164,20 @@ function rowOf(e, depth) {
   row.appendChild(el('span', 'ws-label', e.name));
 
   if (e.project) {
-    // ⚠ Le projet ACTIF doit se distinguer des autres : c'est celui que les
-    // autres onglets montrent. Sans la pastille, on croit corriger l'examen
-    // qu'on a sous les yeux ici. `WS.active` pointe le dossier qui porte
-    // `sujet/exam.tex`, donc le projet lui-même OU son `auto_grading/`.
+    // ⚠ L'évaluation ACTIVE doit se distinguer des autres : c'est celle que
+    // les autres onglets montrent. Sans la pastille, on croit corriger
+    // l'examen qu'on a sous les yeux ici. `WS.active` pointe le dossier qui
+    // porte `sujet/exam.tex`, donc l'évaluation elle-même OU son
+    // `auto_grading/`.
     const abs = WS.root + '/' + e.rel;
     const isActive = !!WS.active && (WS.active === abs ||
                                      WS.active === abs + '/auto_grading');
     row.appendChild(el('span', 'ws-badge' + (isActive ? ' is-active' : ''),
-                       isActive ? 'projet actif' : 'projet'));
+                       isActive ? 'évaluation active' : 'évaluation'));
+  } else if (e.cohort) {
+    // Un PROJET rassemble des évaluations. Il n'est jamais « actif » ici :
+    // le projet actif est la racine de l'arbre, pas une de ses lignes.
+    row.appendChild(el('span', 'ws-badge is-cohort', 'projet'));
   }
 
   const menu = el('button', 'ws-menu-btn', '⋯');
@@ -258,9 +264,17 @@ function cssEscape(s) {
 
 /* ------------------------------------------------- panneau de détail */
 
+/* ⚠ Un jeton par rendu. `renderDetail` vide le panneau AVANT d'aller chercher
+ * le détail : deux sélections rapprochées (flèches maintenues) laissent deux
+ * requêtes en vol, la seconde vide, puis la PREMIÈRE ajoute son contenu par
+ * dessus. Constaté : le panneau affichait deux fiches empilées, dont une
+ * périmée. Un rendu dont le jeton n'est plus le dernier s'abandonne. */
+let detailSeq = 0;
+
 async function renderDetail() {
   const host = document.getElementById('ws-detail');
   if (!host) return;
+  const seq = ++detailSeq;
   host.innerHTML = '';
   if (!WS.sel) {
     const p = el('p', 'banque-empty',
@@ -274,6 +288,7 @@ async function renderDetail() {
     info = (await api('/api/workspace/info?path=' +
                       encodeURIComponent(WS.sel.rel))).entry;
   } catch (e) { fail(e); return; }
+  if (seq !== detailSeq) return;            // une sélection plus récente a pris la main
 
   // Fil d'Ariane : remonter d'un cran est le geste le plus fréquent.
   const crumb = el('div', 'ws-crumb');
@@ -303,37 +318,52 @@ async function renderDetail() {
     s.appendChild(el('b', null, v));
     meta.appendChild(s);
   };
-  put('Type', info.is_dir ? (info.project ? 'projet AMCx' : 'dossier') :
-                            (info.ext ? '.' + info.ext : 'fichier'));
+  put('Type', info.is_dir
+        ? (info.project ? 'évaluation AMCx'
+                        : (info.cohort ? 'projet (ensemble d’évaluations)' : 'dossier'))
+        : (info.ext ? '.' + info.ext : 'fichier'));
   if (info.is_dir) put('Contenu', (info.n_items || 0) + ' élément(s)');
   else put('Taille', humanSize(info.size));
   put('Modifié', humanDate(info.mtime));
   if (info.is_link) put('Lien', 'symbolique');
   host.appendChild(meta);
 
-  // ⚠ Seule commande conservée à droite : ouvrir le projet n'est pas une
-  // opération de fichier, c'est ce que l'application fait. Les actions de
-  // gestion (créer, renommer, déplacer, supprimer) vivent au clic droit, sur
-  // l'élément qu'elles visent — pas à l'autre bout de l'écran.
   if (info.project_root) {
-    const card = el('div', 'ws-proj-card');
-    card.appendChild(el('span', null, '🎓'));
-    card.appendChild(el('span', 'ws-proj-txt',
-      'Projet AMCx complet. L’ouvrir bascule l’application dessus : '
-      + 'le serveur redémarre, les autres onglets changent d’examen.'));
-    const b = el('button', 'btn btn-primary', 'Ouvrir ce projet');
-    b.type = 'button';
-    b.addEventListener('click', () => openProject(info.project_root, info.name));
-    card.appendChild(b);
-    host.appendChild(card);
+    host.appendChild(openCard('🎓',
+      'Évaluation complète. L’ouvrir bascule l’application dessus : le serveur '
+      + 'redémarre, les autres onglets changent d’examen.',
+      'Ouvrir cette évaluation',
+      () => openProject(info.project_root, info.name)));
+  } else if (info.cohort) {
+    host.appendChild(openCard('📚',
+      'Projet : il rassemble des évaluations et agrège leurs notes. L’ouvrir '
+      + 'enracine l’arbre ici et c’est lui que décrira l’onglet Projet.',
+      'Ouvrir ce projet',
+      () => openCohorte(info.rel, info.name)));
   }
 
   if (!info.is_dir) renderPreview(host, info);
 }
 
+/* ⚠ Seule commande conservée à droite : ouvrir n'est pas une opération de
+ * fichier, c'est ce que l'application fait. Les actions de gestion (créer,
+ * renommer, déplacer, supprimer) vivent au clic droit, sur l'élément qu'elles
+ * visent — pas à l'autre bout de l'écran. */
+function openCard(emoji, txt, label, fn) {
+  const card = el('div', 'ws-proj-card');
+  card.appendChild(el('span', null, emoji));
+  card.appendChild(el('span', 'ws-proj-txt', txt));
+  const b = el('button', 'btn btn-primary', label);
+  b.type = 'button';
+  b.addEventListener('click', fn);
+  card.appendChild(b);
+  return card;
+}
+
 /* Aperçu — un panneau de détail vide n'aide personne, et l'usage courant est
  * de vérifier un notes.csv ou une page scannée sans quitter l'onglet. */
 async function renderPreview(host, info) {
+  const seq = detailSeq;
   const box = el('div', 'ws-preview');
   box.appendChild(el('div', 'ws-preview-load', '⏳ aperçu…'));
   host.appendChild(box);
@@ -341,6 +371,7 @@ async function renderPreview(host, info) {
   try {
     j = await api('/api/workspace/preview?path=' + encodeURIComponent(info.rel));
   } catch (e) { box.remove(); return; }
+  if (seq !== detailSeq) { box.remove(); return; }
   box.innerHTML = '';
   if (j.kind === 'text') {
     const pre = el('pre', 'ws-preview-text');
@@ -426,7 +457,7 @@ async function askDelete(info) {
   // un « Confirmer ? » nu ne protège personne, et cacher la corbeille ferait
   // hésiter là où il n'y a pas de risque.
   const what = info.is_dir
-    ? (info.project ? 'le projet AMCx « ' + info.name + ' » et tout son contenu '
+    ? (info.project ? 'l’évaluation « ' + info.name + ' » et tout son contenu '
                       + '(sujet, scans, corrections, notes)'
                     : 'le dossier « ' + info.name + ' » et ses '
                       + (info.n_items || 0) + ' élément(s)')
@@ -445,26 +476,52 @@ async function askDelete(info) {
   } catch (e) { fail(e); }
 }
 
-async function askProject(parentRel) {
-  const name = prompt('Nom du nouveau projet AMC :', '');
-  if (name == null || !name.trim()) return;
+/* ⚠ Une seule voie de création d'évaluation : la modale de `base.html`, que
+ * l'écran d'accueil ouvre aussi. Un `prompt()` ici aurait perdu l'import d'un
+ * `.tex` AMC, qui n'existe que dans cette modale — et deux formulaires de
+ * création auraient fini par accepter deux jeux de noms différents. */
+function askEvaluation(parentRel) {
   const abs = WS.root + (parentRel ? '/' + parentRel : '');
-  if (!confirm('Créer le projet « ' + name + ' » dans :\n' + abs
-               + '\n\nL’application basculera dessus (le serveur redémarre).')) return;
-  toast('⏳ Création du projet…');
-  try {
-    await post('/api/projects/create',
-               {name: name.trim(), template: 'examen_minimal', parent: abs});
-  } catch (e) {
-    // ⚠ La création se termine par un suicide du serveur : l'échec du
-    // transport ne dit rien du résultat. On attend le retour et on vérifie.
-    return waitForProject(name.trim());
+  if (typeof window.AMCxNewEvaluation !== 'function') {
+    fail('Formulaire de création indisponible.');
+    return;
   }
-  waitForProject(name.trim());
+  window.AMCxNewEvaluation(abs);
+}
+
+/* Un PROJET rassemble des évaluations : le créer ne fait que poser un dossier
+ * et son `cohorte.json`. ⚠ On ne bascule PAS dessus — cf. `openCohorte`, qui
+ * re-enracine l'arbre : créer un rangement et s'y retrouver enfermé n'est pas
+ * ce qu'on demandait. */
+async function askCohorte(parentRel) {
+  const name = prompt('Nom du nouveau projet :', '');
+  if (name == null || !name.trim()) return;
+  try {
+    const j = await post('/api/workspace/cohorte',
+                         {parent: parentRel, name: name.trim()});
+    WS.cache.clear();
+    if (parentRel) { WS.open.add(parentRel); saveOpen(); }
+    await refresh();
+    selectRel(j.path);
+    toast('✓ Projet « ' + name.trim() + ' » créé — clic droit → « Ouvrir ce '
+          + 'projet » pour y travailler');
+  } catch (e) { fail(e); }
+}
+
+/* Ouvrir un projet = en faire la racine du dossier de travail. Pas de
+ * redémarrage : un projet lit ses évaluations par sous-processus. */
+async function openCohorte(rel, name) {
+  if (!confirm('Ouvrir le projet « ' + name + ' » ?\n\n'
+               + 'L’arbre s’enracinera dessus et l’onglet Projet agrégera ses '
+               + 'évaluations. Rien n’est déplacé ni modifié.')) return;
+  try {
+    await post('/api/workspace/root', {path: WS.root + '/' + rel});
+    window.location.reload();
+  } catch (e) { fail(e); }
 }
 
 async function openProject(absPath, name) {
-  if (!confirm('Ouvrir le projet « ' + name + ' » ?\n\n'
+  if (!confirm('Ouvrir l’évaluation « ' + name + ' » ?\n\n'
                + 'Le serveur redémarre et tous les onglets basculent sur cet examen.')) return;
   toast('⏳ Basculement…');
   try { await post('/api/projects/open', {path: absPath}); } catch (e) { /* cf. ci-dessous */ }
@@ -543,14 +600,19 @@ function openMenu(x, y, e) {
   if (!e) m.appendChild(el('div', 'ws-ctx-head', WS.name || 'racine'));
 
   if (e && e.project) {
-    item('🎓 Ouvrir ce projet', () => openProject(WS.root + '/' + e.rel, e.name));
+    item('🎓 Ouvrir cette évaluation',
+         () => openProject(WS.root + '/' + e.rel, e.name));
+    sep();
+  } else if (e && e.cohort) {
+    item('📚 Ouvrir ce projet', () => openCohorte(e.rel, e.name));
     sep();
   }
   if (isDir) {
     // « sous-dossier » n'a de sens que sous quelque chose : sur le vide du
     // panneau, la cible est la racine.
     item(e ? '＋ Nouveau sous-dossier' : '＋ Nouveau dossier', () => askMkdir(rel));
-    item('🎓 Nouveau projet AMC ici', () => askProject(rel));
+    item('🎓 Nouvelle évaluation ici', () => askEvaluation(rel));
+    item('📚 Nouveau projet ici', () => askCohorte(rel));
     item('⤒ Déposer des fichiers…', () => pickUpload(rel));
   } else {
     item('⤓ Télécharger', () => {
@@ -697,8 +759,10 @@ function boot(state) {
 
   document.getElementById('ws-new-folder')
     .addEventListener('click', () => askMkdir(currentDir()));
-  document.getElementById('ws-new-project')
-    .addEventListener('click', () => askProject(currentDir()));
+  document.getElementById('ws-new-eval')
+    .addEventListener('click', () => askEvaluation(currentDir()));
+  document.getElementById('ws-new-cohorte')
+    .addEventListener('click', () => askCohorte(currentDir()));
   document.getElementById('ws-upload')
     .addEventListener('click', () => pickUpload(currentDir()));
   document.getElementById('ws-trash-btn')

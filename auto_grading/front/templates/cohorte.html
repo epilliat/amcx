@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Ensemble{% if view %} — {{ view.name }}{% endif %}{% endblock %}
+{% block title %}Projet{% if view %} — {{ view.name }}{% endif %}{% endblock %}
 
 {#- Curseur de réglage : glissière + saisie numérique, une seule valeur.
 
     `rng` vient de `grades_view.slider_ranges()` — les bornes sont calées sur
-    l'échelle des notes de l'ensemble, jamais codées en dur.
+    l'échelle des notes du projet, jamais codées en dur.
 
     ⚠ C'est la classe `is-off` qui porte l'état « auto », pas le champ vide :
     le curseur AFFICHE le barème qu'il applique, sinon il montrerait une valeur
@@ -42,15 +42,15 @@
 {% endif %}
 
 {% if not view %}
-  {# ===== Aucun ensemble actif ============================================ #}
+  {# ===== Aucun projet actif ============================================ #}
   <section class="global-stats coh-intro">
-    <h2 class="gs-title">Vue d'ensemble</h2>
+    <h2 class="gs-title">Projet</h2>
     <p class="modal-hint">
-      Un <b>ensemble</b> est un dossier qui contient plusieurs projets AMCx —
-      les examens d'une même promotion — et un fichier <code>cohorte.json</code>
-      qui dit lesquels compter, sur quelle échelle et avec quel poids.
-      C'est ici que « seuiller à 30 » et « ramener sur 20 » ont un sens : un
-      examen seul se lit sur son propre barème.
+      Un <b>projet</b> est un dossier qui rassemble plusieurs <b>évaluations</b>
+      — les examens d'une même promotion — et un fichier <code>cohorte.json</code>
+      qui dit lesquelles compter, sur quelle échelle et avec quel poids.
+      C'est ici que « seuiller à 30 » et « ramener sur 20 » ont un sens : une
+      évaluation seule se lit sur son propre barème.
     </p>
     <label class="modal-field">Dossier
       <input type="text" id="coh-path" value="{{ default_root }}"
@@ -60,7 +60,7 @@
       <button class="btn btn-primary btn-small" id="coh-open">Ouvrir</button>
       <span id="coh-status" class="settings-hint"></span>
       <div class="coh-mailcmd" id="coh-mailcmd" hidden>
-        Envoi des notes de l'ensemble (sans <code>--send</code>, rien ne part) :
+        Envoi des notes du projet (sans <code>--send</code>, rien ne part) :
         <pre><code></code></pre>
       </div>
     </div>
@@ -73,7 +73,7 @@
       <span class="settings-hint">{{ view.path }}</span>
       <a class="btn btn-tiny" href="/cohorte/export.csv">⤓ Export CSV</a>
       <button class="btn btn-tiny" id="coh-report"
-              title="Écrit compte_rendu/notes.csv dans le dossier de l'ensemble — c'est ce fichier qu'envoient les courriels">💾 Compte rendu</button>
+              title="Écrit compte_rendu/notes.csv dans le dossier du projet — c'est ce fichier qu'envoient les courriels">💾 Compte rendu</button>
       <button class="btn btn-tiny" id="coh-change">changer de dossier</button>
     </h2>
 
@@ -95,7 +95,7 @@
 
     {# ===== Les examens ==================================================== #}
     <div class="param-block">
-      <div class="param-block-title">Examens — note de colonne =
+      <div class="param-block-title">Évaluations — note de colonne =
         min(brut ∕ normalisation, 1) × échelle</div>
       {% for col in view.columns %}
         <div class="param-row" data-col-path="{{ col.path }}">
@@ -105,7 +105,7 @@
             {% if col.kind == 'exam' %}
               <span class="small">barème {{ "%g"|format(col.bareme) }}</span>
               <button class="btn btn-tiny coh-remove" data-path="{{ col.path }}"
-                      title="retirer de l'ensemble (aucun fichier n'est supprimé)">✕</button>
+                      title="retirer du projet (aucun fichier n'est supprimé)">✕</button>
             {% endif %}
             {% if not col.ok %}<span class="pf-warn">⚠ {{ col.error }}</span>{% endif %}
           </span>
@@ -125,14 +125,14 @@
         </div>
       {% endfor %}
       {% if not view.columns %}
-        <div class="pf-empty">Aucun examen dans cet ensemble.</div>
+        <div class="pf-empty">Aucune évaluation dans ce projet.</div>
       {% endif %}
 
       {% if view.candidates %}
-      {# ⚠ Un projet trouvé dans le dossier n'entre pas tout seul dans la
-         moyenne : un dossier d'essai deviendrait une note. #}
+      {# ⚠ Une évaluation trouvée dans le dossier n'entre pas toute seule
+         dans la moyenne : un dossier d'essai deviendrait une note. #}
       <div class="coh-candidates">
-        <span class="small">Projets trouvés dans le dossier, non comptés :</span>
+        <span class="small">Évaluations trouvées dans le dossier, non comptées :</span>
         {% for c in view.candidates %}
           <button class="btn btn-tiny coh-add" data-path="{{ c.path }}"
                   data-label="{{ c.label }}">+ {{ c.label }}</button>
@@ -291,8 +291,8 @@
 
 {% block scripts %}
 <script>
-// --- ouverture d'un dossier d'ensemble ---
-// ⚠ Changer d'ensemble ne redémarre PAS le serveur : un ensemble lit ses
+// --- ouverture d'un dossier de projet ---
+// ⚠ Changer de projet ne redémarre PAS le serveur : un projet lit ses
 // examens par sous-processus, il ne fige aucun chemin dans ce process.
 async function openCohort(path, create) {
   const st = document.getElementById('coh-status');
@@ -315,7 +315,7 @@ if (openBtn) openBtn.addEventListener('click', () =>
   openCohort(document.getElementById('coh-path').value.trim(), false));
 const changeBtn = document.getElementById('coh-change');
 if (changeBtn) changeBtn.addEventListener('click', () => {
-  const p = prompt('Dossier de l’ensemble :', {{ cohort_dir|tojson }});
+  const p = prompt('Dossier du projet :', {{ cohort_dir|tojson }});
   if (p) openCohort(p.trim(), false);
 });
 
@@ -418,7 +418,7 @@ async function applyConfig() {
   if (st) st.textContent = '✘ ' + (j.error || 'erreur');
 }
 
-// --- ajouter / retirer un examen -----------------------------------------
+// --- ajouter / retirer une évaluation -----------------------------------------
 async function patchExam(path, label, remove) {
   const r = await fetch('/api/cohorte/exams', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -431,14 +431,14 @@ async function patchExam(path, label, remove) {
 document.querySelectorAll('.coh-add').forEach(b => b.addEventListener('click',
   () => patchExam(b.dataset.path, b.dataset.label, false)));
 document.querySelectorAll('.coh-remove').forEach(b => b.addEventListener('click',
-  () => { if (confirm(`Retirer « ${b.dataset.path} » de l'ensemble ?\n\n`
-                      + `Aucun fichier n'est supprimé : l'examen reste sur le disque.`))
+  () => { if (confirm(`Retirer « ${b.dataset.path} » du projet ?\n\n`
+                      + `Aucun fichier n'est supprimé : l'évaluation reste sur le disque.`))
             patchExam(b.dataset.path, '', true); }));
 
-// --- compte rendu de l'ensemble ------------------------------------------
-// ⚠ L'envoi passe par la ligne de commande, avec `--log` sur le journal de
-// l'ensemble : celui du projet ferait sauter les étudiants déjà servis pour
-// l'examen — même adresse, autre note. La commande est affichée, pas devinée.
+// --- compte rendu du projet ------------------------------------------
+// ⚠ L'envoi passe par la ligne de commande, avec `--log` sur le journal du
+// projet : celui d'une évaluation ferait sauter les étudiants déjà servis pour
+// cette évaluation — même adresse, autre note. La commande est affichée.
 const cohReport = document.getElementById('coh-report');
 if (cohReport) cohReport.addEventListener('click', async () => {
   const st = document.getElementById('coh-status');

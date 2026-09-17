@@ -202,3 +202,58 @@ class WorkspaceCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjetsEtEvaluationsCase(WorkspaceCase):
+    """Les deux niveaux : une **évaluation** est un examen (`sujet/exam.tex`),
+    un **projet** rassemble des évaluations (`cohorte.json`).
+
+    Les noms du code restent historiques (`project` = évaluation, `cohort` =
+    projet) ; ce sont les libellés de l'interface qui ont bougé.
+    """
+
+    def test_un_projet_se_reconnait_a_son_cohorte_json(self):
+        (self.root / "L3-2026").mkdir()
+        self.assertFalse(ws.is_cohort(self.root / "L3-2026"))
+        (self.root / "L3-2026" / "cohorte.json").write_text("{}")
+        self.assertTrue(ws.is_cohort(self.root / "L3-2026"))
+        e = {x["name"]: x for x in ws.listdir()}
+        self.assertTrue(e["L3-2026"]["cohort"])
+        self.assertFalse(e["L3-2026"]["project"])
+        self.assertFalse(e["QCM1"]["cohort"])
+
+    def test_creer_un_projet_pose_le_fichier_sans_basculer(self):
+        """⚠ Créer ne bascule PAS : ouvrir un projet re-enracine l'arbre, et
+        se retrouver enfermé dans un dossier vide n'est pas ce qu'on demandait."""
+        rel = ws.new_cohort("", "L3-2026")
+        self.assertEqual(rel, "L3-2026")
+        self.assertTrue((self.root / "L3-2026" / "cohorte.json").is_file())
+        self.assertEqual(ws.root(), self.root)          # racine inchangée
+
+    def test_un_nom_de_projet_passe_par_la_meme_regle(self):
+        for bad in ("..", "a/b", "CON", "fin."):
+            with self.assertRaises(ws.WorkspaceError, msg=bad):
+                ws.new_cohort("", bad)
+
+    def test_les_evaluations_du_dossier_sont_listees(self):
+        noms = [e["name"] for e in ws.evaluations()]
+        self.assertEqual(noms, ["QCM1"])
+        self.assertEqual(ws.evaluations()[0]["group"], "")
+
+    def test_les_evaluations_groupees_dans_un_projet_sont_vues(self):
+        """⚠ Un dossier de travail est plat OU groupé en projets : ne regarder
+        qu'un niveau viderait le menu de la topbar dans le second cas."""
+        d = self.root / "L3-2026" / "rattrapage" / "sujet"
+        d.mkdir(parents=True)
+        (d / "exam.tex").write_text("x")
+        (self.root / "L3-2026" / "cohorte.json").write_text("{}")
+        found = {e["name"]: e["group"] for e in ws.evaluations()}
+        self.assertEqual(found, {"QCM1": "", "rattrapage": "L3-2026"})
+
+    def test_on_ne_descend_pas_dans_une_evaluation(self):
+        """Le `auto_grading/` d'une évaluation n'en est pas une seconde."""
+        d = self.root / "Rattrapage" / "auto_grading" / "sujet"
+        d.mkdir(parents=True)
+        (d / "exam.tex").write_text("x")
+        noms = sorted(e["name"] for e in ws.evaluations())
+        self.assertEqual(noms, ["QCM1", "Rattrapage"])

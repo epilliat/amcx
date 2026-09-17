@@ -132,16 +132,32 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 
 @app.context_processor
 def _inject_project_context():
-    """Variables disponibles dans tous les templates : nom du projet actif + récents.
+    """Variables de la topbar : l'évaluation active et ses voisines.
 
-    Utilisé par la zone projet de la topbar (`base.html`). Le nom affiché est le
-    parent du dossier `auto_grading/` (cf. `project_state.display_name()`)."""
+    ⚠ Le menu ne liste plus les « récents » mais les **évaluations présentes
+    dans le dossier de travail** (`workspace.evaluations`). Une liste de
+    récents décrit l'historique d'une personne ; ce qu'on veut savoir en
+    ouvrant ce menu, c'est ce que contient le dossier qu'on a sous les yeux
+    dans l'onglet Fichiers — sinon les deux écrans montrent deux mondes.
+
+    ⚠ Le scan est **borné et silencieux** : un dossier de travail illisible ne
+    doit pas faire échouer le rendu de toutes les pages.
+    """
     p = config.project_root()
     valid = project_state.is_valid_project(p)
+    try:
+        evals = workspace.evaluations()
+        ws_name = (workspace.root() or Path("")).name
+    except Exception:
+        evals, ws_name = [], ""
+    active = str(p.parent if p.name == "auto_grading" else p)
+    for e in evals:
+        e["active"] = (e["path"] == active)
     return {
-        "project_name": project_state.display_name(p) if valid else "Aucun projet",
+        "project_name": project_state.display_name(p) if valid else "Aucune évaluation",
         "project_path": str(p) if valid else "",
-        "project_recent": project_state.recent_projects(),
+        "project_evaluations": evals,
+        "workspace_name": ws_name,
         "app_name": project_state.APP_NAME,
     }
 
@@ -869,13 +885,12 @@ def index():
     échelle ne sert qu'à le comparer ou l'agréger avec autre chose, ce qui est
     le travail du niveau au-dessus. Les histogrammes, le nuage de points, la
     formule et les fichiers de notes importés ont suivi le même raisonnement :
-    ils décrivent un ensemble d'examens, pas celui-ci.
+    ils décrivent le projet qui contient cette évaluation, pas elle.
     """
     # Pas de projet actif valide → page d'accueil (onboarding).
     p = config.project_root()
     if not project_state.is_valid_project(p):
         return render_template("onboarding.html",
-                               recent=project_state.recent_projects(),
                                default_root=str(project_state.DEFAULT_PROJECTS_ROOT),
                                active="onboarding")
 
@@ -5966,6 +5981,7 @@ def _ws_state() -> dict:
         "home":         str(project_state.browse_root()),
         "n_trash":      len(workspace.list_trash()) if r else 0,
         "active":       str(config.project_root()),
+        "cohort":       bool(r and workspace.is_cohort(r)),
     }
 
 
@@ -6018,6 +6034,22 @@ def api_workspace_mkdir():
         return jsonify({"ok": True,
                         "path": workspace.mkdir(b.get("parent", ""),
                                                 b.get("name", ""))})
+    except Exception as e:
+        return _ws_error(e)
+
+
+@app.route("/api/workspace/cohorte", methods=["POST"])
+def api_workspace_new_cohorte():
+    """Crée un **projet** (dossier + `cohorte.json`) : `{parent, name}`.
+
+    ⚠ Ne bascule pas dessus — cf. `workspace.new_cohort`. L'ouvrir se fait par
+    `/api/workspace/root`, qui re-enracine l'arbre.
+    """
+    b = _json_body()
+    try:
+        return jsonify({"ok": True,
+                        "path": workspace.new_cohort(b.get("parent", ""),
+                                                     b.get("name", ""))})
     except Exception as e:
         return _ws_error(e)
 

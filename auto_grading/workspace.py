@@ -1,16 +1,25 @@
 """Le **dossier de travail** : l'arborescence sous laquelle vivent les projets.
 
-Un dossier de travail contient les projets AMCx d'une même année, d'un même
-cours, d'une même promo — un sous-dossier par examen —, et ce qui les
-accompagne (listes d'étudiants, scans en attente, comptes rendus). L'onglet
-*Fichiers* le parcourt et le remanie.
+Un dossier de travail contient les projets d'une même année, d'un même cours,
+d'une même promo, et ce qui les accompagne (listes d'étudiants, scans en
+attente, comptes rendus). L'onglet *Fichiers* le parcourt et le remanie.
 
-⚠ **C'est le MÊME dossier que l'ensemble de `/cohorte`**, et le même pointeur
+⚠ **Deux mots, deux niveaux** — et le code porte les noms historiques :
+
+| interface     | sur le disque   | dans le code                      |
+|---------------|-----------------|-----------------------------------|
+| une **évaluation** | `sujet/exam.tex` | `project` (`project_state`, `/api/projects`) |
+| un **projet** | `cohorte.json`  | `cohort` (`cohort.py`, `/api/cohorte`) |
+
+Un projet rassemble les évaluations d'une promotion ; c'est lui qui agrège les
+notes. Renommer le code coûterait des centaines de points d'appel et tous les
+`config.json` déjà écrits ; seuls les libellés ont bougé.
+
+⚠ **La racine du dossier de travail EST le projet actif**, même pointeur
 (`~/.config/amcx/active_cohort`). Deux racines distinctes — « mon dossier de
-travail » ici, « mon ensemble d'examens » là — auraient fini par désigner deux
-endroits différents, et « mes projets » aurait voulu dire deux choses. Le
-`cohorte.json` n'apparaît que le jour où l'on compose réellement un ensemble :
-définir la racine ici n'écrit rien.
+travail » ici, « mon projet » là — auraient fini par désigner deux endroits
+différents. Le `cohorte.json` n'apparaît que le jour où l'on compose réellement
+un projet : définir la racine n'écrit rien.
 
 Sécurité — le serveur n'a **aucune authentification** et `--host` permet de
 l'exposer. Ce module déplace, renomme et supprime des fichiers : c'est de loin
@@ -43,6 +52,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import cohort
 import project_state
 
 # Corbeille du dossier de travail. Le point de tête la range avec les fichiers
@@ -167,6 +177,67 @@ def project_root_of(d: Path) -> Path | None:
     return None
 
 
+def is_cohort(d: Path) -> bool:
+    """Un dossier de **projet** : il rassemble des évaluations (`cohorte.json`).
+
+    ⚠ Ce n'est pas l'inverse de `is_project` — un dossier peut n'être ni l'un
+    ni l'autre (un dossier de rangement), et la racine du dossier de travail se
+    comporte en projet même sans le fichier : `cohort.load` traite un
+    `cohorte.json` absent comme un projet vide. Le fichier n'est écrit qu'au
+    premier réglage, c'est ce qui permet de poser la racine sur un dossier
+    existant sans le transformer.
+    """
+    return cohort.is_cohort(Path(d))
+
+
+def new_cohort(parent_rel: str, name: str) -> str:
+    """Crée un sous-dossier et en fait un **projet**. Rend son chemin relatif.
+
+    ⚠ Ne bascule PAS dessus. Ouvrir un projet re-enracine l'arbre : le faire
+    d'office au moment de la création planterait l'utilisateur dans un dossier
+    vide, alors qu'il vient le plus souvent de créer un rangement où déplacer
+    des évaluations existantes. « Ouvrir ce projet » est une action à part.
+    """
+    rel = mkdir(parent_rel, name)
+    d = resolve(rel)
+    cohort.save(d, dict(cohort.DEFAULTS, name=d.name))
+    return rel
+
+
+def evaluations() -> list[dict]:
+    """Les évaluations du dossier de travail, sur **deux** niveaux.
+
+    Un dossier de travail est soit plat (une évaluation par sous-dossier), soit
+    groupé (des projets, chacun portant ses évaluations) : n'en regarder qu'un
+    seul viderait le menu de la topbar dans le second cas. On ne descend pas
+    dans une évaluation — son `auto_grading/` n'en est pas une seconde.
+
+    Rend `[{name, path, group}]`, `group` étant le dossier intermédiaire (`""`
+    à la racine) : sans lui, deux évaluations homonymes de deux promotions
+    s'affichent pareil.
+    """
+    r = root()
+    if r is None:
+        return []
+
+    def scan(d: Path, group: str, depth: int) -> list[dict]:
+        out = []
+        try:
+            kids = sorted(d.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            return out
+        for sub in kids[:MAX_ENTRIES]:
+            if not sub.is_dir() or sub.name.startswith("."):
+                continue
+            if is_project(sub):
+                out.append({"name": sub.name, "path": str(sub), "group": group})
+            elif depth > 0:
+                out.extend(scan(sub, sub.name, depth - 1))
+        return out
+
+    return scan(Path(r), "", 1)
+
+
 def _entry(p: Path, rel_parent: str) -> dict:
     try:
         st = p.stat()
@@ -184,6 +255,7 @@ def _entry(p: Path, rel_parent: str) -> dict:
         "mtime":   mtime,
         "ext":     "" if is_dir else p.suffix.lower().lstrip("."),
         "project": bool(is_dir and is_project(p)),
+        "cohort":  bool(is_dir and is_cohort(p)),
     }
 
 
@@ -237,6 +309,8 @@ def info(rel: str = "") -> dict:
         pr = project_root_of(p)
         if pr:
             d["project_root"] = str(pr)
+        if d["cohort"]:
+            d["cohort_root"] = str(p)
     return d
 
 

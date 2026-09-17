@@ -8,48 +8,40 @@
     <p class="onb-sub">AMC eXtended — éditeur de sujet QCM + correction automatique</p>
   </div>
 
+  {# ⚠ L'ouverture d'une évaluation existante passe désormais par l'onglet
+     Fichiers, qui montre le dossier de travail et ses évaluations. Une modale
+     « colle un chemin » en parallèle de l'arbre aurait fini par proposer deux
+     listes différentes des mêmes dossiers. #}
   <div class="onb-actions">
-    <button type="button" class="onb-action" data-action="open">
-      <div class="onb-action-emoji">📂</div>
+    <a class="onb-action" href="/fichiers">
+      <div class="onb-action-emoji">📁</div>
       <div class="onb-action-body">
-        <div class="onb-action-title">Ouvrir un projet existant</div>
-        <div class="onb-action-hint">Saisir le chemin d'un dossier contenant <code>sujet/exam.tex</code></div>
+        <div class="onb-action-title">Ouvrir mon dossier de travail</div>
+        <div class="onb-action-hint">Y retrouver mes évaluations et mes projets, en créer, les ranger</div>
       </div>
-    </button>
+    </a>
     <button type="button" class="onb-action" data-action="create">
       <div class="onb-action-emoji">➕</div>
       <div class="onb-action-body">
-        <div class="onb-action-title">Créer un nouveau projet</div>
+        <div class="onb-action-title">Créer une évaluation</div>
         <div class="onb-action-hint">Depuis un template fourni, ou par import d'un fichier AMC&nbsp;(.tex)</div>
       </div>
     </button>
   </div>
 
-  {% if recent %}
-  <div class="onb-recent">
-    <h2>Projets récents</h2>
-    <ul class="onb-recent-list">
-      {% for r in recent %}
-        <li>
-          <button type="button" class="onb-recent-open" data-path="{{ r.path }}" title="{{ r.path }}">
-            <span class="onb-recent-name">{{ r.name }}</span>
-            <span class="onb-recent-path">{{ r.path }}</span>
-          </button>
-          <button type="button" class="onb-recent-forget" data-path="{{ r.path }}" title="Oublier ce projet">✕</button>
-        </li>
-      {% endfor %}
-    </ul>
-  </div>
-  {% else %}
   <div class="onb-recent onb-recent-empty">
-    <p>Pas encore de projets. Par défaut, ils sont rangés dans <code>{{ default_root }}/</code>.</p>
+    <p>
+      Une <b>évaluation</b> est un examen : son sujet, ses copies, ses notes.
+      Un <b>projet</b> est un dossier qui en rassemble plusieurs — une
+      promotion — et agrège leurs notes. Par défaut, tout se range dans
+      <code>{{ default_root }}/</code>.
+    </p>
   </div>
-  {% endif %}
 
   <details class="onb-tutorial">
     <summary>▸ Tutoriel rapide (3 min)</summary>
     <ol>
-      <li><strong>Créer un projet</strong> avec le template <em>Examen minimal</em>
+      <li><strong>Créer une évaluation</strong> avec le template <em>Examen minimal</em>
           (ou importer un fichier AMC existant).</li>
       <li><strong>Éditer le sujet</strong> dans l'onglet <em>Sujet</em> : ajouter
           des questions QCM (single ou multiples) et des questions ouvertes,
@@ -57,7 +49,7 @@
       <li><strong>Compiler le PDF</strong> via le bouton <em>Compiler</em>
           (produit <code>sujet/DOC-sujet.pdf</code> + le calage <code>sujet/exam.xy</code>).</li>
       <li><strong>Imprimer + faire passer l'examen + scanner</strong>. Déposer les
-          PDF scannés dans le dossier <code>projet/</code> du projet.</li>
+          PDF scannés dans le dossier <code>projet/</code> de l'évaluation.</li>
       <li><strong>Lancer le pipeline de correction</strong> (commande CLI), puis
           relire les copies ambiguës et les identités via le dashboard.</li>
     </ol>
@@ -65,47 +57,12 @@
 </div>
 
 <script>
-// Wire les boutons de l'onboarding sur les mêmes handlers que la topbar.
+// Le bouton « Créer une évaluation » réutilise la modale de `base.html` —
+// unique voie de création, partagée avec le clic droit de l'onglet Fichiers.
 (function(){
-  document.querySelectorAll('.onb-action').forEach(b => {
-    b.addEventListener('click', () => {
-      if (b.dataset.action === 'open' && typeof window.openOpenModal === 'function') {
-        window.openOpenModal();
-      } else {
-        const id = b.dataset.action === 'create' ? 'createProjectModal' : 'openProjectModal';
-        document.getElementById(id).hidden = false;
-        const focusId = b.dataset.action === 'create' ? 'createProjectName' : 'openProjectPath';
-        const el = document.getElementById(focusId);
-        if (el) el.focus();
-      }
-    });
-  });
-  document.querySelectorAll('.onb-recent-open').forEach(b => {
-    b.addEventListener('click', async () => {
-      const path = b.dataset.path;
-      const r = await fetch('/api/projects/open', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({path})
-      });
-      if (!r.ok) { alert('Impossible d\'ouvrir : ' + (await r.text())); return; }
-      // Attend que le serveur revienne après le restart.
-      for (let i = 0; i < 40; i++) {
-        await new Promise(rs => setTimeout(rs, 250));
-        try { const t = await fetch('/api/projects', {cache:'no-store'}); if (t.ok) break; } catch {}
-      }
-      window.location.href = '/';
-    });
-  });
-  document.querySelectorAll('.onb-recent-forget').forEach(b => {
-    b.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const path = b.dataset.path;
-      const r = await fetch('/api/projects/forget', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({path})
-      });
-      if (r.ok) window.location.reload();
-    });
+  const b = document.querySelector('.onb-action[data-action="create"]');
+  if (b) b.addEventListener('click', () => {
+    if (typeof window.AMCxNewEvaluation === 'function') window.AMCxNewEvaluation('');
   });
 })();
 </script>

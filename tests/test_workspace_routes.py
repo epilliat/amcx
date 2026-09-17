@@ -160,3 +160,58 @@ class WsRouteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjetsEtEvaluationsRouteTest(WsRouteTest):
+    """Créer un **projet** depuis l'onglet Fichiers, et le menu de la topbar."""
+
+    def test_creer_un_projet(self):
+        code, j = self.post("/api/workspace/cohorte", {"parent": "", "name": "L3"})
+        self.assertEqual(code, 200)
+        self.assertEqual(j["path"], "L3")
+        self.assertTrue((self.root / "L3" / "cohorte.json").is_file())
+        e = {x["name"]: x for x in
+             self.c.get("/api/workspace/list").get_json()["entries"]}
+        self.assertTrue(e["L3"]["cohort"])
+
+    def test_un_nom_de_projet_qui_casse_un_chemin_400(self):
+        for bad in ("..", "a/b", ""):
+            self.assertEqual(
+                self.post("/api/workspace/cohorte", {"parent": "", "name": bad})[0],
+                400, msg=bad)
+
+    def test_creer_un_projet_ne_change_pas_la_racine(self):
+        self.post("/api/workspace/cohorte", {"parent": "", "name": "L3"})
+        self.assertEqual(self.c.get("/api/workspace").get_json()["root"],
+                         str(self.root))
+
+    def test_letat_dit_si_la_racine_est_un_projet(self):
+        self.assertFalse(self.c.get("/api/workspace").get_json()["cohort"])
+        (self.root / "cohorte.json").write_text("{}")
+        self.assertTrue(self.c.get("/api/workspace").get_json()["cohort"])
+
+    def test_la_topbar_liste_les_evaluations_du_dossier(self):
+        """⚠ Le menu ne montre plus des « récents » mais ce que contient le
+        dossier de travail : sinon la topbar et l'onglet Fichiers décrivent
+        deux mondes."""
+        with server.app.test_request_context("/"):
+            ctx = server._inject_project_context()
+        self.assertEqual([e["name"] for e in ctx["project_evaluations"]], ["QCM1"])
+        self.assertEqual(ctx["workspace_name"], "travail")
+        self.assertNotIn("project_recent", ctx)
+
+    def test_la_topbar_marque_levaluation_active(self):
+        orig = server.config.project_root
+        server.config.project_root = lambda: self.root / "QCM1" / "auto_grading"
+        self.addCleanup(lambda: setattr(server.config, "project_root", orig))
+        with server.app.test_request_context("/"):
+            ctx = server._inject_project_context()
+        self.assertEqual([e["active"] for e in ctx["project_evaluations"]], [True])
+
+    def test_un_dossier_de_travail_illisible_ne_casse_pas_le_rendu(self):
+        orig = server.workspace.evaluations
+        server.workspace.evaluations = lambda: (_ for _ in ()).throw(OSError("x"))
+        self.addCleanup(lambda: setattr(server.workspace, "evaluations", orig))
+        with server.app.test_request_context("/"):
+            ctx = server._inject_project_context()
+        self.assertEqual(ctx["project_evaluations"], [])

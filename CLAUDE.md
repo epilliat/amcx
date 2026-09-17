@@ -4,8 +4,24 @@ Notes pour un agent qui reprend le projet. Lis ce fichier en entier avant d'édi
 
 **AMCx = AMC eXtended** : éditeur de sujet QCM (interface web) + correction automatique
 des copies scannées (OpenCV + ML), sans dépendance au binaire `auto-multiple-choice`.
-Seule la compilation `pdflatex` est utilisée. Un projet AMCx = un dossier contenant un
-`sujet/exam.tex` (et les artefacts dérivés).
+Seule la compilation `pdflatex` est utilisée.
+
+## ⚠ Deux mots, deux niveaux — et le code porte les noms historiques
+
+| interface | sur le disque | dans le code |
+|---|---|---|
+| une **évaluation** — un examen : son sujet, ses copies, ses notes | un dossier portant `sujet/exam.tex` | `project` — `project_state.py`, `config.project_root()`, `~/.config/amcx/active_project`, `/api/projects*`, `AMCX_PROJECT_DIR` |
+| un **projet** — ce qui rassemble les évaluations d'une promotion et agrège leurs notes | un dossier portant `cohorte.json` | `cohort` — `cohort.py`, `~/.config/amcx/active_cohort`, `/api/cohorte*`, `AMCX_COHORT_DIR` |
+
+C'est **volontaire et assumé** : renommer le code coûterait des centaines de
+points d'appel, tous les tests et les `config.json` déjà écrits, pour un gain
+nul à l'exécution — même raisonnement que `qcm_seuil`, dont le libellé est
+devenu « normalisation » sans que la clé bouge. Quand ce fichier dit « projet »
+dans une phrase qui parle de code (`project_state`, « projet actif »,
+`new_project.py`), il désigne une **évaluation**.
+
+⚠ **La racine du dossier de travail EST le projet actif** : même pointeur
+(`active_cohort`). L'onglet Fichiers la parcourt, l'onglet Projet l'agrège.
 
 ## Contexte général
 
@@ -74,7 +90,7 @@ besoin** — c'est ce qui rend l'installation possible sur un Windows nu — pui
 | `amcx update` | détecte le mode d'installation et lance la bonne commande |
 | `amcx where` | chemins du code, des projets, de la config |
 | `amcx results` | notes de l'examen (`--project P`, `--json`) — cf. *exam_results.py* |
-| `amcx cohort` | notes agrégées d'un ensemble (`--dir D`, `--json`) — cf. *Vue d'ensemble* |
+| `amcx cohort` | notes agrégées d'un projet (`--dir D`, `--json`) — cf. *Onglet Projet* |
 
 **Détection du mode d'installation** (`cli.install_kind()`) : par
 **fichier-marqueur** à la racine de l'environnement — `uv-receipt.toml` (uv),
@@ -224,16 +240,46 @@ Architecture :
   puis `os._exit(0)` du process courant → le watcher exec un nouveau serveur
   qui repart sur le nouveau projet (≈ 500-800 ms côté browser).
 
-Topbar : menu déroulant à côté du brand **AMCx** affiche le nom du projet
-actif + actions (Ouvrir, Créer, Récents, Oublier). Routes API :
+**Topbar** : le menu déroulant à côté du brand **AMCx** nomme l'évaluation
+active et **déroule les évaluations du dossier de travail**
+(`workspace.evaluations`, injecté par `server._inject_project_context`).
+
+⚠ **Ce n'est plus une liste de « récents »**, et c'est le point : un historique
+décrit le passé d'une personne, alors que ce qu'on veut savoir en ouvrant ce
+menu est ce que contient le dossier qu'on a sous les yeux dans l'onglet
+Fichiers. Les deux écrans montraient deux mondes, qui se contredisaient dès
+qu'un dossier était renommé ou déplacé. `recent.json`, `recent_projects()` et
+`/api/projects/forget` existent toujours — plus aucune page ne les lit.
+
+⚠ **Le scan porte sur DEUX niveaux** : un dossier de travail est soit plat (une
+évaluation par sous-dossier), soit groupé en projets. N'en regarder qu'un
+viderait le menu dans le second cas. On ne descend pas dans une évaluation
+(son `auto_grading/` n'en est pas une seconde), et le dossier intermédiaire est
+affiché à droite du nom — sans lui, deux évaluations homonymes de deux
+promotions s'affichent pareil.
+
+⚠ **Le scan est silencieux sur échec** : un dossier de travail illisible ne doit
+pas faire échouer le rendu de *toutes* les pages, le menu étant dans
+`base.html`. Fixé par `test_un_dossier_de_travail_illisible_ne_casse_pas_le_rendu`.
+
+⚠ **Il n'y a plus qu'UNE voie de création**, la modale de `base.html` (« Nouvelle
+évaluation »), ouverte par `window.AMCxNewEvaluation(parentAbs)` : l'écran
+d'accueil et le clic droit de l'onglet Fichiers l'appellent tous les deux. Un
+`prompt()` dans l'arbre aurait perdu l'import d'un `.tex` AMC, qui n'existe que
+là, et deux formulaires auraient fini par accepter deux jeux de noms
+différents. La modale « Ouvrir un projet » a disparu : ouvrir, c'est choisir
+dans ce menu ou dans l'arbre.
+
+Routes API :
 - `GET /api/projects` → `{active, active_name, recent, default_root}`
-- `POST /api/projects/open` → `{path}` → restart sur le nouveau projet
-- `POST /api/projects/forget` → `{path}` → retire des récents (ne touche pas le disque)
+- `POST /api/projects/open` → `{path}` → restart sur la nouvelle évaluation
 - `POST /api/projects/create` → `{name, template, parent?, file?}` → crée puis restart
 - `GET /api/projects/browse?path=` → `{path, display, parent, at_root, dirs}` —
-  sous-dossiers, pour le sélecteur de dossier de la modale « Nouveau projet »
+  sous-dossiers, pour le sélecteur de dossier de la modale et de `/fichiers`
 - `POST /api/projects/mkdir` → `{parent, name}` → crée un sous-dossier
   (bouton **＋ Nouveau dossier** du sélecteur) et y entre
+- `POST /api/projects/forget`, `GET /api/projects/discover` — **plus aucun
+  appelant côté front** depuis le retrait des récents
 
 ⚠ **Créer ou ouvrir un projet se termine par un suicide du serveur**, donc
 l'échec du transport ne dit rien du résultat. `_restart_after_response()`
@@ -626,7 +672,7 @@ Seuiller (« 30 points suffisent pour tout avoir ») et ramener sur une autre
 échelle (« sur 20 ») ne servent qu'à *comparer ou agréger* cet examen avec
 autre chose — c'est le travail du niveau au-dessus, pas de cette page. Les deux
 histogrammes, le nuage de points, la formule et l'import de fichiers de notes
-sont partis pour la même raison : ils décrivent un **ensemble** d'examens.
+sont partis pour la même raison : ils décrivent un **projet**, pas une évaluation.
 
 Ce que la page garde : la carte « Fichiers du projet », la liste des copies
 (score brut), la distribution de la note brute sur une ligne, le bouton
@@ -667,7 +713,7 @@ s'écrivent toujours dans le `config.json` du projet (`POST /api/config`, pas
 Colonnes, rescaling, agrégation, histogrammes, nuage de points, bornes de
 curseurs : **logique pure**, zéro I/O, zéro état global. Tout ce qui dépend du
 sujet (barème, points d'une question) entre par **paramètre** — c'est ce qui
-permettra au même code de servir un ensemble d'examens sans une seconde
+permettra au même code de servir un projet entier sans une seconde
 implémentation. `server.py` n'en importe plus que `SERIES_COLORS`,
 `series_stats` et `compute_aggregate` ; le reste attend le niveau au-dessus.
 
@@ -727,7 +773,7 @@ connaît pas.
 ⚠ **Un dossier qui n'est pas un projet le dit** (`ResultsError`, code de sortie
 2). Avant le contrôle, un mauvais chemin rendait « 0 copie, barème 0 » avec un
 code 0, et un chemin inexistant retombait sur le dossier d'installation : un
-examen vide se serait glissé dans un relevé d'ensemble sans que rien ne le
+examen vide se serait glissé dans le relevé d'un projet sans que rien ne le
 signale. `resolve_project()` accepte le dossier du projet **ou** son
 sous-dossier `auto_grading/` — c'est ce dernier que rend
 `new_project.create_project()` et que pointe `~/.config/amcx/active_project`,
@@ -740,21 +786,52 @@ L'import de notes, les réglages et la sauvegarde du compte rendu ne touchent ja
 ## Onglet Fichiers (`/fichiers`) — le dossier de travail
 
 On y arrive par le **brand « AMCx »** de la barre du haut, pas par un onglet :
-les onglets décrivent le projet actif, le dossier de travail est le niveau qui
-les contient.
+les onglets décrivent l'évaluation active, le dossier de travail est le niveau
+qui la contient.
 
-Une arborescence à la VS Code sur le **dossier de travail** : les projets AMC
-sont ses sous-dossiers, et ce qui les accompagne (listes d'étudiants, scans en
-attente, comptes rendus) vit à côté. Moteur :
-[workspace.py](auto_grading/workspace.py).
+Une arborescence à la VS Code sur le **dossier de travail** : des
+**évaluations** (un sous-dossier par examen), éventuellement groupées en
+**projets**, et ce qui les accompagne (listes d'étudiants, scans en attente,
+comptes rendus). Moteur : [workspace.py](auto_grading/workspace.py) — voir le
+glossaire en tête de ce fichier pour le couple `project`/`cohort`.
 
-⚠ **C'est le MÊME dossier que l'ensemble de `/cohorte`**, et le même pointeur
+⚠ **C'est le MÊME dossier que le projet de `/cohorte`**, et le même pointeur
 (`~/.config/amcx/active_cohort`, env `AMCX_COHORT_DIR`). Deux racines — « mon
-dossier de travail » ici, « mon ensemble d'examens » là — auraient fini par
-désigner deux endroits, et « mes projets » aurait voulu dire deux choses. Le
-`cohorte.json` n'apparaît que le jour où l'on compose réellement un ensemble :
-**définir la racine n'écrit rien**, ce qui permet de la poser sur un dossier
-existant sans le transformer.
+dossier de travail » ici, « mon projet » là — auraient fini par désigner deux
+endroits, et « mes examens » aurait voulu dire deux choses. Le `cohorte.json`
+n'apparaît que le jour où l'on compose réellement un projet : **définir la
+racine n'écrit rien**, ce qui permet de la poser sur un dossier existant sans
+le transformer.
+
+### Créer un projet, créer une évaluation
+
+Les deux se font au clic droit dans l'arbre (ou par les boutons de la barre) :
+
+| | ce que ça pose | comment on l'ouvre |
+|---|---|---|
+| **🎓 Nouvelle évaluation ici** | `sujet/exam.tex` (modale partagée, import `.tex` compris) | `/api/projects/open` → **le serveur redémarre** |
+| **📚 Nouveau projet ici** | un dossier + son `cohorte.json` (`workspace.new_cohort`) | `/api/workspace/root` → **l'arbre se ré-enracine**, pas de redémarrage |
+
+⚠ **Créer un projet ne bascule PAS dessus.** L'ouvrir re-enracine l'arbre :
+le faire d'office planterait l'utilisateur dans un dossier vide, alors qu'il
+vient le plus souvent de créer un rangement où **déplacer** des évaluations
+existantes. Le message de création dit comment l'ouvrir ensuite.
+
+⚠ **Un dossier peut n'être ni l'un ni l'autre**, et la racine se comporte en
+projet **même sans `cohorte.json`** (`cohort.load` traite un fichier absent
+comme un projet vide). `is_cohort` n'est donc pas l'inverse de `is_project` :
+c'est la présence du fichier, qui n'est écrit qu'au premier réglage.
+
+⚠ **`📚` et non `🗂`** : « 🗂 » n'a pas de glyphe couleur dans la police du
+système (mesuré : rendu par un repli monochrome, 35 px contre 40 pour les
+autres), il apparaissait comme un carré terne à côté des pastilles voisines.
+
+⚠ **Un rendu du panneau de détail porte un jeton** (`detailSeq`). Il vide le
+panneau *avant* d'aller chercher le détail : deux sélections rapprochées
+(flèches maintenues) laissent deux requêtes en vol, la seconde vide, puis la
+**première** ajoute son contenu par-dessus. Constaté — deux fiches empilées,
+dont une périmée. L'aperçu, qui arrive après un second aller-retour, porte le
+même jeton.
 
 ### ⚠ La route la plus dangereuse du projet
 
@@ -801,16 +878,19 @@ droits de l'interface. **Tout le reste passe par `/download`, en
 ### Ce que la page fait
 
 - Arbre **paresseux** (un niveau par requête), dépli persisté par racine dans
-  `localStorage`, guides d'indentation, icône par type, pastille `projet` et
-  **`projet actif`** — sans elle, on croit corriger l'examen qu'on a sous les
-  yeux ici alors que les autres onglets en montrent un autre.
+  `localStorage`, guides d'indentation, icône par type, pastilles `évaluation`
+  / **`évaluation active`** et `projet`. Sans la première, on croit corriger
+  l'examen qu'on a sous les yeux ici alors que les autres onglets en montrent
+  un autre ; les deux teintes séparent les deux niveaux, que le regard
+  confondrait — on ouvrirait l'un pour l'autre. La racine porte
+  `projet actif` : c'est elle que l'onglet Projet agrège.
 - ⚠ **Toutes les actions sont au clic droit dans l'arbre** (ou par le `⋯` au
-  survol d'une ligne) : ouvrir le projet, nouveau sous-dossier, nouveau projet
-  AMC ici, dépôt de fichiers, renommer, déplacer, supprimer. Le **panneau de
-  droite décrit, il ne commande pas** — une rangée de boutons y agissait sur
-  l'élément sélectionné, donc à l'autre bout de l'écran de ce qu'on vise. Seule
-  « Ouvrir ce projet » y reste : ce n'est pas une opération de fichier, c'est ce
-  que fait l'application.
+  survol d'une ligne) : ouvrir, nouveau sous-dossier, nouvelle évaluation ici,
+  nouveau projet ici, dépôt de fichiers, renommer, déplacer, supprimer. Le
+  **panneau de droite décrit, il ne commande pas** — une rangée de boutons y
+  agissait sur l'élément sélectionné, donc à l'autre bout de l'écran de ce
+  qu'on vise. Seul « Ouvrir » y reste (`openCard`) : ce n'est pas une opération
+  de fichier, c'est ce que fait l'application.
 - Le clic droit sur le **vide du panneau** vise la racine (le menu la nomme en
   tête) : sans ce cas, on ne pourrait plus rien créer à la racine dès qu'un
   dossier est sélectionné.
@@ -822,11 +902,12 @@ droits de l'interface. **Tout le reste passe par `/download`, en
 - **Aperçu** dans le panneau de détail : texte (tronqué à 200 ko), PDF et
   images en ligne. Un panneau vide n'aide personne, et l'usage courant est de
   vérifier un `notes.csv` ou une page scannée sans quitter l'onglet.
-- « Ouvrir ce projet » bascule l'application (le serveur redémarre) ;
-  « Nouveau projet AMC » réutilise `POST /api/projects/create` avec `parent`,
-  donc **le même chemin de création** que la modale de la topbar. La page ne
-  conclut pas à l'échec sur une erreur réseau : la création se termine par un
-  suicide du serveur, elle sonde jusqu'au retour.
+- « Ouvrir cette évaluation » bascule l'application (le serveur redémarre) ;
+  « Ouvrir ce projet » ne fait que re-enraciner l'arbre (`/api/workspace/root`)
+  — un projet lit ses évaluations par sous-processus, rien n'est figé dans le
+  process courant. La page ne conclut pas à l'échec sur une erreur réseau :
+  la création d'une évaluation se termine par un suicide du serveur, elle sonde
+  jusqu'au retour.
 - Le sélecteur de dossier réutilise le composant `pm-browser-*` et
   `/api/projects/browse`, la seule route qui énumère le disque (403 hors du
   dossier personnel). Un second sélecteur aurait divergé du premier.
@@ -834,10 +915,11 @@ droits de l'interface. **Tout le reste passe par `/download`, en
 | Route | Rôle |
 |---|---|
 | `GET /fichiers` | la page (ou l'invite de choix de racine) |
-| `GET /api/workspace` | `{root, display, name, n_trash, active}` |
+| `GET /api/workspace` | `{root, display, name, n_trash, active, cohort}` |
 | `POST /api/workspace/root` | `{path}` — n'écrit rien dans le dossier |
 | `GET /api/workspace/list?path=&hidden=` | entrées d'un dossier |
-| `GET /api/workspace/info?path=` | détail, enrichi pour un projet AMCx |
+| `GET /api/workspace/info?path=` | détail, enrichi d'un `project_root` (évaluation) ou d'un `cohort_root` (projet) |
+| `POST /api/workspace/cohorte` | `{parent, name}` → crée un **projet** ; ne bascule pas dessus |
 | `POST /api/workspace/mkdir` · `rename` · `move` | remaniement |
 | `POST /api/workspace/delete` | `{path}` ou `{paths}` → **corbeille** ; un échec sur l'un n'arrête pas les autres et est **rendu** |
 | `GET /api/workspace/trash` · `POST .../restore` · `.../empty` | corbeille |
@@ -846,28 +928,32 @@ droits de l'interface. **Tout le reste passe par `/download`, en
 | `GET /api/workspace/view?path=` | **inline, liste blanche** (pdf/png/jpeg) |
 | `GET /api/workspace/download?path=` | toujours `as_attachment` |
 
-## Vue d'ensemble (`/cohorte`) — plusieurs examens d'un même dossier
+## Onglet Projet (`/cohorte`) — plusieurs évaluations d'un même dossier
 
-Un **ensemble** est un dossier qui contient un `cohorte.json` et, à côté, les
-projets AMCx des examens qu'il rassemble :
+Un **projet** est un dossier qui contient un `cohorte.json` et, à côté, les
+**évaluations** qu'il rassemble :
 
 ```
 L3-2026/
   cohorte.json
-  QCM1/          ← un projet AMCx
-  rattrapage/    ← un autre
-  compte_rendu/  ← notes.csv + mail_log.csv de l'ENSEMBLE
+  QCM1/          ← une évaluation
+  rattrapage/    ← une autre
+  compte_rendu/  ← notes.csv + mail_log.csv du PROJET
 ```
 
-C'est le niveau où « seuiller à 30 » et « ramener sur 20 » ont un sens : un
-examen seul se lit sur son propre barème (cf. *Onglet Évaluation*), comparer ou
-agréger demande une échelle commune. Moteur : [cohort.py](auto_grading/cohort.py),
-page `/cohorte`, ligne de commande `amcx cohort --dir D [--json]`.
+C'est le niveau où « seuiller à 30 » et « ramener sur 20 » ont un sens : une
+évaluation seule se lit sur son propre barème (cf. *Onglet Évaluation*),
+comparer ou agréger demande une échelle commune. Moteur :
+[cohort.py](auto_grading/cohort.py), page `/cohorte`, ligne de commande
+`amcx cohort --dir D [--json]`. Le module et ses routes gardent le nom
+historique `cohort`/`cohorte` (cf. le glossaire en tête).
 
-⚠ **Changer d'ensemble ne redémarre PAS le serveur**, contrairement à changer de
-projet : un ensemble lit ses examens par sous-processus, il ne fige aucun chemin
-dans le process courant. Le pointeur vit dans `~/.config/amcx/active_cohort`
-(env `AMCX_COHORT_DIR` prioritaire).
+⚠ **Changer de projet ne redémarre PAS le serveur**, contrairement à changer
+d'évaluation : un projet lit ses évaluations par sous-processus, il ne fige
+aucun chemin dans le process courant. Le pointeur vit dans
+`~/.config/amcx/active_cohort` (env `AMCX_COHORT_DIR` prioritaire), et **c'est
+le même que la racine de l'onglet Fichiers** : ouvrir un projet, c'est y
+enraciner l'arbre.
 
 ### La note d'une colonne — le plafond s'applique AVANT la moyenne
 
@@ -930,7 +1016,7 @@ Un projet trouvé dans le dossier mais absent de `cohorte.json` est un
 dossier d'essai deviendrait une note. La page les propose, un clic les ajoute.
 
 ⚠ `load()` **lève** sur un `cohorte.json` corrompu au lieu de repartir des
-défauts : repartir de zéro effacerait la composition de l'ensemble et les
+défauts : repartir de zéro effacerait la composition du projet et les
 réglages de note à la première écriture.
 
 ### Exports et courriels — les deux niveaux, un seul moteur
@@ -941,7 +1027,7 @@ réglages de note à la première écriture.
   étudiant était *attendu* à cet examen et n'a pas composé ; vide = cet examen
   ne le concernait pas. Les confondre ferait passer une promotion entière pour
   absente à l'examen de l'autre demi-journée.
-- `POST /api/cohorte/report` écrit `<ensemble>/compte_rendu/notes.csv` — **le
+- `POST /api/cohorte/report` écrit `<projet>/compte_rendu/notes.csv` — **le
   même fichier**, posé là où les courriels le cherchent, avec les intitulés
   qu'attend `mail_results.load_recipients` (`id_canonique`, `nom_prenom`,
   `courriel`, `note_finale`). Pas de second format à maintenir.
@@ -950,8 +1036,8 @@ réglages de note à la première écriture.
 
 ```sh
 python auto_grading/mail_results.py \
-  --notes "<ensemble>/compte_rendu/notes.csv" \
-  --log   "<ensemble>/compte_rendu/mail_log.csv" \
+  --notes "<projet>/compte_rendu/notes.csv" \
+  --log   "<projet>/compte_rendu/mail_log.csv" \
   --out-of 20 --send
 ```
 
@@ -967,7 +1053,7 @@ autre note. Le journal suit le fichier de notes, il ne le devine pas.
 
 | Route | Rôle |
 |---|---|
-| `GET /cohorte` | la page (ou l'invite d'ouverture si aucun ensemble actif) |
+| `GET /cohorte` | la page (ou l'invite d'ouverture si aucun projet actif) |
 | `POST /api/cohorte/open` | `{path, create}` — ⚠ `create` est explicite : poser un `cohorte.json` dans un dossier au hasard n'est pas anodin. Borné au dossier personnel (`check_under_browse_root`) |
 | `POST /api/cohorte/config` | plafond, seuil de réussite, granularité + `columns:[{path, seuil, max, agg_weight}]` |
 | `POST /api/cohorte/exams` | `{path, label}` ajoute · `{path, remove:true}` retire (**aucun fichier supprimé**) |
@@ -999,10 +1085,11 @@ auto_grading/
 ├── sujet/                     ← subject.json (SOURCE DE VÉRITÉ) + exam.tex (généré)
 │                                 + DOC-sujet.pdf + exam.xy (calage)
 ├── review_state.py            ← ce qui reste à relire : signalements, état traité, risque (pur)
-├── workspace.py               ← dossier de travail : arborescence, corbeille, bornes
+├── workspace.py               ← dossier de travail : arborescence, corbeille, bornes,
+│                                 création d'évaluations et de projets
 ├── grades_view.py             ← colonnes de note, rescaling, agrégation, histogrammes (PUR)
 ├── exam_results.py            ← table des résultats (1 ligne/étudiant) + `amcx results` (PUR)
-├── cohort.py                  ← ensemble d'examens : membres (sous-processus), colonnes, agrégation
+├── cohort.py                  ← PROJET (ensemble d'évaluations) : membres (sous-processus), agrégation
 ├── score.py                   ← applique le barème (single=value/0 ; mult=Σ b/m, peut être négatif)
 ├── student_list.py            ← import de la liste (xlsx/csv, colonnes détectées par contenu)
 │                                 + StudentMatcher : match par le numéro lu (largeur quelconque) puis nom
@@ -1069,20 +1156,21 @@ pkill -f "front/server.py"
 
 ## UI — routes
 
-**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Ensemble** | Review rapide | Identités | **Courriels** | Export CSV.
+**Ordre des onglets** (dans `base.html`) : Banque | **Sujet** | **Évaluation** | **Questions** | **Projet** | Review rapide | Identités | **Courriels** | Export CSV.
 
 ⚠ **Le brand « AMCx » de la topbar EST le lien vers `/fichiers`**, et il n'y a
-pas d'onglet Fichiers. Les onglets décrivent tous le **projet actif** ; le
+pas d'onglet Fichiers. Les onglets décrivent tous l'**évaluation active** ; le
 dossier de travail est le niveau au-dessus, celui qui les contient. En faire un
 onglet de plus le rangeait à côté de « Sujet » et « Évaluation », comme s'il
-parlait du même examen.
+parlait du même examen. L'onglet **Projet** est l'exception assumée : il décrit
+ce qui contient l'évaluation, et c'est là qu'on agrège les notes.
 
 | Route | Rôle |
 |---|---|
 | `/sujet` | **Onglet Sujet** : modèle canonique (text/qcm/open) + outline + bandeau global |
 | `/` | **Évaluation** : un examen — copies, note brute, score moyen par question. Aucun réglage |
-| `/cohorte` | **Ensemble** : plusieurs examens d'un dossier — colonnes, histogrammes, nuage, formule |
-| `/fichiers` | **Fichiers** (lien du brand « AMCx ») : arborescence du dossier de travail, corbeille, création de projet |
+| `/cohorte` | **Projet** : plusieurs évaluations d'un dossier — colonnes, histogrammes, nuage, formule |
+| `/fichiers` | **Fichiers** (lien du brand « AMCx ») : arborescence du dossier de travail, corbeille, création d'évaluations et de projets |
 | `/questions` | **Onglet Questions** : ranking par taux de réussite + aperçu PDF + histo par question |
 | `/api/questions/stats` | GET : `[{q, tag, type, statement, max_score, n_eval, n_perfect, mean, scores, bank_id}]` pour chaque QCM du sujet |
 | `/flagged` | **Review rapide** : signalements groupés par question, triés par risque ; `?status=open\|done\|all&sort=risk\|scan` |
@@ -2920,7 +3008,7 @@ Premier `tests/` du dépôt — **`unittest` de la stdlib**, pas de pytest (aucu
 dépendance ajoutée) :
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v     # 460 tests
+.venv/bin/python -m unittest discover -s tests -v     # 620 tests
 ./tests/sql/run.sh                                    # + 25 contrôles SQL (docker)
 ```
 

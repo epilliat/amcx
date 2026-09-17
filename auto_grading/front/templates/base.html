@@ -17,31 +17,44 @@
 <nav class="topbar">
   {# La marque EST l'entrée de l'explorateur de fichiers : il porte sur le
      dossier de travail, pas sur l'examen courant, donc il n'a pas sa place
-     dans la rangée d'onglets qui décrivent tous le projet actif. #}
+     dans la rangée d'onglets qui décrivent tous l'évaluation active. #}
   <a href="/fichiers" class="topbar-brand {% if active == 'fichiers' %}active{% endif %}"
      title="Fichiers du dossier de travail">{{ app_name|default('AMCx') }}</a>
 
+  {# Le menu déroule les ÉVALUATIONS du dossier de travail, pas un historique
+     de récents : c'est ce que montre l'onglet Fichiers, et deux écrans qui
+     décrivent deux mondes se contredisent au premier clic. Créer, renommer et
+     ranger se font là-bas, sur l'élément visé. #}
   <div class="project-menu" id="projectMenu">
     <button type="button" class="project-menu-btn" id="projectMenuBtn"
             aria-haspopup="true" aria-expanded="false">
-      <span class="project-menu-name" id="projectMenuName">{{ project_name|default('Aucun projet') }}</span>
+      <span class="project-menu-name" id="projectMenuName">{{ project_name|default('Aucune évaluation') }}</span>
       <span class="project-menu-caret">▾</span>
     </button>
     <div class="project-menu-dropdown" id="projectMenuDropdown" hidden>
-      <button type="button" class="pm-item" data-action="open">📂&nbsp; Ouvrir un projet…</button>
-      <button type="button" class="pm-item" data-action="create">➕&nbsp; Créer un nouveau projet…</button>
-      <button type="button" class="pm-item" data-action="import-tex">📥&nbsp; Importer un fichier LaTeX…</button>
-      <div class="pm-sep">Récents</div>
-      <div id="pmRecents" class="pm-recents">
-        {% for r in project_recent %}
-          <div class="pm-recent">
-            <button type="button" class="pm-recent-open" data-path="{{ r.path }}" title="{{ r.path }}">{{ r.name }}</button>
-            <button type="button" class="pm-recent-forget" data-path="{{ r.path }}" title="Oublier ce projet">✕</button>
-          </div>
+      <div class="pm-sep">
+        {% if workspace_name %}Évaluations de « {{ workspace_name }} »
+        {% else %}Aucun dossier de travail{% endif %}
+      </div>
+      <div class="pm-evals">
+        {% for e in project_evaluations %}
+          <button type="button" class="pm-eval{% if e.active %} is-active{% endif %}"
+                  data-path="{{ e.path }}" title="{{ e.path }}"
+                  {% if e.active %}disabled{% endif %}>
+            <span class="pm-eval-mark">{{ '✓' if e.active else '🎓' }}</span>
+            <span class="pm-eval-name">{{ e.name }}</span>
+            {% if e.group %}<span class="pm-eval-group">{{ e.group }}</span>{% endif %}
+          </button>
         {% else %}
-          <div class="pm-empty">— aucun —</div>
+          <div class="pm-empty">
+            {% if workspace_name %}— aucune évaluation dans ce dossier —
+            {% else %}— à définir dans l’onglet Fichiers —{% endif %}
+          </div>
         {% endfor %}
       </div>
+      <div class="pm-sep"></div>
+      <a class="pm-item" href="/fichiers">📁&nbsp; Gérer les fichiers…</a>
+      <button type="button" class="pm-item" data-action="import-tex">📥&nbsp; Importer un fichier LaTeX…</button>
     </div>
   </div>
 
@@ -49,7 +62,9 @@
   <a href="/sujet" class="topbar-link {% if active == 'sujet' %}active{% endif %}">Sujet</a>
   <a href="/" class="topbar-link {% if active == 'evaluation' %}active{% endif %}">Évaluation</a>
   <a href="/questions" class="topbar-link {% if active == 'questions' %}active{% endif %}">Questions</a>
-  <a href="/cohorte" class="topbar-link {% if active == 'cohorte' %}active{% endif %}">Ensemble</a>
+  {# « Projet » = l'ensemble d'évaluations. Les autres onglets décrivent
+     l'évaluation active ; celui-ci décrit ce qui la contient. #}
+  <a href="/cohorte" class="topbar-link {% if active == 'cohorte' %}active{% endif %}">Projet</a>
   <a href="/flagged" class="topbar-link {% if active == 'flagged' %}active{% endif %}">Review rapide</a>
   <a href="/identites" class="topbar-link {% if active == 'identites' %}active{% endif %}">Identités</a>
   <a href="/mail" class="topbar-link {% if active == 'mail' %}active{% endif %}">Courriels</a>
@@ -57,40 +72,14 @@
   <a href="/export.csv" class="topbar-link topbar-export">⤓ Export CSV</a>
 </nav>
 
-<!-- Modale : ouvrir un projet existant -->
-<div class="pm-modal" id="openProjectModal" hidden role="dialog" aria-labelledby="openProjectTitle">
-  <div class="pm-modal-backdrop" data-close></div>
-  <div class="pm-modal-card">
-    <h2 id="openProjectTitle">Ouvrir un projet</h2>
-
-    <div class="pm-modal-field">
-      <label>Projets dans <code id="openProjectRoot">~/Documents/AMCx/</code></label>
-      <div id="openProjectDiscover" class="pm-discovered">
-        <div class="pm-discovered-loading">Chargement…</div>
-      </div>
-    </div>
-
-    <div class="pm-modal-field">
-      <label for="openProjectPath">… ou autre chemin</label>
-      <input type="text" id="openProjectPath" placeholder="/home/.../mon_examen">
-      <div class="pm-modal-hint">Dossier qui contient <code>sujet/exam.tex</code>.</div>
-    </div>
-
-    <div class="pm-modal-error" id="openProjectError" hidden></div>
-    <div class="pm-modal-actions">
-      <button type="button" class="pm-btn-secondary" data-close>Annuler</button>
-      <button type="button" class="pm-btn-primary" id="openProjectSubmit">Ouvrir</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modale : créer un nouveau projet -->
+<!-- Modale : créer une évaluation (seule voie de création, partagée
+     par l’écran d’accueil et par le clic droit de l’onglet Fichiers) -->
 <div class="pm-modal" id="createProjectModal" hidden role="dialog" aria-labelledby="createProjectTitle">
   <div class="pm-modal-backdrop" data-close></div>
   <div class="pm-modal-card">
-    <h2 id="createProjectTitle">Nouveau projet</h2>
+    <h2 id="createProjectTitle">Nouvelle évaluation</h2>
     <div class="pm-modal-field">
-      <label for="createProjectName">Nom du projet</label>
+      <label for="createProjectName">Nom de l’évaluation</label>
       <input type="text" id="createProjectName" placeholder="examen_jan_2026" autocomplete="off">
     </div>
     <div class="pm-modal-field">
@@ -149,7 +138,7 @@
   </div>
 </div>
 
-<!-- Modale : importer un .tex dans le projet ouvert -->
+<!-- Modale : importer un .tex dans l'évaluation ouverte -->
 <div class="pm-modal" id="importTexModal" hidden role="dialog" aria-labelledby="importTexTitle">
   <div class="pm-modal-backdrop" data-close></div>
   <div class="pm-modal-card">
@@ -159,7 +148,7 @@
       <input type="file" id="importTexFile" accept=".tex">
       <div class="pm-modal-hint">
         Les questions du <code>.tex</code> (QCM, ouvertes, libres) seront
-        <strong>ajoutées à la fin</strong> du sujet de ce projet. Les blocs
+        <strong>ajoutées à la fin</strong> du sujet de cette évaluation. Les blocs
         texte et zones de réponse seront ignorés.
         <br>Le sujet courant doit être en mode <em>canonique</em>.
       </div>
@@ -181,7 +170,7 @@
 {% block scripts %}{% endblock %}
 
 <script>
-// --- Menu projet + modales (Phase 3+4) -------------------------------------
+// --- Menu des évaluations + modales -------------------------------------
 
 (function(){
   const btn = document.getElementById('projectMenuBtn');
@@ -202,120 +191,17 @@
   // Items du menu
   dd.addEventListener('click', (e) => {
     const action = e.target.closest('[data-action]')?.dataset.action;
-    if (action === 'open')   { closeMenu(); openOpenModal(); }
-    if (action === 'create') { closeMenu(); showModal('createProjectModal'); document.getElementById('createProjectName').focus(); }
     if (action === 'import-tex') {
       closeMenu();
       document.getElementById('importTexError').hidden = true;
       document.getElementById('importTexFile').value = '';
       showModal('importTexModal');
     }
-    const recent = e.target.closest('.pm-recent-open');
-    if (recent) { closeMenu(); switchProject(recent.dataset.path); }
-    const forget = e.target.closest('.pm-recent-forget');
-    if (forget)  { forgetProject(forget.dataset.path); }
+    // Basculer d'évaluation redémarre le serveur : l'évaluation courante est
+    // `disabled`, un clic dessus ne doit pas coûter un redémarrage pour rien.
+    const ev = e.target.closest('.pm-eval:not([disabled])');
+    if (ev) { closeMenu(); switchProject(ev.dataset.path); }
   });
-
-  // Affiche la modale Ouvrir + remplit la liste découverte dans ~/Documents/AMCx/.
-  function openOpenModal() {
-    showModal('openProjectModal');
-    document.getElementById('openProjectPath').focus();
-    loadDiscovered();
-  }
-  // Exposé globalement pour que l'onboarding (qui hérite de base.html) puisse appeler.
-  window.openOpenModal = openOpenModal;
-
-  async function loadDiscovered() {
-    const box = document.getElementById('openProjectDiscover');
-    const rootEl = document.getElementById('openProjectRoot');
-    if (!box) return;
-    box.innerHTML = '<div class="pm-discovered-loading">Chargement…</div>';
-    try {
-      const r = await fetch('/api/projects/discover', {cache: 'no-store'});
-      const j = await r.json();
-      if (rootEl && j.root) rootEl.textContent = j.root + '/';
-      if (!j.projects || j.projects.length === 0) {
-        box.innerHTML = '<div class="pm-discovered-empty">Aucun projet trouvé. Crée un nouveau projet, ou colle un chemin ci-dessous.</div>';
-        return;
-      }
-      box.innerHTML = '';
-      for (const p of j.projects) {
-        const row = document.createElement('div');
-        row.className = 'pm-discovered-row' + (p.complete ? '' : ' pm-discovered-incomplete');
-
-        const item = document.createElement('button');
-        item.type = 'button';
-        item.className = 'pm-discovered-item';
-        item.dataset.path = p.path;
-        item.title = p.path;
-        const label = p.complete
-          ? '<span class="pm-discovered-name">' + escapeHtml(p.name) + '</span>'
-          : '<span class="pm-discovered-name">' + escapeHtml(p.name) + '</span>'
-            + ' <span class="pm-discovered-tag">incomplet — pas de sujet/exam.tex</span>';
-        item.innerHTML = label;
-        if (p.complete) {
-          item.addEventListener('click', () => {
-            document.getElementById('openProjectModal').hidden = true;
-            switchProject(p.path);
-          });
-        } else {
-          item.disabled = true;
-        }
-        row.appendChild(item);
-
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'pm-discovered-del';
-        del.title = 'Supprimer ce dossier';
-        del.textContent = '✕';
-        del.addEventListener('click', async (ev) => {
-          ev.stopPropagation();
-          const lines = p.complete
-            ? [
-                `⚠ Supprimer définitivement le projet « ${p.name} » ?`,
-                ``,
-                `Tout le contenu de ce dossier sera effacé :`,
-                `  • sujet/ (exam.tex + PDF compilé + calage .xy)`,
-                `  • pages/ (scans extraits des PDF de copies)`,
-                `  • raw_responses/ (réponses corrigées par l'utilisateur)`,
-                `  • results/, compte_rendu/, models/ s'ils existent`,
-                ``,
-                `Chemin : ${p.dir}`,
-                ``,
-                `Cette action est IRRÉVERSIBLE.`,
-              ]
-            : [
-                `Supprimer le dossier incomplet « ${p.name} » ?`,
-                ``,
-                `Aucun exam.tex détecté, mais le dossier sera effacé :`,
-                `  ${p.dir}`,
-                ``,
-                `Cette action est IRRÉVERSIBLE.`,
-              ];
-          if (!confirm(lines.join('\n'))) return;
-          const r = await fetch('/api/projects/delete-folder', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({dir: p.dir})
-          });
-          if (!r.ok) {
-            const e = await r.json().catch(() => ({error:'erreur inconnue'}));
-            alert(e.error || ('HTTP ' + r.status));
-            return;
-          }
-          loadDiscovered();
-        });
-        row.appendChild(del);
-
-        box.appendChild(row);
-      }
-    } catch (err) {
-      box.innerHTML = '<div class="pm-discovered-empty">Impossible de scanner le dossier.</div>';
-    }
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  }
 
   // --- Modales (génériques) ----------------------------------------------
   function showModal(id) { document.getElementById(id).hidden = false; }
@@ -330,18 +216,7 @@
     if (e.key === 'Escape') document.querySelectorAll('.pm-modal:not([hidden])').forEach(m => m.hidden = true);
   });
 
-  // --- Ouvrir un projet --------------------------------------------------
-  const openInput  = document.getElementById('openProjectPath');
-  const openSubmit = document.getElementById('openProjectSubmit');
-  const openError  = document.getElementById('openProjectError');
-  openSubmit?.addEventListener('click', () => {
-    const path = openInput.value.trim();
-    if (!path) { openError.hidden = false; openError.textContent = 'Saisis un chemin.'; return; }
-    switchProject(path, openError);
-  });
-  openInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openSubmit.click(); });
-
-  // --- Créer un projet (Phase 4 wires this up; le HTML est déjà en place) -
+  // --- Créer une évaluation ----------------------------------------------
   const nameInput   = document.getElementById('createProjectName');
   const destHint    = document.getElementById('createProjectDest');
   const amcRow      = document.getElementById('createProjectAmcRow');
@@ -377,7 +252,7 @@
 
   // --- Sélecteur de dossier ---------------------------------------------
   // Borné au dossier personnel côté serveur ; le champ texte reste libre pour
-  // poser un projet ailleurs (disque externe).
+  // poser une évaluation ailleurs (disque externe).
   let browseCwd = null;
   async function browseTo(path) {
     let j;
@@ -419,7 +294,7 @@
       if (d.is_project) {
         const tag = document.createElement('span');
         tag.className = 'pm-browser-tag';
-        tag.textContent = 'projet';
+        tag.textContent = 'évaluation';
         b.appendChild(tag);
       }
       b.addEventListener('click', () => browseTo(d.path));
@@ -491,7 +366,24 @@
   syncAmcRow();
   createSubmit?.addEventListener('click', () => createProject(createError));
 
-  // --- Importer un .tex dans le projet ouvert ----------------------------
+  /* Ouvrir la modale sur un dossier donné — c'est le clic droit de l'onglet
+   * Fichiers qui l'appelle, avec le dossier visé en chemin absolu.
+   * ⚠ Il n'y a qu'UNE voie de création. Un `prompt()` dans l'arbre aurait
+   * perdu l'import d'un `.tex` AMC, qui n'existe que dans cette modale. */
+  window.AMCxNewEvaluation = function (parentAbs) {
+    createError.hidden = true;
+    if (nameInput) nameInput.value = '';
+    if (parentAbs && parentInput) parentInput.value = parentAbs;
+    if (browser) browser.hidden = true;
+    const dflt = document.querySelector('input[name="cpt"][value="examen_minimal"]');
+    if (dflt) dflt.checked = true;
+    syncAmcRow();
+    updateDest();
+    showModal('createProjectModal');
+    nameInput?.focus();
+  };
+
+  // --- Importer un .tex dans l'évaluation ouverte ----------------------------
   const importTexSubmit = document.getElementById('importTexSubmit');
   const importTexError  = document.getElementById('importTexError');
   const importTexFile   = document.getElementById('importTexFile');
@@ -551,7 +443,7 @@
     // `_project_name_error()` côté serveur (noms réservés Windows, longueur…) :
     // dupliquer toute la règle ici garantirait qu'elles finissent par diverger.
     if (!name) {
-      errorEl.hidden = false; errorEl.textContent = 'Donne un nom au projet.';
+      errorEl.hidden = false; errorEl.textContent = 'Donne un nom à l’évaluation.';
       return;
     }
     const bad = [...new Set([...name].filter(c => '/\\:*?"<>|'.includes(c)))];
@@ -585,8 +477,8 @@
       });
     } catch (err) {
       // Le serveur se tue lui-même juste après avoir répondu : la connexion
-      // peut être coupée avant que le corps n'arrive, alors que le projet a
-      // bien été créé. On ne conclut donc à l'échec qu'après avoir VÉRIFIÉ.
+      // peut être coupée avant que le corps n'arrive, alors que l'évaluation a
+      // bien été créée. On ne conclut donc à l'échec qu'après avoir VÉRIFIÉ.
       if (await createdDespiteError(name)) { window.location.href = '/'; return; }
       errorEl.hidden = false; errorEl.textContent = 'Erreur réseau : ' + err;
       return;
@@ -623,7 +515,7 @@
       const e = await r.json().catch(() => ({error:'erreur inconnue'}));
       const msg = e.error || ('HTTP ' + r.status);
       if (errorEl) { errorEl.hidden = false; errorEl.textContent = msg; }
-      else alert('Impossible d\'ouvrir : ' + msg);
+      else alert('Impossible d\'ouvrir cette évaluation : ' + msg);
       return;
     }
     // Le serveur redémarre — attendre qu'il réponde à nouveau.
@@ -631,17 +523,9 @@
     window.location.href = '/';
   }
 
-  async function forgetProject(path) {
-    const r = await fetch('/api/projects/forget', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({path})
-    });
-    if (r.ok) window.location.reload();
-  }
-
-  /** Le projet `name` est-il devenu le projet actif malgré l'erreur réseau ?
-   *  Une création se termine par un suicide du serveur ; l'échec de transport
-   *  ne dit donc rien du résultat. */
+  /** L'évaluation `name` est-elle devenue l'évaluation active malgré
+   *  l'erreur réseau ? Une création se termine par un suicide du serveur ;
+   *  l'échec de transport ne dit donc rien du résultat. */
   async function createdDespiteError(name) {
     if (!await waitUntilServerReady('/api/projects')) return false;
     try {
@@ -661,8 +545,8 @@
     return false;
   }
 
-  // Avertissement déposé avant un redémarrage (création de projet) : affiché
-  // une seule fois, puis effacé.
+  // Avertissement déposé avant un redémarrage (création d'une évaluation) :
+  // affiché une seule fois, puis effacé.
   try {
     const msg = sessionStorage.getItem('amcx-notice');
     if (msg) {
