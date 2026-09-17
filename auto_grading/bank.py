@@ -50,10 +50,15 @@ from sujet_store import Block, _gen_bid
 DEFAULT_BANK_ROOT = Path.home() / "Documents" / "AMCx-banque"
 
 # Version du cache `index.json`. Incrémentée quand la forme d'une entrée
-# change (v2 = ajout de `categories`, v3 = `variant_of` + `created_at`) :
-# `_read_or_rebuild_index` reconstruit alors tout seul, sans que l'utilisateur
-# ait rien à supprimer à la main.
-INDEX_VERSION = 3
+# change (v2 = ajout de `categories`, v3 = `variant_of` + `created_at`,
+# v4 = `text`, le texte cherchable) : `_read_or_rebuild_index` reconstruit
+# alors tout seul, sans que l'utilisateur ait rien à supprimer à la main.
+INDEX_VERSION = 4
+
+# Longueur retenue du texte cherchable d'une question. Un énoncé réel fait
+# 200 à 600 caractères ; la borne n'existe que pour qu'un bloc de texte collé
+# ne fasse pas gonfler l'index à lui seul.
+SEARCH_TEXT_MAX = 2000
 
 # Version du fichier `categories.json`.
 CATEGORIES_VERSION = 1
@@ -115,6 +120,37 @@ def _slug(s: str) -> str:
     s = s.encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
     return s[:50] or "untitled"
+
+
+def _fold(s: str) -> str:
+    """Minuscules, accents ôtés, blancs normalisés — les deux côtés d'une
+    recherche y passent, sinon « regression » ne trouve pas « régression »."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def search_text(kind: str, data: dict) -> str:
+    """Le texte sur lequel porte la recherche : **énoncé et réponses comprises**.
+
+    ⚠ La recherche ne regardait que le titre et les tags. Sur la banque d'un
+    seul cours ça se rattrape à l'œil ; sur plusieurs, non — on se souvient
+    d'une formulation (« celle où T vaut -4 »), pas d'un titre qu'on a écrit
+    une fois. C'était le premier obstacle réel au passage à l'échelle.
+
+    ⚠ Il est **dans l'index**, pas relu dans les fichiers : la recherche tourne
+    à chaque frappe, et rouvrir 3 000 fichiers à chaque touche annulerait tout
+    l'intérêt de l'index. Coût mesuré : environ 600 octets par question.
+    """
+    parts = [data.get("statement"), data.get("tex"),
+             data.get("tag"), data.get("title")]
+    for a in (data.get("answers") or []):
+        if isinstance(a, dict):
+            parts.append(a.get("text"))
+    for c in (data.get("grading_cases") or []):
+        if isinstance(c, dict):
+            parts.append(c.get("label"))
+    return _fold(" ".join(p for p in parts if p))[:SEARCH_TEXT_MAX]
 
 
 def _path_of(bank_id: str, slug: str) -> Path:
@@ -230,6 +266,9 @@ def _build_index_entries() -> list[dict]:
             # fichiers à chaque frappe de la recherche annulerait l'index.
             "variant_of":  (q.get("variant_of") or "").strip(),
             "created_at":  q.get("created_at", ""),
+            # Replié (minuscules, sans accents) une fois pour toutes : la
+            # recherche compare deux chaînes déjà normalisées.
+            "text":        search_text(q.get("kind", ""), q.get("data") or {}),
             "stats":       stats_summary(q),
         })
     return out
@@ -242,7 +281,22 @@ def rebuild_index() -> dict:
     idx = {"index_version": INDEX_VERSION, "mtime": _now(),
            "questions": entries}
     config.write_json_atomic(index_path(), idx)
+    # ⚠ Le cache est invalidé ici et pas seulement renseigné : la clé porte le
+    # mtime du fichier qu'on vient de réécrire, et une banque reconstruite dans
+    # la même seconde doit repartir de zéro.
+    _IDX_CACHE.clear()
     return idx
+
+
+# Index parsé, gardé en mémoire entre deux appels.
+#
+# ⚠ La recherche tourne à CHAQUE frappe, et `index.json` porte désormais le
+# texte cherchable : il pèse ~780 octets par question, soit plusieurs mégaoctets
+# sur une banque de plusieurs cours. Le relire et le re-parser à chaque touche
+# coûterait plus cher que tout le reste du filtrage réuni. Le contrôle de
+# fraîcheur, lui, est conservé tel quel — c'est lui qui garantit qu'on ne sert
+# pas un index périmé ; seul le `json.loads` est évité.
+_IDX_CACHE: dict = {}
 
 
 def _read_or_rebuild_index() -> dict:
@@ -259,6 +313,9 @@ def _read_or_rebuild_index() -> dict:
         files = list(qdir.glob("*.json"))
         if files and max(f.stat().st_mtime for f in files) > idx_mtime:
             return rebuild_index()
+        key = (str(ipath), idx_mtime, len(files))
+        if _IDX_CACHE.get("key") == key:
+            return _IDX_CACHE["idx"]
         idx = json.loads(ipath.read_text(encoding="utf-8"))
         if not isinstance(idx, dict) or "questions" not in idx:
             return rebuild_index()
@@ -267,6 +324,7 @@ def _read_or_rebuild_index() -> dict:
             return rebuild_index()
         if len(idx["questions"]) != len(files):
             return rebuild_index()
+        _IDX_CACHE["key"], _IDX_CACHE["idx"] = key, idx
         return idx
     except Exception:
         return rebuild_index()
@@ -276,7 +334,8 @@ def list_questions(filters: dict | None = None) -> list[dict]:
     """Liste les questions. Filtres optionnels :
     - `kind`   : str (exact match)
     - `tags`   : list[str] (any-match : au moins 1 tag commun)
-    - `q`      : str (substring sur title + tags, casse-insensible)
+    - `q`      : str — substring sur **titre, tags ET énoncé** (réponses
+                 comprises), accents et casse ignorés des deux côtés
     - `author` : str (substring sur author)
     - `category`      : str (uuid) — questions de ce nœud
     - `descendants`   : bool (défaut True) — inclure les sous-catégories
@@ -305,12 +364,14 @@ def list_questions(filters: dict | None = None) -> list[dict]:
         items = [q for q in items
                  if tagset.intersection({(t or "").lower() for t in (q.get("tags") or [])})]
 
-    qs = (filters.get("q") or "").strip().lower()
+    qs = _fold(filters.get("q") or "")
     if qs:
         def hit(item: dict) -> bool:
-            hay = (item.get("title", "") + " " +
-                   " ".join(item.get("tags") or [])).lower()
-            return qs in hay
+            # `text` est déjà replié ; titre et tags le sont à la volée.
+            if qs in (item.get("text") or ""):
+                return True
+            return qs in _fold(item.get("title", "") + " "
+                               + " ".join(item.get("tags") or []))
         items = [q for q in items if hit(q)]
 
     author = (filters.get("author") or "").strip().lower()

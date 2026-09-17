@@ -3372,6 +3372,45 @@ le panneau ne scrollant plus. Vérifié à 1500×1000, 1200×620 et 900×700 : l
 liste tient dans le panneau dans les trois cas. Le `<summary>` est `sticky` —
 c'est lui qui replie la section, il ne doit pas défiler hors de portée.
 
+#### La recherche porte sur l'ÉNONCÉ, pas seulement sur le titre
+
+`bank.search_text(kind, data)` assemble énoncé + réponses + tag + titre, replie
+(minuscules, accents ôtés) et borne à `SEARCH_TEXT_MAX` (2 000 caractères) ;
+`_build_index_entries` le range dans `index.json` sous la clé `text`
+(`INDEX_VERSION = 4`).
+
+⚠ **C'était le premier obstacle réel au passage à l'échelle.** Le filtre ne
+regardait que `title` et `tags` : sur la banque d'un seul cours ça se rattrape
+à l'œil, sur plusieurs non — on se souvient d'une formulation (« celle où T
+vaut −4 »), pas d'un titre écrit une fois.
+
+⚠ **Les accents sont repliés des DEUX côtés** (`_fold`) : « regression »
+trouve « régression ». Le texte est replié une fois, à l'écriture de l'index ;
+la requête l'est à chaque appel.
+
+⚠ **Le texte est dans l'INDEX, pas relu dans les fichiers** : la recherche
+tourne à chaque frappe, rouvrir 3 000 fichiers par touche annulerait l'index.
+Coût mesuré : ~780 octets par question (63 Ko → 146 Ko sur 107 questions).
+
+⚠ **D'où le cache de l'index parsé** (`_IDX_CACHE`, clé = chemin + mtime +
+nombre de fichiers). Le contrôle de fraîcheur est inchangé — c'est lui qui
+évite de servir un index périmé — seul le `json.loads` est sauté. Sans lui, une
+banque à 3 000 questions re-parsait 4 Mo de JSON **à chaque touche**.
+`rebuild_index()` vide le cache plutôt que de le renseigner : la clé porte le
+mtime du fichier qu'on vient de réécrire.
+
+⚠ **En ligne, `or=(title.ilike.…,data->>statement.ilike.…)`** : deux paramètres
+PostgREST séparés se combineraient en **ET** et ne rendraient jamais rien. La
+valeur est **entre guillemets** (`_ilike_value`) — une virgule ou une
+parenthèse tapée dans la recherche couperait sinon la liste `or=` en deux
+conditions. ⚠ Et là, **les accents ne sont pas ignorés** : `ilike` de Postgres
+l'est pour la casse, pas pour les diacritiques (il faudrait `unaccent`).
+
+**Mesuré sur une banque synthétique de 3 000 questions** (10 cours × 4
+chapitres × 3 sections, 170 nœuds) : `index.json` 4,1 Mo, `rebuild_index`
+240 ms, **listing complet 15 ms, recherche 16 ms**, sous-arbre d'un cours
+17 ms, `annotate` 8,5 ms. Le stockage n'est pas ce qui limite.
+
 #### Séparateurs glissables — le partage de l'espace appartient au lecteur
 
 Deux poignées sur `/banque`, un seul mécanisme (`makeGutter` dans

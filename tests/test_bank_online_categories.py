@@ -253,6 +253,28 @@ class TestListQuestions(OnlineCase):
                          ["Dans Tests"])
 
 
+class TestRechercheTexte(OnlineCase):
+    """⚠ `or=(…)` est la seule façon de faire un OU en PostgREST : deux
+    paramètres se combineraient en ET, et rien ne sortirait jamais."""
+
+    def titles(self, q):
+        return sorted(x["title"] for x in bo.list_questions({"q": q}))
+
+    def test_le_titre_reste_cherchable(self):
+        self.db.add_question("Régression simple", statement="xxx")
+        self.assertEqual(self.titles("simple"), ["Régression simple"])
+
+    def test_lenonce_est_cherchable(self):
+        self.db.add_question("Titre opaque", statement="On observe T = -4")
+        self.db.add_question("Autre", statement="rien")
+        self.assertEqual(self.titles("observe"), ["Titre opaque"])
+
+    def test_une_virgule_ne_coupe_pas_la_requete(self):
+        """Sans guillemets, la virgule scinderait le `or=` en deux conditions."""
+        self.db.add_question("Q", statement="a, b et c")
+        self.assertEqual(self.titles("a, b"), ["Q"])
+
+
 class TestRowMapping(OnlineCase):
     def test_categories_never_sent_as_a_column(self):
         # `categories` / `question_categories` sont une table de jonction : les

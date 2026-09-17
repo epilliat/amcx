@@ -221,11 +221,25 @@ def delete(bank_id: str) -> None:
              + urlencode({"id": f"eq.{bank_id}"}))
 
 
+def _ilike_value(q: str) -> str:
+    """Valeur `ilike` utilisable **dans** un `or=(…)` de PostgREST.
+
+    ⚠ Les guillemets ne sont pas décoratifs : une virgule ou une parenthèse
+    tapée dans la recherche couperait la liste `or=` en deux conditions. La
+    requête partirait alors en erreur — ou, pire, filtrerait sur autre chose.
+    """
+    v = q.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"*{v}*"'
+
+
 def list_questions(filters: dict | None = None) -> list[dict]:
     """Liste les questions visibles (status='public' + les miennes).
 
     Filtres :
-    - `q`           : substring case-insensitive sur title
+    - `q`           : substring case-insensitive sur **title et énoncé**.
+                      ⚠ Contrairement au local, les accents ne sont PAS ignorés
+                      (`ilike` de Postgres l'est pour la casse, pas pour les
+                      diacritiques — il faudrait l'extension `unaccent`).
     - `kind`        : type exact
     - `tags`        : list[str] - tags publics, overlap (au moins 1 commun)
     - `mes_favoris` : True → restreint à mes favoris (question_ratings)
@@ -245,7 +259,12 @@ def list_questions(filters: dict | None = None) -> list[dict]:
         tags_quoted = ",".join(f'"{t}"' for t in filters["tags"] if t)
         params["tags"] = f"ov.{{{tags_quoted}}}"
     if filters.get("q"):
-        params["title"] = f"ilike.*{filters['q'].strip()}*"
+        # ⚠ Titre ET énoncé, comme en local : on se souvient d'une formulation,
+        # pas d'un titre. `or=(…)` est la seule façon de faire un OU en
+        # PostgREST — deux paramètres se combineraient en ET.
+        needle = _ilike_value(filters["q"].strip())
+        params["or"] = (f"(title.ilike.{needle},"
+                        f"data->>statement.ilike.{needle})")
     if filters.get("status"):
         params["status"] = f"eq.{filters['status']}"
 

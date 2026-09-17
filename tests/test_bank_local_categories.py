@@ -367,5 +367,81 @@ class TestIndex(BankCase):
         self.assertTrue(qid)
 
 
+class TestRechercheTexte(BankCase):
+    """⚠ La recherche ne regardait que le titre et les tags. Sur la banque d'un
+    seul cours ça se rattrape à l'œil ; sur plusieurs, non — on se souvient
+    d'une formulation, pas d'un titre."""
+
+    def qcm(self, title, statement, answers=("a", "b"), tags=None):
+        q = bank.from_block(
+            {"kind": "question_qcm",
+             "data": {"tag": "q", "qtype": "single", "statement": statement,
+                      "answers": [{"text": a, "correct": i == 0}
+                                  for i, a in enumerate(answers)]}},
+            title=title, tags=tags or [])
+        bank.save(q)
+        return q["bank_id"]
+
+    def titles(self, q):
+        return sorted(x["title"] for x in bank.list_questions({"q": q}))
+
+    def test_lenonce_est_cherchable(self):
+        self.qcm("Titre opaque", "On observe une statistique T de -4.")
+        self.qcm("Autre", "Rien à voir.")
+        self.assertEqual(self.titles("statistique"), ["Titre opaque"])
+
+    def test_les_reponses_sont_cherchables(self):
+        self.qcm("Q1", "Énoncé neutre", answers=("orthogonale", "quelconque"))
+        self.assertEqual(self.titles("orthogonale"), ["Q1"])
+
+    def test_les_accents_sont_ignores_des_deux_cotes(self):
+        self.qcm("Q1", "Le résidu du modèle")
+        self.assertEqual(self.titles("residu"), ["Q1"])
+        self.assertEqual(self.titles("RÉSIDU"), ["Q1"])
+
+    def test_le_titre_et_les_tags_restent_cherchables(self):
+        self.qcm("Régression simple", "xxx", tags=["L3"])
+        self.assertEqual(self.titles("regression"), ["Régression simple"])
+        self.assertEqual(self.titles("l3"), ["Régression simple"])
+
+    def test_le_texte_est_dans_lindex(self):
+        """⚠ Dans l'index, pas relu dans les fichiers : la recherche tourne à
+        chaque frappe."""
+        self.qcm("Q1", "Le résidu du modèle")
+        entry = json.loads(bank.index_path().read_text(encoding="utf-8"))["questions"][0]
+        self.assertIn("residu", entry["text"])          # replié à l'écriture
+
+    def test_le_texte_est_borne(self):
+        self.qcm("Q1", "mot " * 2000)
+        entry = json.loads(bank.index_path().read_text(encoding="utf-8"))["questions"][0]
+        self.assertLessEqual(len(entry["text"]), bank.SEARCH_TEXT_MAX)
+
+
+class TestCacheIndex(BankCase):
+    """⚠ L'index parsé est gardé en mémoire : il porte le texte cherchable,
+    donc plusieurs mégaoctets sur une banque de plusieurs cours, et la
+    recherche tourne à chaque frappe."""
+
+    def test_une_ecriture_invalide_le_cache(self):
+        self.add_question("Q1")
+        self.assertEqual(len(bank.list_questions({})), 1)
+        self.add_question("Q2")
+        self.assertEqual(len(bank.list_questions({})), 2)
+
+    def test_une_suppression_invalide_le_cache(self):
+        qid = self.add_question("Q1")
+        bank.list_questions({})
+        bank.delete(qid)
+        self.assertEqual(bank.list_questions({}), [])
+
+    def test_un_classement_invalide_le_cache(self):
+        _inf, tests, _ic, _val = self.chapter()
+        qid = self.add_question("Q1")
+        bank.list_questions({})
+        bank.set_question_categories(qid, [tests["id"]])
+        got = bank.list_questions({"category": tests["id"]})
+        self.assertEqual([g["bank_id"] for g in got], [qid])
+
+
 if __name__ == "__main__":
     unittest.main()

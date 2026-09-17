@@ -19,11 +19,13 @@ class FakePostgrest:
         self.calls = []          # (method, table) de chaque requête émise
 
     # -- helpers de test ---------------------------------------------------
-    def add_question(self, title, author_id="me", status="public", tags=None):
+    def add_question(self, title, author_id="me", status="public", tags=None,
+                     statement=""):
         qid = str(uuid.uuid4())
         self.tables["bank_questions"].append({
             "id": qid, "author_id": author_id, "kind": "question_qcm",
-            "data": {}, "title": title, "tags": tags or [], "status": status,
+            "data": {"statement": statement},
+            "title": title, "tags": tags or [], "status": status,
             "version": 1, "source_project": "", "created_at": "2026-01-01",
             "modified_at": "2026-01-01"})
         return qid
@@ -103,12 +105,39 @@ class FakePostgrest:
             elif expr.startswith("ilike."):
                 pat = expr[6:].replace("*", "")
                 out = [r for r in out if pat.lower() in str(r.get(field, "")).lower()]
+            elif field == "or":
+                # `or=(a.ilike."*x*",b->>c.ilike."*x*")` — un OU, que deux
+                # paramètres séparés ne sauraient pas exprimer (ils font un ET).
+                out = [r for r in out if self._any_of(r, expr)]
             elif expr.startswith("ov."):
                 vals = {v.strip('"') for v in expr[4:-1].split(",") if v}
                 out = [r for r in out if vals & set(r.get(field) or [])]
             else:
                 raise AssertionError(f"filtre non simulé : {field}={expr}")
         return out
+
+    def _any_of(self, row, expr):
+        parts, depth, cur, quoted = [], 0, "", False
+        for ch in expr.strip()[1:-1]:          # ôte les parenthèses
+            if ch == '"' and not cur.endswith("\\"):
+                quoted = not quoted
+            if ch == "," and not quoted and depth == 0:
+                parts.append(cur); cur = ""; continue
+            cur += ch
+        if cur:
+            parts.append(cur)
+        for cond in parts:
+            col, op, val = cond.split(".", 2)
+            val = val.strip('"').replace('\\"', '"')
+            got = row.get(col)
+            if "->>" in col:                   # accès JSON : data->>statement
+                base, key = col.split("->>")
+                got = (row.get(base) or {}).get(key)
+            if op == "ilike" and val.replace("*", "").lower() in str(got or "").lower():
+                return True
+            if op == "eq" and str(got) == val:
+                return True
+        return False
 
     def _project(self, table, row):
         out = dict(row)
