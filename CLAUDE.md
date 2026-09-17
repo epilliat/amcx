@@ -3414,6 +3414,50 @@ chapitres × 3 sections, 170 nœuds) : `index.json` 4,1 Mo, `rebuild_index`
 240 ms, **listing complet 15 ms, recherche 16 ms**, sous-arbre d'un cours
 17 ms, `annotate` 8,5 ms. Le stockage n'est pas ce qui limite.
 
+#### L'arbre à l'échelle : repli par défaut, filtre, et portée persistée
+
+Trois changements dans [bank_tree.js](auto_grading/front/static/bank_tree.js),
+qui tiennent ensemble : à dix cours, l'arbre fait des centaines de nœuds.
+
+- **Repli par défaut aux deux premiers niveaux** (`_applyDefaults`) : on voit
+  les cours et leurs chapitres, pas les sections. ⚠ Il ne s'applique qu'à la
+  **première** ouverture d'une banque — d'où `this.stored`, qui distingue
+  « aucune préférence » de « rien n'est replié », deux états qu'un ensemble
+  vide confondait et qui demandent des affichages opposés.
+- **Champ de filtre sur les noms** (`.bt-search`), à partir de 12 nœuds — en
+  dessous, il coûte une ligne et ne sert à rien. Accents repliés des deux
+  côtés, comme la recherche de questions. Il montre les nœuds qui
+  correspondent, **leurs ancêtres** (sans eux on perd le chapitre auquel
+  appartient une section homonyme) et **leurs descendants** (sans eux on ne
+  peut pas descendre dans le cours qu'on vient de trouver).
+  ⚠ **Sous filtre, le repli ne s'applique plus** : un nœud qui correspond mais
+  dort dans une branche repliée resterait introuvable — exactement ce qu'on
+  venait chercher. Le caret affiche alors « ▾ », sinon il dirait le contraire
+  de ce qu'on voit.
+  ⚠ Le re-rendu détruit le champ : le focus et la position du curseur sont
+  rendus après coup, sinon on ne peut pas taper deux lettres de suite.
+- **La sélection EST la portée, et elle est persistée** (`selected` dans le
+  même `localStorage` que le repli, clé par banque). C'est ce qui rend les
+  neuf autres cours invisibles quand on n'en travaille qu'un : la page
+  s'ouvre déjà filtrée. La portée est rappelée **à côté du compte**
+  (`renderCount` → `.bq-scope`, avec un ✕) — l'arbre peut être défilé loin de
+  la ligne surlignée, et on se demanderait pourquoi la banque ne montre que
+  12 questions sur 3 000.
+  ⚠ `setStorageKey` relit **tout** l'état, pas seulement le repli : sans ça la
+  portée de la banque précédente filtrerait la nouvelle, sur un id qui n'y
+  existe pas. Et elle ré-émet le filtre — la page a déjà chargé ses questions
+  sans filtre au moment où la banque active devient connue.
+  ⚠ Une portée qui désigne un nœud **disparu** est effacée à la lecture
+  (`_reindex`) : filtrer sur un id fantôme rendrait une liste vide sans qu'on
+  voie pourquoi.
+
+⚠ **`.banque-list-rows` a `flex-basis: 0`, pas `auto`.** Avec `auto`, la liste
+réclame la hauteur de ses 3 000 lignes comme base, et le rétrécissement —
+proportionnel à la base — écrasait l'arbre à un cinquième de sa place (mesuré :
+125 px au lieu de 340). À 0, l'arbre garde sa hauteur et la liste prend ce qui
+reste ; quand l'écran est court, c'est elle qui touche son `min-height` et
+l'arbre cède à son tour.
+
 #### Séparateurs glissables — le partage de l'espace appartient au lecteur
 
 Deux poignées sur `/banque`, un seul mécanisme (`makeGutter` dans

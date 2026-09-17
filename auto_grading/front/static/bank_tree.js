@@ -51,25 +51,65 @@
     }, opts || {});
     this.nodes = [];
     this.byId = {};
-    this.collapsed = this._loadCollapsed();
+    this.collapsed = new Set();
+    this.query = '';       // filtre texte sur les noms de catégories
     this.picked = new Set();
     this.selected = null;       // id, '' = toutes, '__none__' = sans catégorie
     this.descendants = true;
     this.editing = null;        // id du nœud en cours de renommage
     this.adding = null;         // parent_id du nœud en cours de création
+    this._loadState();
   }
 
-  // -- persistance du repli (par banque) ------------------------------------
-  Tree.prototype._loadCollapsed = function () {
-    try {
-      const raw = localStorage.getItem(this.opts.storageKey);
-      return new Set(raw ? JSON.parse(raw) : []);
-    } catch (e) { return new Set(); }
+  // -- persistance (par banque) : repli ET portée ----------------------------
+  //
+  // ⚠ `this.stored` dit si une préférence EXISTE, ce qu'un ensemble vide ne
+  // dit pas : « rien de replié » et « jamais ouvert » demandent deux affichages
+  // opposés — le second se replie tout seul (cf. `_applyDefaults`).
+  //
+  // ⚠ La forme d'origine était un simple tableau d'ids repliés. Elle est
+  // relue telle quelle : une préférence posée avant ce changement ne doit pas
+  // se perdre.
+  Tree.prototype._loadState = function () {
+    this.stored = false;
+    let raw = null;
+    try { raw = localStorage.getItem(this.opts.storageKey); } catch (e) {}
+    if (!raw) { this.collapsed = new Set(); return; }
+    this.stored = true;
+    let v;
+    try { v = JSON.parse(raw); } catch (e) { this.collapsed = new Set(); return; }
+    if (Array.isArray(v)) { this.collapsed = new Set(v); return; }   // forme v1
+    this.collapsed = new Set(v.collapsed || []);
+    if (this.opts.mode === 'filter') {
+      this.selected = v.selected != null ? v.selected : null;
+      if (typeof v.descendants === 'boolean') this.descendants = v.descendants;
+    }
   };
-  Tree.prototype._saveCollapsed = function () {
+  Tree.prototype._save = function () {
+    this.stored = true;
     try {
-      localStorage.setItem(this.opts.storageKey, JSON.stringify([...this.collapsed]));
-    } catch (e) { /* mode privé : le repli ne survit pas, sans gravité */ }
+      localStorage.setItem(this.opts.storageKey, JSON.stringify({
+        collapsed: [...this.collapsed],
+        selected: this.opts.mode === 'filter' ? this.selected : null,
+        descendants: this.descendants,
+      }));
+    } catch (e) { /* mode privé : la préférence ne survit pas, sans gravité */ }
+  };
+
+  // ⚠ Premier affichage d'une banque : on ne déplie que les deux premiers
+  // niveaux. Une banque qui rassemble plusieurs cours en a des centaines de
+  // nœuds — tout déplier, c'est une liste de questions repoussée hors de
+  // l'écran et un arbre qu'on parcourt à la molette.
+  Tree.prototype._applyDefaults = function () {
+    if (this.stored || !this.nodes.length) return;
+    this.nodes.forEach(n => { if (n.depth >= 2) this.collapsed.add(n.id); });
+  };
+
+  // La portée choisie doit être VISIBLE au rechargement, sinon on cherche
+  // pourquoi la liste est filtrée.
+  Tree.prototype._revealSelected = function () {
+    let p = (this.byId[this.selected] || {}).parent_id;
+    while (p) { this.collapsed.delete(p); p = (this.byId[p] || {}).parent_id; }
   };
 
   Tree.prototype._status = function (msg, cls) {
@@ -83,21 +123,33 @@
   // l'arbre séparément juste après.
   Tree.prototype.load = function (j) {
     this.nodes = (j && j.nodes) || [];
-    this.maxDepth = (j && j.max_depth) || 4;
+    this.maxDepth = (j && j.max_depth) || 6;
     this.canEdit = this.opts.canEdit && !!(j && j.can_edit);
+    this._reindex();
+    this.render();
+  };
+
+  /* Index par id, défauts de repli, et contrôle de la portée mémorisée. */
+  Tree.prototype._reindex = function () {
     this.byId = {};
     this.nodes.forEach(n => { this.byId[n.id] = n; });
-    this.render();
+    this._applyDefaults();
+    // ⚠ Une portée qui désigne un nœud disparu depuis (supprimé ailleurs,
+    // autre banque) ne doit pas filtrer sur un id fantôme : la liste serait
+    // vide sans qu'on voie pourquoi.
+    if (this.selected && this.selected !== '__none__' && !this.byId[this.selected]) {
+      this.selected = null;
+    }
+    if (this.selected) this._revealSelected();
   };
 
   Tree.prototype.refresh = async function () {
     try {
       const j = await api('/api/bank/categories');
       this.nodes = j.nodes || [];
-      this.maxDepth = j.max_depth || 4;
+      this.maxDepth = j.max_depth || 6;
       this.canEdit = this.opts.canEdit && !!j.can_edit;
-      this.byId = {};
-      this.nodes.forEach(n => { this.byId[n.id] = n; });
+      this._reindex();
       this.render();
     } catch (e) {
       this.host.textContent = '';
@@ -110,12 +162,45 @@
   };
 
   Tree.prototype._hidden = function (node) {
+    // ⚠ Sous filtre, le repli ne s'applique PLUS : un nœud qui correspond à la
+    // recherche mais dort dans une branche repliée resterait introuvable —
+    // exactement ce qu'on venait chercher.
+    if (this.query) return !this._matching.has(node.id);
     let p = node.parent_id;
     while (p) {
       if (this.collapsed.has(p)) return true;
       p = (this.byId[p] || {}).parent_id;
     }
     return false;
+  };
+
+  function fold(s) {
+    return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase().trim();
+  }
+
+  /* Ensemble des nœuds à montrer pour la recherche courante : ceux qui
+   * correspondent, **leurs ancêtres** (sans eux on perd le chapitre auquel
+   * appartient une section homonyme) et **leurs descendants** (sans eux on ne
+   * peut pas descendre dans le cours qu'on vient de trouver). */
+  Tree.prototype._computeMatching = function () {
+    this._matching = new Set();
+    const q = fold(this.query);
+    if (!q) return;
+    const hit = new Set();
+    this.nodes.forEach(n => { if (fold(n.name).includes(q)) hit.add(n.id); });
+    hit.forEach(id => {
+      this._matching.add(id);
+      let p = (this.byId[id] || {}).parent_id;
+      while (p) { this._matching.add(p); p = (this.byId[p] || {}).parent_id; }
+    });
+    // Descendants : l'ordre préfixe garantit qu'un parent est vu avant ses fils.
+    this.nodes.forEach(n => {
+      if (n.parent_id && (hit.has(n.parent_id) || this._descOfHit.has(n.parent_id))) {
+        this._matching.add(n.id);
+        this._descOfHit.add(n.id);
+      }
+    });
   };
 
   Tree.prototype._hasKids = function (id) {
@@ -128,6 +213,12 @@
     this.host.textContent = '';
     this.host.classList.add('bank-tree');
     this.host.classList.toggle('bank-tree-pick', !filter);
+    this._descOfHit = new Set();
+    this._computeMatching();
+
+    // ⚠ Le champ n'apparaît qu'au-delà d'une poignée de nœuds : sur un arbre
+    // qu'on embrasse du regard, il coûte une ligne et ne sert à rien.
+    if (this.nodes.length > 12) this.host.appendChild(this._searchRow());
 
     // Arbre vide : « Toutes », « Sans catégorie » et le bouton de portée ne
     // peuvent rien filtrer. On ne montre que de quoi démarrer.
@@ -138,7 +229,7 @@
       return;
     }
 
-    if (filter) {
+    if (filter && !this.query) {
       this.host.appendChild(this._pseudoRow('', 'Toutes les questions', 'bt-all'));
     }
 
@@ -150,7 +241,11 @@
 
     if (this.adding === '') this.host.appendChild(this._newRow(null, 1));
 
-    if (filter) {
+    if (filter && this.query && !this._matching.size) {
+      this.host.appendChild(el('p', 'bt-empty', 'Aucune catégorie ne correspond.'));
+    }
+
+    if (filter && !this.query) {
       this.host.appendChild(this._pseudoRow('__none__', 'Sans catégorie', 'bt-none'));
       const opt = el('label', 'bt-desc-toggle');
       const cb = el('input');
@@ -168,6 +263,39 @@
     if (this.canEdit) this.host.appendChild(this._addRootBtn());
   };
 
+  Tree.prototype._searchRow = function () {
+    const row = el('div', 'bt-search');
+    const inp = el('input');
+    inp.type = 'text';
+    inp.placeholder = 'filtrer les catégories…';
+    inp.value = this.query;
+    inp.autocomplete = 'off';
+    inp.addEventListener('input', () => {
+      this.query = inp.value;
+      this.render();
+      // Le re-rendu détruit le champ : on rend le focus et la position du
+      // curseur, sinon on ne peut pas taper deux lettres de suite.
+      const next = this.host.querySelector('.bt-search input');
+      if (next) { next.focus(); next.setSelectionRange(next.value.length, next.value.length); }
+    });
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.query) {
+        e.stopPropagation();
+        this.query = '';
+        this.render();
+      }
+    });
+    row.appendChild(inp);
+    if (this.query) {
+      const clr = el('button', 'bt-search-clear', '✕');
+      clr.type = 'button';
+      clr.title = 'effacer le filtre';
+      clr.addEventListener('click', () => { this.query = ''; this.render(); });
+      row.appendChild(clr);
+    }
+    return row;
+  };
+
   Tree.prototype._addRootBtn = function () {
     const add = el('button', 'btn btn-tiny bt-add-root', '+ chapitre');
     add.type = 'button';
@@ -181,11 +309,19 @@
     row.appendChild(el('span', 'bt-caret'));
     row.appendChild(el('span', 'bt-label', label));
     row.addEventListener('click', () => {
-      this.selected = id;
-      this._emitFilter();
-      this.render();
+      this._select(id);
     });
     return row;
+  };
+
+  // ⚠ La sélection EST la portée, et elle est persistée : c'est ce qui rend
+  // les neuf autres cours invisibles quand on n'en travaille qu'un. Sans elle,
+  // on repose le filtre à chaque ouverture de la page.
+  Tree.prototype._select = function (id) {
+    this.selected = id;
+    this._save();
+    this._emitFilter();
+    this.render();
   };
 
   Tree.prototype._row = function (n) {
@@ -198,13 +334,15 @@
     // caret : plier/déplier, séparé du label (clic distinct)
     const caret = el('span', 'bt-caret');
     if (this._hasKids(n.id)) {
-      caret.textContent = this.collapsed.has(n.id) ? '▸' : '▾';
+      // Sous filtre, les enfants sont montrés quel que soit le repli : afficher
+      // « ▸ » au-dessus de fils visibles dirait le contraire de ce qu'on voit.
+      caret.textContent = (!this.query && this.collapsed.has(n.id)) ? '▸' : '▾';
       caret.classList.add('bt-caret-on');
       caret.addEventListener('click', (e) => {
         e.stopPropagation();
         if (this.collapsed.has(n.id)) this.collapsed.delete(n.id);
         else this.collapsed.add(n.id);
-        this._saveCollapsed();
+        this._save();
         this.render();
       });
     }
@@ -234,11 +372,7 @@
     const label = el('span', 'bt-label', n.name);
     label.title = n.path.join(' › ');
     if (filter) {
-      label.addEventListener('click', () => {
-        this.selected = n.id;
-        this._emitFilter();
-        this.render();
-      });
+      label.addEventListener('click', () => { this._select(n.id); });
     }
     if (this.canEdit) {
       label.addEventListener('dblclick', (e) => {
@@ -386,7 +520,7 @@
       if (!ok) return;
       await api(url + '?mode=reparent', {method: 'DELETE'});
     }
-    if (this.selected === n.id) this.selected = '';
+    if (this.selected === n.id) { this.selected = ''; this._save(); }
     this.picked.delete(n.id);
     this._status('Catégorie supprimée ✓');
     await this.refresh();
@@ -420,8 +554,17 @@
   Tree.prototype.setStorageKey = function (k) {
     if (!k || k === this.opts.storageKey) return;
     this.opts.storageKey = k;
-    this.collapsed = this._loadCollapsed();
+    // ⚠ TOUT l'état, pas seulement le repli : la portée aussi est propre à une
+    // banque. Ne relire que le repli laisserait celle de la banque précédente
+    // filtrer la nouvelle, sur un id qui n'y existe même pas.
+    this.selected = null;
+    this.descendants = true;
+    this._loadState();
+    this._reindex();
     this.render();
+    // La portée restaurée doit atteindre la LISTE : la page a déjà chargé ses
+    // questions sans filtre au moment où la banque active est connue.
+    if (this.selected) this._emitFilter();
   };
   Tree.prototype.getPicked = function () { return [...this.picked]; };
   Tree.prototype.setPicked = function (ids) {
@@ -436,6 +579,19 @@
     });
     this.render();
   };
+  /* La portée active, telle qu'on peut l'écrire ailleurs sur la page.
+   * ⚠ L'arbre peut être défilé loin de la ligne surlignée : sans rappel à
+   * côté de la liste, on cherche pourquoi elle ne montre que 12 questions. */
+  Tree.prototype.scope = function () {
+    if (this.selected === '__none__') {
+      return {label: 'Sans catégorie', title: 'questions non classées'};
+    }
+    const n = this.byId[this.selected];
+    if (!n) return null;
+    return {label: n.name, title: n.path.join(' › ')};
+  };
+  Tree.prototype.clearScope = function () { this._select(''); };
+
   Tree.prototype.pathOf = function (id) {
     const n = this.byId[id];
     return n ? n.path : null;

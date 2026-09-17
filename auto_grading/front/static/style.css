@@ -3510,7 +3510,20 @@ body.bq-resizing-v, body.bq-resizing-h { user-select: none; }
 }
 .bq-filter-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .bq-filter-row label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #555; }
-.banque-count { font-size: 11px; color: #888; margin-bottom: 6px; padding: 0 2px; }
+.banque-count {
+  font-size: 11px; color: #888; margin-bottom: 6px; padding: 0 2px;
+  display: flex; align-items: center; gap: 4px;
+}
+.bq-scope {
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: #eef3fc; color: #1f4f9e; font-weight: 600;
+  border-radius: 7px; padding: 0 6px;
+}
+.bq-scope-clear {
+  border: 0; background: none; cursor: pointer; color: #8a8f98;
+  font-size: 11px; line-height: 1; padding: 0 2px;
+}
+.bq-scope-clear:hover { color: #c33; }
 .banque-empty { color: #888; font-style: italic; padding: 16px; text-align: center; font-size: 13px; }
 .banque-err { color: #c33; }
 
@@ -3519,7 +3532,13 @@ body.bq-resizing-v, body.bq-resizing-h { user-select: none; }
    arbre très déplié la réduirait à rien. */
 .banque-list-rows {
   display: flex; flex-direction: column; gap: 2px;
-  flex: 1 1 auto; min-height: 120px; overflow-y: auto;
+  /* ⚠ `flex-basis: 0`, pas `auto` : avec `auto`, la liste réclame la hauteur
+     de ses 3 000 lignes comme base, et le rétrécissement — proportionnel à la
+     base — écrase l'arbre à 120 px au lieu de ses 34 vh. Mesuré : l'arbre
+     tombait à un cinquième de sa place. À 0, l'arbre garde sa hauteur et la
+     liste prend ce qui reste ; quand l'écran est court, c'est elle qui touche
+     son `min-height` et l'arbre cède à son tour. */
+  flex: 1 1 0; min-height: 120px; overflow-y: auto;
 }
 .banque-q-row {
   display: flex; align-items: center; gap: 6px;
@@ -4375,6 +4394,25 @@ body.letters-stale .ans-char::after { content: ' ⚠'; text-decoration: none; }
 .bq-cats > summary::before { content: '▸ '; font-size: 9px; }
 .bq-cats[open] > summary::before { content: '▾ '; }
 .bq-cats-status { font-size: 11px; padding: 2px 6px; color: var(--tx-muted); }
+/* Filtre de l'arbre — collant en haut de sa zone de défilement : sur un arbre
+   de plusieurs cours, un champ qui part avec le défilement est un champ qu'on
+   ne retrouve pas. */
+.bt-search {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 4px;
+  background: #fff; padding: 2px 2px 5px;
+}
+.bt-search input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 3px 6px; font: inherit; font-size: 11.5px;
+  border: 1px solid var(--bd-faint, #e3e4e8); border-radius: 4px;
+}
+.bt-search input:focus { outline: none; border-color: var(--accent, #2769d8); }
+.bt-search-clear {
+  flex: 0 0 auto; border: 0; background: none; cursor: pointer;
+  color: var(--tx-muted, #888); font-size: 12px; padding: 0 3px;
+}
+.bt-search-clear:hover { color: var(--danger, #c33); }
 .bq-cats-status.err { color: var(--danger); }
 
 /* Chemins de catégorie : sur une ligne de liste et sur la fiche question */

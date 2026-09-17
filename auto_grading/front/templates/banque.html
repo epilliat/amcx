@@ -573,11 +573,35 @@ async function reloadList() {
   renderList(items, null);
 }
 
+/* Le compte, et la PORTÉE si une catégorie filtre la liste.
+ * ⚠ L'arbre peut être défilé loin de la ligne surlignée : sans ce rappel, on
+ * se demande pourquoi la banque ne montre que 12 questions sur 3 000.
+ * ⚠ `textContent` : un nom de catégorie vient d'une banque partagée. */
+function renderCount(cnt, n) {
+  cnt.textContent = '';
+  cnt.appendChild(document.createTextNode(n + ' question(s)'));
+  const sc = catTree && catTree.scope();
+  if (!sc) return;
+  cnt.appendChild(document.createTextNode(' dans '));
+  const tag = document.createElement('span');
+  tag.className = 'bq-scope';
+  tag.title = sc.title;
+  tag.textContent = sc.label;
+  cnt.appendChild(tag);
+  const clr = document.createElement('button');
+  clr.type = 'button';
+  clr.className = 'bq-scope-clear';
+  clr.title = 'voir toute la banque';
+  clr.textContent = '✕';
+  clr.addEventListener('click', () => catTree.clearScope());
+  cnt.appendChild(clr);
+}
+
 function renderList(items, err) {
   const host = document.getElementById('bq-list');
   const cnt = document.getElementById('bq-count');
   if (err) { showErr(host, err); cnt.textContent = ''; return; }
-  cnt.textContent = items.length + ' question(s)';
+  renderCount(cnt, items.length);
   if (!items.length) {
     host.innerHTML = '<p class="banque-empty">Aucune question.</p>';
     return;
